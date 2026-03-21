@@ -684,112 +684,27 @@ export function DashboardApp(): JSX.Element {
   }
 
   const workspaceFocused = selectedVm !== null;
+  const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
 
   return (
     <>
       <main className="app-shell" onClick={() => setOpenVmMenuId(null)}>
-        <header className="app-topbar" onClick={(event) => event.stopPropagation()}>
-          <div className="app-brand">
-            <p className="app-brand__eyebrow">Parallaize Control Plane</p>
-            <div className="app-brand__row">
-              <h1 className="app-brand__title">VM rail</h1>
-              <span
-                className={joinClassNames(
-                  "surface-pill",
-                  providerReady ? "surface-pill--success" : "surface-pill--warning",
-                )}
-              >
-                {providerReady ? "Provider ready" : "Provider blocked"}
-              </span>
-            </div>
-            <p className="app-brand__copy">{summary.provider.detail}</p>
-          </div>
-
-          <div className="app-topbar__stats">
-            <MiniStat
-              label="Running"
-              value={`${summary.metrics.runningVmCount}/${summary.metrics.totalVmCount}`}
-            />
-            <MiniStat label="CPU" value={String(summary.metrics.totalCpu)} />
-            <MiniStat label="RAM" value={formatRam(summary.metrics.totalRamMb)} />
-          </div>
-
-          <div className="app-topbar__actions">
-            {supportsLiveDesktop ? (
-              <button
-                className={joinClassNames(
-                  "button button--ghost",
-                  showLivePreviews ? "button--selected" : "",
-                )}
-                type="button"
-                onClick={() => setShowLivePreviews((current) => !current)}
-                aria-pressed={showLivePreviews}
-              >
-                {showLivePreviews ? "Live previews on" : "Live previews off"}
-              </button>
-            ) : (
-              <span className="surface-pill">Synthetic previews</span>
-            )}
-            <button
-              className="button button--ghost"
-              type="button"
-              onClick={() =>
-                setThemeMode((current) => (current === "dark" ? "light" : "dark"))
-              }
-            >
-              {themeMode === "dark" ? "Light mode" : "Dark mode"}
-            </button>
-            {authEnabled ? (
-              <button
-                className="button button--ghost"
-                type="button"
-                onClick={() =>
-                  void (async () => {
-                    try {
-                      await postJson<AuthStatus>("/api/auth/logout", {});
-                    } finally {
-                      requireLogin();
-                    }
-                  })()
-                }
-              >
-                Log out
-              </button>
-            ) : null}
-            {selectedVm ? (
-              <button
-                className="button button--ghost"
-                type="button"
-                onClick={() => {
-                  setSelectedVmId(null);
-                  setSidePanelCollapsed(false);
-                }}
-              >
-                Close workspace
-              </button>
-            ) : null}
-            <button
-              className="button button--primary"
-              type="button"
-              onClick={() => setShowCreateDialog(true)}
-            >
-              New VM
-            </button>
-          </div>
-        </header>
-
         {notice || busyLabel ? (
           <div
-            className={joinClassNames(
-              "notice-bar",
-              notice ? noticeToneClassName(notice.tone) : "notice-bar--info",
-            )}
+            className="app-shell__notice-stack"
             onClick={(event) => event.stopPropagation()}
           >
-            <span>{notice?.message ?? "Working..."}</span>
-            {busyLabel ? (
-              <span className="surface-pill surface-pill--busy mono-font">{busyLabel}</span>
-            ) : null}
+            <div
+              className={joinClassNames(
+                "notice-bar",
+                notice ? noticeToneClassName(notice.tone) : "notice-bar--info",
+              )}
+            >
+              <span>{notice?.message ?? "Working..."}</span>
+              {busyLabel ? (
+                <span className="surface-pill surface-pill--busy mono-font">{busyLabel}</span>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
@@ -798,47 +713,109 @@ export function DashboardApp(): JSX.Element {
           data-focused={workspaceFocused ? "true" : "false"}
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="workspace-shell__top">
-            <div className="workspace-shell__meta">
-              <div className="workspace-shell__meta-main">
-                <p className="workspace-shell__eyebrow">Workspaces</p>
-                <h2 className="workspace-shell__title">
-                  {workspaceFocused ? "VM rail" : "Choose a workspace"}
-                </h2>
-                <p className="workspace-shell__copy">
-                  {workspaceFocused
-                    ? `${summary.metrics.runningVmCount}/${summary.metrics.totalVmCount} running`
-                    : "All VMs stay visible here. Open one to drop into the desktop below."}
-                </p>
+          <aside className="workspace-rail">
+            <div className="workspace-rail__header">
+              <div className="workspace-rail__brand">
+                <p className="workspace-shell__eyebrow">Parallaize</p>
+                <div className="workspace-rail__headline">
+                  <h1 className="workspace-rail__title">
+                    {workspaceFocused ? "Workspace switcher" : "Workspaces"}
+                  </h1>
+                  <span
+                    className={joinClassNames(
+                      "surface-pill",
+                      providerReady ? "surface-pill--success" : "surface-pill--warning",
+                    )}
+                  >
+                    {providerReady ? "Provider ready" : "Provider blocked"}
+                  </span>
+                </div>
+                <p className="workspace-rail__copy">{summary.provider.detail}</p>
               </div>
 
-              <div className="workspace-shell__meta-tray">
+              <div className="workspace-rail__meta">
+                <MiniStat
+                  label="Running"
+                  value={`${summary.metrics.runningVmCount}/${summary.metrics.totalVmCount}`}
+                />
+                <MiniStat label="CPU" value={String(summary.metrics.totalCpu)} />
+                <MiniStat label="RAM" value={formatRam(summary.metrics.totalRamMb)} />
+              </div>
+
+              <div className="chip-row workspace-rail__chips">
                 <span className="surface-pill">{summary.provider.kind}</span>
                 <span className="surface-pill">
                   {summary.templates.length} template{summary.templates.length === 1 ? "" : "s"}
                 </span>
                 <span className="surface-pill">
-                  {summary.jobs.filter((job) => job.status === "running").length} active job
-                  {summary.jobs.filter((job) => job.status === "running").length === 1
-                    ? ""
-                    : "s"}
+                  {runningJobCount} active job{runningJobCount === 1 ? "" : "s"}
                 </span>
               </div>
             </div>
 
-            <div className="vm-strip">
+            <div className="workspace-rail__toolbar">
               <button
-                className="create-tile"
+                className="button button--primary button--full"
                 type="button"
                 onClick={() => setShowCreateDialog(true)}
               >
-                <span className="create-tile__mark">+</span>
-                <span className="create-tile__label">New workspace</span>
-                <span className="create-tile__copy">
-                  Launch from an existing environment template.
-                </span>
+                New VM
               </button>
 
+              {supportsLiveDesktop ? (
+                <button
+                  className={joinClassNames(
+                    "button button--ghost",
+                    showLivePreviews ? "button--selected" : "",
+                  )}
+                  type="button"
+                  onClick={() => setShowLivePreviews((current) => !current)}
+                  aria-pressed={showLivePreviews}
+                >
+                  {showLivePreviews ? "Live previews on" : "Live previews off"}
+                </button>
+              ) : (
+                <span className="surface-pill">Synthetic previews</span>
+              )}
+
+              <button
+                className="button button--ghost"
+                type="button"
+                onClick={() =>
+                  setThemeMode((current) => (current === "dark" ? "light" : "dark"))
+                }
+              >
+                {themeMode === "dark" ? "Light mode" : "Dark mode"}
+              </button>
+
+              {authEnabled ? (
+                <button
+                  className="button button--ghost"
+                  type="button"
+                  onClick={() =>
+                    void (async () => {
+                      try {
+                        await postJson<AuthStatus>("/api/auth/logout", {});
+                      } finally {
+                        requireLogin();
+                      }
+                    })()
+                  }
+                >
+                  Log out
+                </button>
+              ) : null}
+            </div>
+
+            <div className="workspace-rail__list-head">
+              <p className="workspace-shell__eyebrow">Workspace rail</p>
+              <span className="workspace-rail__list-count">
+                {summary.metrics.totalVmCount} workspace
+                {summary.metrics.totalVmCount === 1 ? "" : "s"}
+              </span>
+            </div>
+
+            <div className="vm-strip">
               {deferredVms.map((vm) => (
                 <VmTile
                   key={vm.id}
@@ -861,114 +838,128 @@ export function DashboardApp(): JSX.Element {
               {deferredVms.length === 0 ? (
                 <div className="empty-state">
                   <p className="empty-state__eyebrow">No VMs yet</p>
-                  <h3 className="empty-state__title">Start with a template-backed workspace.</h3>
+                  <h3 className="empty-state__title">Launch a workspace to populate the rail.</h3>
                   <p className="empty-state__copy">
-                    The rail expands to fill the screen until you open a desktop. Create the
-                    first VM to switch into the split-screen flow.
+                    Each workspace stays selectable here with a preview, so the center stage can
+                    remain dedicated to the live desktop.
                   </p>
                 </div>
               ) : null}
             </div>
-          </div>
+          </aside>
+
+          <section className="workspace-stage">
+            <div
+              className={joinClassNames(
+                "workspace-stage__surface",
+                selectedVm ? "" : "workspace-stage__surface--idle",
+              )}
+            >
+              {selectedVm ? (
+                !currentDetail ? (
+                  <div className="workspace-stage__placeholder">
+                    <div className="workspace-stage__placeholder-block skeleton-shell" />
+                  </div>
+                ) : currentDetail.vm.session?.kind === "vnc" &&
+                  currentDetail.vm.session.webSocketPath ? (
+                  <NoVncViewport
+                    className="workspace-stage__viewport"
+                    surfaceClassName="workspace-stage__canvas"
+                    webSocketPath={currentDetail.vm.session.webSocketPath}
+                    showHeader={false}
+                    statusMode="overlay"
+                  />
+                ) : (
+                  <div className="workspace-fallback">
+                    <StaticPatternPreview vm={currentDetail.vm} variant="stage" />
+                    <div className="workspace-fallback__copy">
+                      <span className="surface-pill surface-pill--busy">
+                        {desktopFallbackBadge(currentDetail)}
+                      </span>
+                      <p>{desktopFallbackMessage(currentDetail)}</p>
+                    </div>
+                  </div>
+                )
+              ) : (
+                <EmptyWorkspaceStage
+                  summary={summary}
+                  onCreate={() => setShowCreateDialog(true)}
+                />
+              )}
+
+              {selectedVm ? (
+                <div className="workspace-stage__chrome">
+                  <div className="workspace-stage__chrome-top">
+                    <div className="workspace-stage__identity">
+                      <p className="workspace-stage__eyebrow">
+                        {currentDetail?.template?.name ?? "Loading template"}
+                      </p>
+                      <div className="workspace-stage__title-row">
+                        <h3 className="workspace-stage__title">{selectedVm.name}</h3>
+                        <StatusBadge status={selectedVm.status}>{selectedVm.status}</StatusBadge>
+                      </div>
+                      <p className="workspace-stage__copy">
+                        {formatResources(selectedVm.resources)}
+                        {currentDetail?.vm.session?.display
+                          ? ` · ${currentDetail.vm.session.display}`
+                          : ""}
+                      </p>
+                    </div>
+
+                    <div className="workspace-stage__header-actions">
+                      <button
+                        className="button button--ghost"
+                        type="button"
+                        onClick={() => {
+                          setSelectedVmId(null);
+                          setSidePanelCollapsed(false);
+                        }}
+                      >
+                        Overview
+                      </button>
+                      <button
+                        className="button button--ghost"
+                        type="button"
+                        onClick={() => setSidePanelCollapsed((current) => !current)}
+                      >
+                        {sidePanelCollapsed ? "Show inspector" : "Hide inspector"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </section>
 
           {selectedVm ? (
-            <div className="workspace-shell__bottom">
-              <section className="workspace-stage">
-                <div className="workspace-stage__header">
-                  <div className="workspace-stage__identity">
-                    <p className="workspace-stage__eyebrow">
-                      {currentDetail?.template?.name ?? "Loading template"}
-                    </p>
-                    <div className="workspace-stage__title-row">
-                      <h3 className="workspace-stage__title">{selectedVm.name}</h3>
-                      <StatusBadge status={selectedVm.status}>{selectedVm.status}</StatusBadge>
-                    </div>
-                    <p className="workspace-stage__copy">
-                      {formatResources(selectedVm.resources)}
-                      {currentDetail?.vm.session?.display
-                        ? ` · ${currentDetail.vm.session.display}`
-                        : ""}
-                    </p>
-                  </div>
-
-                  <div className="workspace-stage__header-actions">
-                    <button
-                      className="button button--ghost"
-                      type="button"
-                      onClick={() => {
-                        setSelectedVmId(null);
-                        setSidePanelCollapsed(false);
-                      }}
-                    >
-                      Back to rail
-                    </button>
-                    <button
-                      className="button button--ghost"
-                      type="button"
-                      onClick={() => setSidePanelCollapsed((current) => !current)}
-                    >
-                      {sidePanelCollapsed ? "Show details" : "Hide details"}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="workspace-stage__surface">
-                  {!currentDetail ? (
-                    <div className="workspace-stage__placeholder">
-                      <div className="workspace-stage__placeholder-block skeleton-shell" />
-                    </div>
-                  ) : currentDetail.vm.session?.kind === "vnc" &&
-                    currentDetail.vm.session.webSocketPath ? (
-                    <NoVncViewport
-                      className="workspace-stage__viewport"
-                      surfaceClassName="workspace-stage__canvas"
-                      webSocketPath={currentDetail.vm.session.webSocketPath}
-                      showHeader={false}
-                      statusMode="overlay"
-                    />
-                  ) : (
-                    <div className="workspace-fallback">
-                      <StaticPatternPreview vm={currentDetail.vm} variant="stage" />
-                      <div className="workspace-fallback__copy">
-                        <span className="surface-pill surface-pill--busy">
-                          {desktopFallbackBadge(currentDetail)}
-                        </span>
-                        <p>
-                          {desktopFallbackMessage(currentDetail)}
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </section>
-
-              <WorkspaceSidepanel
-                busy={isBusy}
-                captureDraft={captureDraft}
-                collapsed={sidePanelCollapsed}
-                commandDraft={commandDraft}
-                detail={currentDetail}
-                forwardDraft={forwardDraft}
-                resourceDraft={resourceDraft}
-                summary={summary}
-                vm={selectedVm}
-                onCaptureDraftChange={setCaptureDraft}
-                onClone={handleClone}
-                onCommandDraftChange={setCommandDraft}
-                onDelete={handleDelete}
-                onForwardDraftChange={setForwardDraft}
-                onRemoveForward={handleRemoveForward}
-                onResourceDraftChange={setResourceDraft}
-                onResize={handleResize}
-                onSaveForward={handleAddForward}
-                onSnapshot={handleSnapshot}
-                onStartStop={handleVmAction}
-                onSubmitCapture={handleCaptureTemplate}
-                onSubmitCommand={handleCommand}
-                onToggleCollapsed={() => setSidePanelCollapsed((current) => !current)}
-              />
-            </div>
-          ) : null}
+            <WorkspaceSidepanel
+              busy={isBusy}
+              captureDraft={captureDraft}
+              collapsed={sidePanelCollapsed}
+              commandDraft={commandDraft}
+              detail={currentDetail}
+              forwardDraft={forwardDraft}
+              resourceDraft={resourceDraft}
+              summary={summary}
+              vm={selectedVm}
+              onCaptureDraftChange={setCaptureDraft}
+              onClone={handleClone}
+              onCommandDraftChange={setCommandDraft}
+              onDelete={handleDelete}
+              onForwardDraftChange={setForwardDraft}
+              onRemoveForward={handleRemoveForward}
+              onResourceDraftChange={setResourceDraft}
+              onResize={handleResize}
+              onSaveForward={handleAddForward}
+              onSnapshot={handleSnapshot}
+              onStartStop={handleVmAction}
+              onSubmitCapture={handleCaptureTemplate}
+              onSubmitCommand={handleCommand}
+              onToggleCollapsed={() => setSidePanelCollapsed((current) => !current)}
+            />
+          ) : (
+            <OverviewSidepanel summary={summary} onCreate={() => setShowCreateDialog(true)} />
+          )}
         </section>
       </main>
 
@@ -1305,7 +1296,7 @@ function WorkspaceSidepanel({
       className={joinClassNames("workspace-sidepanel", collapsed ? "workspace-sidepanel--collapsed" : "")}
     >
       <button className="workspace-sidepanel__handle" type="button" onClick={onToggleCollapsed}>
-        {collapsed ? "Details" : "Collapse"}
+        {collapsed ? "Inspector" : "Hide inspector"}
       </button>
 
       {!collapsed ? (
@@ -1321,7 +1312,7 @@ function WorkspaceSidepanel({
               <section className="sidepanel-summary">
                 <div className="sidepanel-summary__head">
                   <div>
-                    <p className="workspace-shell__eyebrow">Sidepanel</p>
+                    <p className="workspace-shell__eyebrow">Inspector</p>
                     <h4 className="sidepanel-summary__title">{vm.name}</h4>
                   </div>
                   <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
@@ -1734,6 +1725,160 @@ function WorkspaceSidepanel({
   );
 }
 
+function EmptyWorkspaceStage({
+  onCreate,
+  summary,
+}: {
+  onCreate: () => void;
+  summary: DashboardSummary;
+}): JSX.Element {
+  const hasWorkspaces = summary.vms.length > 0;
+  const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
+
+  return (
+    <div className="workspace-stage__empty">
+      <div className="workspace-stage__empty-main">
+        <p className="workspace-stage__eyebrow">Operator view</p>
+        <h2 className="workspace-stage__empty-title">
+          {hasWorkspaces
+            ? "Choose a workspace to open its live desktop."
+            : "Launch a workspace to claim the stage."}
+        </h2>
+        <p className="workspace-stage__copy">
+          {hasWorkspaces
+            ? "The middle column is reserved for the VM itself. Keep switching on the left and leave the inspector on the right for operational detail."
+            : "Once a VM is running, its live desktop takes over this full-height stage while the rails stay available for switching and inspection."}
+        </p>
+        <div className="workspace-stage__header-actions">
+          <button className="button button--primary" type="button" onClick={onCreate}>
+            {hasWorkspaces ? "Launch another VM" : "Launch a VM"}
+          </button>
+        </div>
+      </div>
+
+      <div className="workspace-stage__empty-stats">
+        <StageStat
+          label="Running"
+          value={`${summary.metrics.runningVmCount}/${summary.metrics.totalVmCount || 0}`}
+        />
+        <StageStat label="Templates" value={String(summary.templates.length)} />
+        <StageStat label="Active jobs" value={String(runningJobCount)} />
+      </div>
+    </div>
+  );
+}
+
+function OverviewSidepanel({
+  onCreate,
+  summary,
+}: {
+  onCreate: () => void;
+  summary: DashboardSummary;
+}): JSX.Element {
+  const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
+  const recentJobs = summary.jobs.slice().reverse().slice(0, 5);
+
+  return (
+    <aside className="workspace-sidepanel workspace-sidepanel--overview">
+      <div className="workspace-sidepanel__scroll">
+        <section className="sidepanel-summary">
+          <div className="sidepanel-summary__head">
+            <div>
+              <p className="workspace-shell__eyebrow">Inspector</p>
+              <h4 className="sidepanel-summary__title">
+                {summary.vms.length > 0 ? "Fleet overview" : "No workspace selected"}
+              </h4>
+            </div>
+            <span
+              className={joinClassNames(
+                "surface-pill",
+                summary.provider.available ? "surface-pill--success" : "surface-pill--warning",
+              )}
+            >
+              {summary.provider.available ? "Ready" : "Blocked"}
+            </span>
+          </div>
+
+          <p className="empty-copy">{summary.provider.detail}</p>
+
+          <div className="chip-row">
+            <span className="surface-pill">{summary.provider.kind}</span>
+            <span className="surface-pill">
+              {providerTransportLabel(summary.provider.desktopTransport)}
+            </span>
+            <span className="surface-pill">
+              {summary.snapshots.length} snapshot{summary.snapshots.length === 1 ? "" : "s"}
+            </span>
+          </div>
+        </section>
+
+        <SidepanelSection title="Fleet" defaultOpen>
+          <div className="compact-grid">
+            <FieldPair label="Workspaces" value={String(summary.metrics.totalVmCount)} />
+            <FieldPair label="Running" value={String(summary.metrics.runningVmCount)} />
+            <FieldPair label="CPU" value={String(summary.metrics.totalCpu)} />
+            <FieldPair label="RAM" value={formatRam(summary.metrics.totalRamMb)} />
+            <FieldPair label="Disk" value={`${summary.metrics.totalDiskGb} GB`} />
+            <FieldPair label="Active jobs" value={String(runningJobCount)} />
+          </div>
+          <button className="button button--secondary button--full" type="button" onClick={onCreate}>
+            Launch workspace
+          </button>
+        </SidepanelSection>
+
+        {summary.provider.nextSteps.length > 0 ? (
+          <SidepanelSection title="Provider notes" defaultOpen>
+            <div className="stack">
+              {summary.provider.nextSteps.map((step, index) => (
+                <div key={`${step}-${index}`} className="log-line">
+                  {step}
+                </div>
+              ))}
+            </div>
+          </SidepanelSection>
+        ) : null}
+
+        <SidepanelSection title="Templates">
+          <div className="stack">
+            {summary.templates.length > 0 ? (
+              summary.templates.map((template) => (
+                <div key={template.id} className="list-card">
+                  <div className="list-card__head">
+                    <strong>{template.name}</strong>
+                    <span className="surface-pill">{formatResources(template.defaultResources)}</span>
+                  </div>
+                  <p>{template.description}</p>
+                </div>
+              ))
+            ) : (
+              <p className="empty-copy">No templates available yet.</p>
+            )}
+          </div>
+        </SidepanelSection>
+
+        <SidepanelSection title="Recent jobs">
+          <div className="stack">
+            {recentJobs.length > 0 ? (
+              recentJobs.map((job) => (
+                <div key={job.id} className="list-card">
+                  <div className="list-card__head">
+                    <strong className="mono-font">{job.kind}</strong>
+                    <span className="surface-pill">{job.status}</span>
+                  </div>
+                  <p>{job.message}</p>
+                  <span className="list-card__timestamp">{formatTimestamp(job.updatedAt)}</span>
+                </div>
+              ))
+            ) : (
+              <p className="empty-copy">No jobs have been queued yet.</p>
+            )}
+          </div>
+        </SidepanelSection>
+      </div>
+    </aside>
+  );
+}
+
 function LoadingShell(): JSX.Element {
   return (
     <main className="loading-shell">
@@ -1816,6 +1961,21 @@ function MiniStat({
     <div className="mini-stat">
       <span className="mini-stat__label">{label}</span>
       <strong className="mini-stat__value">{value}</strong>
+    </div>
+  );
+}
+
+function StageStat({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}): JSX.Element {
+  return (
+    <div className="workspace-stage__stat">
+      <span className="workspace-stage__stat-label">{label}</span>
+      <strong className="workspace-stage__stat-value">{value}</strong>
     </div>
   );
 }

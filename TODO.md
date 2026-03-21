@@ -34,7 +34,7 @@ The Electron app is explicitly out of scope until the web proof of concept works
 ## Working Rules
 
 - Keep this file current as tasks are completed or scope changes.
-- After each code change, start the server in real mode (`PARALLAIZE_PROVIDER=incus`) with an Incus-backed state file and confirm it boots before considering the task complete.
+- After each code change, and again at the end of every TODO run, restart the server in real mode (`PARALLAIZE_PROVIDER=incus`) with an Incus-backed state file and confirm it boots before considering the task complete.
 - Build the smallest vertical slice first: create VM -> view desktop -> control VM -> clone VM.
 - Prefer one host and one operator for the POC. Do not design for clustering yet.
 - Make infrastructure decisions that preserve a path to a richer version later, but do not overbuild now.
