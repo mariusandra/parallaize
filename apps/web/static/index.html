@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Parallaize</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Server-first desktop orchestration proof of concept</p>
+          <h1>Parallaize Control Deck</h1>
+        </div>
+        <div class="topbar-meta">
+          <div class="meta-card">
+            <span class="meta-label">Provider</span>
+            <strong id="provider-pill">Loading</strong>
+            <p id="provider-detail"></p>
+          </div>
+          <div class="meta-card">
+            <span class="meta-label">Fleet</span>
+            <strong id="fleet-metric">0 workspaces</strong>
+            <p id="fleet-detail">No telemetry yet</p>
+          </div>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="left-rail panel">
+          <section>
+            <div class="section-heading">
+              <span class="section-kicker">Provision</span>
+              <h2>New Workspace</h2>
+            </div>
+            <form id="create-form" class="stack-form">
+              <label>
+                <span>Template</span>
+                <select id="template-select" name="templateId"></select>
+              </label>
+              <label>
+                <span>Name</span>
+                <input id="vm-name" name="name" type="text" placeholder="delta-lab" required />
+              </label>
+              <div class="resource-grid">
+                <label>
+                  <span>CPU</span>
+                  <input id="cpu-input" name="cpu" type="number" min="1" max="96" required />
+                </label>
+                <label>
+                  <span>RAM (MB)</span>
+                  <input id="ram-input" name="ramMb" type="number" min="1024" max="262144" required />
+                </label>
+                <label>
+                  <span>Disk (GB)</span>
+                  <input id="disk-input" name="diskGb" type="number" min="10" max="4096" required />
+                </label>
+              </div>
+              <button type="submit" class="primary-button">Create workspace</button>
+            </form>
+          </section>
+
+          <section>
+            <div class="section-heading">
+              <span class="section-kicker">Templates</span>
+              <h2>Environment Library</h2>
+            </div>
+            <div id="template-list" class="template-list"></div>
+          </section>
+        </aside>
+
+        <section class="center-stage">
+          <div class="section-heading stage-heading">
+            <div>
+              <span class="section-kicker">Live Grid</span>
+              <h2>Running Desktops</h2>
+            </div>
+            <p id="grid-summary" class="stage-summary">Waiting for fleet state</p>
+          </div>
+          <div id="vm-grid" class="vm-grid"></div>
+        </section>
+
+        <aside class="right-rail panel">
+          <section>
+            <div class="section-heading">
+              <span class="section-kicker">Timeline</span>
+              <h2>Recent Jobs</h2>
+            </div>
+            <div id="job-list" class="job-list"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <div id="detail-overlay" class="detail-overlay hidden" aria-hidden="true">
+      <div class="detail-backdrop" data-close-overlay="true"></div>
+      <section class="detail-panel">
+        <button id="close-detail" class="detail-close" type="button" aria-label="Close workspace detail">
+          Close
+        </button>
+        <div id="detail-content"></div>
+      </section>
+    </div>
+
+    <template id="empty-state-template">
+      <div class="empty-state">
+        <h3>No workspaces yet</h3>
+        <p>Create a workspace from a template to populate the grid.</p>
+      </div>
+    </template>
+
+    <script type="module" src="/assets/main.js"></script>
+  </body>
+</html>

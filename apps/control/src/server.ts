@@ -1,0 +1,318 @@
+import { createReadStream, existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { extname, join, normalize } from "node:path";
+import { pipeline } from "node:stream/promises";
+
+import type {
+  ApiResponse,
+  CaptureTemplateInput,
+  CloneVmInput,
+  CreateVmInput,
+  DashboardSummary,
+  InjectCommandInput,
+  ResizeVmInput,
+  SnapshotInput,
+  VmDetail,
+} from "../../../packages/shared/src/types.js";
+import { loadConfig } from "./config.js";
+import { DesktopManager } from "./manager.js";
+import { createProvider } from "./providers.js";
+import { createSeedState } from "./seed.js";
+import { JsonStateStore } from "./store.js";
+
+const config = loadConfig();
+const provider = createProvider(config.providerKind, config.incusBinary);
+const store = new JsonStateStore(config.dataFile, () => createSeedState(provider.state));
+const manager = new DesktopManager(store, provider);
+manager.start();
+
+const distRoot = process.cwd();
+const htmlPath = join(distRoot, "dist", "apps", "web", "static", "index.html");
+const cssPath = join(distRoot, "dist", "apps", "web", "static", "styles.css");
+const faviconPath = join(distRoot, "dist", "apps", "web", "static", "favicon.svg");
+const mainJsPath = join(distRoot, "dist", "apps", "web", "src", "main.js");
+
+const server = createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
+    const method = request.method ?? "GET";
+
+    if (method === "GET" && url.pathname === "/api/health") {
+      return writeJson(response, 200, {
+        ok: true,
+        data: {
+          status: "ok",
+          provider: manager.getProviderState(),
+          generatedAt: new Date().toISOString(),
+        },
+      });
+    }
+
+    if (method === "GET" && url.pathname === "/api/summary") {
+      return writeJson<DashboardSummary>(response, 200, {
+        ok: true,
+        data: manager.getSummary(),
+      });
+    }
+
+    if (method === "GET" && url.pathname === "/events") {
+      return handleEvents(response);
+    }
+
+    const vmMatch = url.pathname.match(/^\/api\/vms\/([^/]+)$/);
+    if (method === "GET" && vmMatch) {
+      return writeJson<VmDetail>(response, 200, {
+        ok: true,
+        data: manager.getVmDetail(vmMatch[1]),
+      });
+    }
+
+    const frameMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/frame\.svg$/);
+    if (method === "GET" && frameMatch) {
+      const mode = url.searchParams.get("mode") === "detail" ? "detail" : "tile";
+      const svg = manager.getVmFrame(frameMatch[1], mode);
+      response.writeHead(200, {
+        "content-type": "image/svg+xml; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      response.end(svg);
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/vms") {
+      const payload = await readJsonBody<CreateVmInput>(request);
+      const vm = manager.createVm(payload);
+      return writeJson(response, 202, {
+        ok: true,
+        data: vm,
+      });
+    }
+
+    const actionMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/(clone|start|stop|delete|snapshot|resize|template|input)$/);
+    if (method === "POST" && actionMatch) {
+      const vmId = actionMatch[1];
+      const action = actionMatch[2];
+
+      switch (action) {
+        case "clone": {
+          const payload = await readJsonBody<CloneVmInput>(request);
+          const vm = manager.cloneVm({
+            sourceVmId: vmId,
+            name: payload.name,
+          });
+          return writeJson(response, 202, {
+            ok: true,
+            data: vm,
+          });
+        }
+        case "start":
+          manager.startVm(vmId);
+          return writeAccepted(response);
+        case "stop":
+          manager.stopVm(vmId);
+          return writeAccepted(response);
+        case "delete":
+          manager.deleteVm(vmId);
+          return writeAccepted(response);
+        case "snapshot": {
+          const payload = await readJsonBody<SnapshotInput>(request);
+          manager.snapshotVm(vmId, payload);
+          return writeAccepted(response);
+        }
+        case "resize": {
+          const payload = await readJsonBody<ResizeVmInput>(request);
+          manager.resizeVm(vmId, payload);
+          return writeAccepted(response);
+        }
+        case "template": {
+          const payload = await readJsonBody<CaptureTemplateInput>(request);
+          manager.captureTemplate(vmId, payload);
+          return writeAccepted(response);
+        }
+        case "input": {
+          const payload = await readJsonBody<InjectCommandInput>(request);
+          manager.injectCommand(vmId, payload.command);
+          return writeAccepted(response);
+        }
+        default:
+          break;
+      }
+    }
+
+    if ((method === "GET" || method === "HEAD") && url.pathname === "/") {
+      return serveFile(response, htmlPath, "text/html; charset=utf-8", method === "HEAD");
+    }
+
+    if ((method === "GET" || method === "HEAD") && url.pathname === "/styles.css") {
+      return serveFile(response, cssPath, "text/css; charset=utf-8", method === "HEAD");
+    }
+
+    if (
+      (method === "GET" || method === "HEAD") &&
+      (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")
+    ) {
+      return serveFile(
+        response,
+        faviconPath,
+        "image/svg+xml; charset=utf-8",
+        method === "HEAD",
+      );
+    }
+
+    if ((method === "GET" || method === "HEAD") && url.pathname === "/assets/main.js") {
+      return serveFile(
+        response,
+        mainJsPath,
+        "text/javascript; charset=utf-8",
+        method === "HEAD",
+      );
+    }
+
+    if ((method === "GET" || method === "HEAD") && url.pathname.startsWith("/assets/")) {
+      const resolved = resolveAsset(url.pathname);
+      if (resolved) {
+        return serveFile(
+          response,
+          resolved.path,
+          resolved.contentType,
+          method === "HEAD",
+        );
+      }
+    }
+
+    writeJson(response, 404, {
+      ok: false,
+      error: `No route matched ${method} ${url.pathname}`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    writeJson(response, 500, {
+      ok: false,
+      error: message,
+    });
+  }
+});
+
+server.listen(config.port, config.host, () => {
+  process.stdout.write(
+    `parallaize listening on http://${config.host}:${config.port} using ${provider.state.kind} provider\n`,
+  );
+});
+
+function handleEvents(response: ServerResponse): void {
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+  });
+
+  const unsubscribe = manager.subscribe((summary) => {
+    response.write(`event: summary\ndata: ${JSON.stringify(summary)}\n\n`);
+  });
+
+  const heartbeat = setInterval(() => {
+    response.write(`event: heartbeat\ndata: ${Date.now()}\n\n`);
+  }, 15000);
+
+  response.on("close", () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+}
+
+async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
+  const chunks: Buffer[] = [];
+
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  if (chunks.length === 0) {
+    return {} as T;
+  }
+
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
+}
+
+function writeAccepted(response: ServerResponse): void {
+  writeJson(response, 202, {
+    ok: true,
+    data: {
+      accepted: true,
+    },
+  });
+}
+
+function writeJson<T>(
+  response: ServerResponse,
+  statusCode: number,
+  payload: ApiResponse<T> | Record<string, unknown>,
+): void {
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(`${JSON.stringify(payload)}\n`);
+}
+
+async function serveFile(
+  response: ServerResponse,
+  filePath: string,
+  contentType: string,
+  headOnly = false,
+): Promise<void> {
+  if (!existsSync(filePath)) {
+    writeJson(response, 404, {
+      ok: false,
+      error: `Static asset not found: ${filePath}`,
+    });
+    return;
+  }
+
+  response.writeHead(200, {
+    "content-type": contentType,
+    "cache-control": "no-store",
+  });
+
+  if (headOnly) {
+    response.end();
+    return;
+  }
+
+  await pipeline(createReadStream(filePath), response);
+}
+
+function resolveAsset(pathname: string): {
+  path: string;
+  contentType: string;
+} | null {
+  const localPath = normalize(pathname.replace(/^\/assets\//, ""));
+  const safePath = join(distRoot, "dist", "apps", "web", "src", localPath);
+
+  if (!safePath.startsWith(join(distRoot, "dist", "apps", "web", "src"))) {
+    return null;
+  }
+
+  return {
+    path: safePath,
+    contentType: inferContentType(safePath),
+  };
+}
+
+function inferContentType(filePath: string): string {
+  switch (extname(filePath)) {
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    default:
+      return "text/plain; charset=utf-8";
+  }
+}

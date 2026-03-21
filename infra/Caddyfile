@@ -1,0 +1,17 @@
+{
+	auto_https off
+	admin off
+}
+
+:8080 {
+	encode gzip zstd
+
+	@api path /api/* /events
+	handle @api {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}

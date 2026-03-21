@@ -1,0 +1,495 @@
+{
+  "lockfile-version": 1,
+  "manifest": {
+    "schema-version": "1.10.0",
+    "install": {
+      "caddy": {
+        "pkg-path": "caddy"
+      },
+      "nodejs_24": {
+        "pkg-path": "nodejs_24"
+      },
+      "pnpm_10": {
+        "pkg-path": "pnpm_10"
+      },
+      "typescript": {
+        "pkg-path": "typescript"
+      }
+    },
+    "options": {}
+  },
+  "packages": [
+    {
+      "attr_path": "caddy",
+      "broken": false,
+      "derivation": "/nix/store/ysxlw415spnq2ys4nvyl34biwf5gih5r-caddy-2.11.1.drv",
+      "description": "Fast and extensible multi-platform HTTP/1-2-3 web server with automatic HTTPS",
+      "install_id": "caddy",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "caddy-2.11.1",
+      "pname": "caddy",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T04:46:43.123208Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.11.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/0wyd62h8xwvnxxlsz2ia8x2mll37k8ih-caddy-2.11.1"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "caddy",
+      "broken": false,
+      "derivation": "/nix/store/cs5898njbdk3fhk4nzcgbq5x37ca1g89-caddy-2.11.1.drv",
+      "description": "Fast and extensible multi-platform HTTP/1-2-3 web server with automatic HTTPS",
+      "install_id": "caddy",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "caddy-2.11.1",
+      "pname": "caddy",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T05:23:23.985958Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.11.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/94ci6c247f7dz6l162clghav5xc257d7-caddy-2.11.1"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "caddy",
+      "broken": false,
+      "derivation": "/nix/store/ii13inj443m87y98v03kg1m2i6hv6y1k-caddy-2.11.1.drv",
+      "description": "Fast and extensible multi-platform HTTP/1-2-3 web server with automatic HTTPS",
+      "install_id": "caddy",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "caddy-2.11.1",
+      "pname": "caddy",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:03:48.750602Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.11.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/gyfp17799c4lk30bn3a27aydzf7ic2c2-caddy-2.11.1"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "caddy",
+      "broken": false,
+      "derivation": "/nix/store/hnx33whs5h0pxax7c2gcn5kck8ivy1k8-caddy-2.11.1.drv",
+      "description": "Fast and extensible multi-platform HTTP/1-2-3 web server with automatic HTTPS",
+      "install_id": "caddy",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "caddy-2.11.1",
+      "pname": "caddy",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:46:39.013093Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.11.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/0y8w75a33h8qxxmg5jglxk0kvibcgx4p-caddy-2.11.1"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "nodejs_24",
+      "broken": false,
+      "derivation": "/nix/store/6397cvh4xfcqk925ln0766xgrr2sxqr2-nodejs-24.13.0.drv",
+      "description": "Event-driven I/O framework for the V8 JavaScript engine",
+      "install_id": "nodejs_24",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "nodejs-24.13.0",
+      "pname": "nodejs_24",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T04:47:07.300049Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "24.13.0",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/cx0jd5mwhn7ihryyv0qp9d33f8s1iwb7-nodejs-24.13.0"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "nodejs_24",
+      "broken": false,
+      "derivation": "/nix/store/kj8ma6mw9nzkf4i9rak8wln3f7vc3dra-nodejs-24.13.0.drv",
+      "description": "Event-driven I/O framework for the V8 JavaScript engine",
+      "install_id": "nodejs_24",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "nodejs-24.13.0",
+      "pname": "nodejs_24",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T05:24:02.247974Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "24.13.0",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/8dsjz52869ygjd6xdvibgk3ysl3fg6zp-nodejs-24.13.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "nodejs_24",
+      "broken": false,
+      "derivation": "/nix/store/rrwfxnjnljcdlnq9501y2yzk7qg3qwac-nodejs-24.13.0.drv",
+      "description": "Event-driven I/O framework for the V8 JavaScript engine",
+      "install_id": "nodejs_24",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "nodejs-24.13.0",
+      "pname": "nodejs_24",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:04:12.702310Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "24.13.0",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/i9bak02hsrywwba0apxdn7ldvkf9jl6a-nodejs-24.13.0"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "nodejs_24",
+      "broken": false,
+      "derivation": "/nix/store/0mpaqfjwsf94j1d2ww61dm8gqp3cdjxd-nodejs-24.13.0.drv",
+      "description": "Event-driven I/O framework for the V8 JavaScript engine",
+      "install_id": "nodejs_24",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "nodejs-24.13.0",
+      "pname": "nodejs_24",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:47:20.150307Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "24.13.0",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/sy0c7j0npsq33d9zhnnzvjnzc52f4y0p-nodejs-24.13.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "pnpm_10",
+      "broken": false,
+      "derivation": "/nix/store/3668k75ap9hnwcy7q2c5rxnhn6r3360y-pnpm-10.29.2.drv",
+      "description": "Fast, disk space efficient package manager for JavaScript",
+      "install_id": "pnpm_10",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "pnpm-10.29.2",
+      "pname": "pnpm_10",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T04:47:21.003973Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "10.29.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/zhi5rp16mv20ixbk1wzxk694k9kd4ywl-pnpm-10.29.2"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "pnpm_10",
+      "broken": false,
+      "derivation": "/nix/store/yblkbab96wqrvn0nl81jhx7ixaf2r0gj-pnpm-10.29.2.drv",
+      "description": "Fast, disk space efficient package manager for JavaScript",
+      "install_id": "pnpm_10",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "pnpm-10.29.2",
+      "pname": "pnpm_10",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T05:24:21.975820Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "10.29.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/v829b24rpcl97zh767bfifx9ggvnvg5j-pnpm-10.29.2"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "pnpm_10",
+      "broken": false,
+      "derivation": "/nix/store/5zcp3pynnj9zm7plirgcaw08d8f8q8b7-pnpm-10.29.2.drv",
+      "description": "Fast, disk space efficient package manager for JavaScript",
+      "install_id": "pnpm_10",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "pnpm-10.29.2",
+      "pname": "pnpm_10",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:04:26.207887Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "10.29.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/ks9l9hj8xrfr62afzl1lgcxbl9106zlp-pnpm-10.29.2"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "pnpm_10",
+      "broken": false,
+      "derivation": "/nix/store/p2dsszb638w4kkmqhw5k1m24fr4bhqrx-pnpm-10.29.2.drv",
+      "description": "Fast, disk space efficient package manager for JavaScript",
+      "install_id": "pnpm_10",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "pnpm-10.29.2",
+      "pname": "pnpm_10",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:47:40.534305Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "10.29.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/hzfx2jjklyfa3lyrwa0n9h037dnsf1i7-pnpm-10.29.2"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "typescript",
+      "broken": false,
+      "derivation": "/nix/store/9jd9kzyif5k1g0zpvszx9g0d0b8jcgvx-typescript-5.9.3.drv",
+      "description": "Superset of JavaScript that compiles to clean JavaScript output",
+      "install_id": "typescript",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "typescript-5.9.3",
+      "pname": "typescript",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T04:48:52.494218Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.9.3",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/4ljbrd7cr6dj5hmvfccwczlmbyxdnd44-typescript-5.9.3"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "typescript",
+      "broken": false,
+      "derivation": "/nix/store/s8wdwlssbcfl06nkxz1ykf0rw06w4n0h-typescript-5.9.3.drv",
+      "description": "Superset of JavaScript that compiles to clean JavaScript output",
+      "install_id": "typescript",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "typescript-5.9.3",
+      "pname": "typescript",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T05:26:23.371912Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.9.3",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/lr75l0b1lcdh18a89cg5hcl9bfn85b9a-typescript-5.9.3"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "typescript",
+      "broken": false,
+      "derivation": "/nix/store/v6xmx5m53rzg6rqp8q3dz869218yl64w-typescript-5.9.3.drv",
+      "description": "Superset of JavaScript that compiles to clean JavaScript output",
+      "install_id": "typescript",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "typescript-5.9.3",
+      "pname": "typescript",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:05:54.952011Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.9.3",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/fmvk53a3i83xkpps045d36j92g1s3k4i-typescript-5.9.3"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "typescript",
+      "broken": false,
+      "derivation": "/nix/store/giak0l1hxw6liikgi4vlfb4hixvcrdzs-typescript-5.9.3.drv",
+      "description": "Superset of JavaScript that compiles to clean JavaScript output",
+      "install_id": "typescript",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "typescript-5.9.3",
+      "pname": "typescript",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:49:48.600152Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.9.3",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/716f9vxn5aan1g1pfv1pmn5jiks4gnhi-typescript-5.9.3"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    }
+  ]
+}
