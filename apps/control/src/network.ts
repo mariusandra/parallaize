@@ -138,9 +138,9 @@ export class VmNetworkBridge {
         host: target.host,
         port: target.port,
       });
-      const webSocketStream = createWebSocketStream(client, {
-        encoding: "binary",
-      });
+      // Keep the bridge in raw Buffer mode so RFB control frames and pixel data
+      // are forwarded byte-for-byte between noVNC and the guest VNC server.
+      const webSocketStream = createWebSocketStream(client);
 
       upstream.setNoDelay(true);
 
@@ -156,16 +156,8 @@ export class VmNetworkBridge {
         upstream.destroy();
       });
 
-      upstream.on("close", () => {
-        client.close();
-      });
-
-      void pipeline(webSocketStream, upstream).catch(() => {
-        upstream.destroy();
-      });
-      void pipeline(upstream, webSocketStream).catch(() => {
-        client.terminate();
-      });
+      webSocketStream.pipe(upstream);
+      upstream.pipe(webSocketStream);
     });
   }
 

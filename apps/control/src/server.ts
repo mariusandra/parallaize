@@ -196,6 +196,14 @@ const server = createServer(async (request, response) => {
       error: `No route matched ${method} ${url.pathname}`,
     });
   } catch (error) {
+    if (isBenignConnectionError(error)) {
+      return;
+    }
+
+    if (response.destroyed || response.writableEnded) {
+      return;
+    }
+
     const message = error instanceof Error ? error.message : "Unknown error";
     writeJson(response, 500, {
       ok: false,
@@ -277,6 +285,10 @@ function writeJson<T>(
   statusCode: number,
   payload: ApiResponse<T> | Record<string, unknown>,
 ): void {
+  if (response.destroyed || response.writableEnded) {
+    return;
+  }
+
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
@@ -369,7 +381,15 @@ async function serveFile(
     return;
   }
 
-  await pipeline(createReadStream(filePath), response);
+  try {
+    await pipeline(createReadStream(filePath), response);
+  } catch (error) {
+    if (isBenignConnectionError(error)) {
+      return;
+    }
+
+    throw error;
+  }
 }
 
 function resolveAsset(pathname: string): {
@@ -404,4 +424,23 @@ function inferContentType(filePath: string): string {
     default:
       return "text/plain; charset=utf-8";
   }
+}
+
+function isBenignConnectionError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const nodeError = error as Error & {
+    code?: string;
+    cause?: {
+      code?: string;
+    };
+  };
+
+  return (
+    nodeError.code === "ERR_STREAM_PREMATURE_CLOSE" ||
+    nodeError.code === "ECONNRESET" ||
+    nodeError.cause?.code === "ECONNRESET"
+  );
 }

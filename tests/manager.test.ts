@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -386,6 +387,131 @@ test("incus provider falls back to IPv6 guest metadata when IPv4 is absent", asy
     createMutation.session?.display,
     "[fd42:f551:1c4c:bffd:1266:6aff:fe27:207e]:5900",
   );
+});
+
+test("incus provider only marks a guest VNC session ready after an RFB handshake", async () => {
+  const server = createServer((socket) => {
+    socket.write("RFB 003.008\n");
+
+    let received = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      received = Buffer.concat([received, chunk]);
+
+      if (received.length >= 12) {
+        socket.end(Buffer.from([1, 1]));
+      }
+    });
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+
+  const address = server.address();
+
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to allocate the fake RFB server port.");
+  }
+
+  const instanceName = "parallaize-vm-0102-rfb-probe";
+  const runner = {
+    execute(args: string[]) {
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (args[0] === "list" && args[1] === instanceName) {
+        return ok(
+          JSON.stringify([
+            {
+              name: instanceName,
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address: "127.0.0.1",
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: address.port,
+    commandRunner: runner,
+  });
+
+  const template: EnvironmentTemplate = {
+    id: "tpl-0102",
+    name: "RFB Probe Template",
+    description: "Uses the built-in VNC readiness probe",
+    launchSource: "images:ubuntu/noble/desktop",
+    defaultResources: {
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 40,
+    },
+    defaultForwardedPorts: [],
+    tags: [],
+    notes: [],
+    snapshotIds: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const vm: VmInstance = {
+    id: "vm-0102",
+    name: "rfb-probe",
+    templateId: template.id,
+    provider: "incus",
+    providerRef: instanceName,
+    status: "creating",
+    resources: template.defaultResources,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Queued",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 21,
+    activeWindow: "editor",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  try {
+    const createMutation = await provider.createVm(vm, template);
+    assert.equal(createMutation.session?.host, "127.0.0.1");
+    assert.equal(createMutation.session?.port, address.port);
+    assert.equal(createMutation.session?.display, `127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+  }
 });
 
 test("incus provider treats a timed-out stop as success once the VM is stopped", async () => {

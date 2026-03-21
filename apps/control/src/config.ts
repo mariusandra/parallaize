@@ -27,7 +27,7 @@ export function loadConfig(): AppConfig {
     providerKind: parseProviderKind(process.env.PARALLAIZE_PROVIDER),
     incusBinary: process.env.PARALLAIZE_INCUS_BIN ?? "incus",
     incusProject: parseOptionalString(process.env.PARALLAIZE_INCUS_PROJECT),
-    guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5900),
+    guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5901),
     adminUsername: process.env.PARALLAIZE_ADMIN_USERNAME?.trim() || "admin",
     adminPassword,
   };

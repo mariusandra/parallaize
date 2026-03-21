@@ -1,21 +1,10 @@
 import { useEffect, useRef, useState, type JSX } from "react";
-
-interface RfbLike extends EventTarget {
-  background: string;
-  clipViewport: boolean;
-  resizeSession: boolean;
-  scaleViewport: boolean;
-  viewOnly: boolean;
-  disconnect(): void;
-}
-
-type RfbConstructor = new (
-  target: Element,
-  url: string,
-  options?: {
-    shared?: boolean;
-  },
-) => RfbLike;
+import {
+  buildRfbSocketUrls,
+  resolveRfbConstructor,
+  type RfbConstructor,
+  type RfbLike,
+} from "./novnc.js";
 
 interface NoVncViewportProps {
   title: string;
@@ -48,6 +37,7 @@ export function NoVncViewport({
     let handleDisconnect: ((event: Event) => void) | null = null;
     let handleSecurityFailure: (() => void) | null = null;
     let retryTimer: number | null = null;
+    const [socketUrl] = buildRfbSocketUrls(webSocketPath, window.location);
 
     function clearRetryTimer(): void {
       if (retryTimer !== null) {
@@ -74,7 +64,7 @@ export function NoVncViewport({
       container.replaceChildren();
     }
 
-    function scheduleReconnect(message: string): void {
+    function scheduleReconnect(message: string, delayMs = RECONNECT_DELAY_MS): void {
       if (cancelled || retryTimer !== null) {
         return;
       }
@@ -84,7 +74,7 @@ export function NoVncViewport({
       retryTimer = window.setTimeout(() => {
         retryTimer = null;
         void connect();
-      }, RECONNECT_DELAY_MS);
+      }, delayMs);
     }
 
     async function connect(): Promise<void> {
@@ -93,16 +83,22 @@ export function NoVncViewport({
         disposeRfb(false);
         const modulePath = "/assets/vendor/novnc/rfb.js";
         const imported = (await import(modulePath)) as {
-          default?: RfbConstructor;
+          default?: unknown;
         };
 
         if (cancelled) {
           return;
         }
 
-        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-        const socketUrl = `${protocol}://${window.location.host}${webSocketPath}`;
-        const RFB = imported.default as RfbConstructor;
+        const RFB = resolveRfbConstructor(imported);
+
+        if (!RFB) {
+          throw new Error("Failed to load the noVNC client constructor.");
+        }
+
+        if (!socketUrl) {
+          throw new Error("No browser VNC bridge URL is available.");
+        }
 
         rfb = new RFB(container, socketUrl, {
           shared: true,
@@ -122,6 +118,7 @@ export function NoVncViewport({
         handleDisconnect = (event: Event) => {
           const detail = (event as CustomEvent<{ clean: boolean }>).detail;
           disposeRfb(false);
+
           scheduleReconnect(
             detail?.clean
               ? "Desktop disconnected. Reconnecting..."

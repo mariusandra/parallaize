@@ -681,24 +681,64 @@ class SpawnIncusCommandRunner implements IncusCommandRunner {
 class TcpGuestPortProbe implements GuestPortProbe {
   async probe(host: string, port: number): Promise<boolean> {
     return new Promise((resolve) => {
+      let settled = false;
+      let stage: "banner" | "security" = "banner";
+      let buffer = Buffer.alloc(0);
       const socket = connectTcp({
         host,
         port,
       });
-      const timer = setTimeout(() => {
-        socket.destroy();
-        resolve(false);
-      }, 2000);
+      const finish = (result: boolean) => {
+        if (settled) {
+          return;
+        }
 
-      socket.once("connect", () => {
+        settled = true;
         clearTimeout(timer);
         socket.destroy();
-        resolve(true);
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        finish(false);
+      }, 2000);
+
+      socket.on("data", (chunk) => {
+        buffer = Buffer.concat([buffer, chunk]);
+
+        if (stage === "banner") {
+          if (buffer.length < 12) {
+            return;
+          }
+
+          const banner = buffer.subarray(0, 12).toString("latin1");
+
+          if (!banner.startsWith("RFB ")) {
+            finish(false);
+            return;
+          }
+
+          stage = "security";
+          buffer = Buffer.alloc(0);
+          socket.write(Buffer.from("RFB 003.008\n", "ascii"));
+          return;
+        }
+
+        if (buffer.length > 0) {
+          finish(true);
+        }
       });
 
       socket.once("error", () => {
-        clearTimeout(timer);
-        resolve(false);
+        finish(false);
+      });
+
+      socket.once("close", () => {
+        if (stage === "security" && buffer.length > 0) {
+          finish(true);
+          return;
+        }
+
+        finish(false);
       });
     });
   }
@@ -1006,6 +1046,12 @@ write_files:
       WantedBy=multi-user.target
 runcmd:
   - systemctl daemon-reload
+  - systemctl disable --now gnome-remote-desktop.service || true
+  - systemctl mask gnome-remote-desktop.service || true
+  - mkdir -p /etc/systemd/user
+  - ln -sf /dev/null /etc/systemd/user/gnome-remote-desktop.service
+  - ln -sf /dev/null /etc/systemd/user/gnome-remote-desktop-handover.service
+  - ln -sf /dev/null /etc/systemd/user/gnome-remote-desktop-headless.service
   - systemctl enable parallaize-x11vnc.service
   - systemctl restart gdm3 || true
   - systemctl start parallaize-x11vnc.service

@@ -1,7 +1,7 @@
 # Parallaize POC TODO
 
 Last updated: 2026-03-21
-Current phase: Real Incus-backed browser VNC sessions and Caddy guest-service forwarding are validated; remaining work is persistence hardening, automation, and template polish
+Current phase: Real Incus-backed browser VNC sessions and Caddy guest-service forwarding are validated; remaining work is codifying the guest VNC bootstrap, browser-session polish, persistence hardening, automation, and template polish
 
 ## Mission
 
@@ -24,6 +24,9 @@ The Electron app is explicitly out of scope until the web proof of concept works
 - A manual `incus launch images:ubuntu/noble/desktop --vm` probe succeeded on this host, then was deleted after validation.
 - Host validation also exposed an IPv6-only guest path, so the provider now falls back to a global IPv6 address when no global IPv4 address is present.
 - Real-host validation now covers a captured template image, guest VNC reachability, browser noVNC sessions, and Caddy-backed guest-service forwarding.
+- The built-in VNC WebSocket bridge now preserves raw binary RFB traffic, and the automated test suite includes a byte-for-byte bridge regression test.
+- Live host validation now confirms `vm-0003` completes a real RFB handshake through both `ws://:3000/api/vms/vm-0003/vnc` and Caddy's `ws://:8080/api/vms/vm-0003/vnc` once the guest advertises x11vnc on IPv6-safe port `5901`.
+- Browser-level validation now confirms a real Chromium session reaches `Desktop connected.` through the same-origin Caddy bridge at `http://monster:8080/?vm=vm-0003`, and the frontend no longer falls back to a direct control-plane websocket on `:3000`.
 - An automated `pnpm smoke:incus` path now validates create -> VNC ready -> guest HTTP injection -> restart -> Caddy forward -> cleanup on the live host.
 
 ## Working Rules
@@ -217,10 +220,11 @@ Exit criteria:
 
 These are the next tasks an agent should actually execute in order:
 
-1. Replace JSON persistence with PostgreSQL once the host-backed adapter shape is stable.
-2. Decide which guest service presets should ship in template images versus being configured per workload.
-3. Clean up probe and validation VMs, then tighten template capture/update ergonomics around the validated image path.
-4. Tighten auth from shared Basic Auth into a more ergonomic single-admin session flow if the POC needs a friendlier browser login.
+1. Run a live browser interaction pass against a host-backed VM now that the built-in VNC bridge preserves raw binary RFB traffic end to end.
+2. Replace JSON persistence with PostgreSQL once the host-backed adapter shape is stable.
+3. Decide which guest service presets should ship in template images versus being configured per workload.
+4. Clean up probe and validation VMs, then tighten template capture/update ergonomics around the validated image path.
+5. Tighten auth from shared Basic Auth into a more ergonomic single-admin session flow if the POC needs a friendlier browser login.
 
 ## Risks And Watchouts
 
@@ -264,3 +268,4 @@ These are the next tasks an agent should actually execute in order:
 - 2026-03-21: Captured a reusable Incus image alias with a resilient guest `x11vnc` service, then validated fresh VM browser VNC sessions and Caddy-backed guest-service forwarding on the live host.
 - 2026-03-21: Added a host-backed `pnpm smoke:incus` automation path that provisions a throwaway VM, verifies browser VNC, injects a guest HTTP service, validates Caddy forwarding, and cleans the VM up afterward.
 - 2026-03-21: Added shared single-user Basic Auth at the control plane so the dashboard, API, VNC bridge, SSE stream, and forwarded guest-service routes can be protected with env-configured admin credentials.
+- 2026-03-21: Hardened the built-in VNC bridge to keep raw WebSocket-to-TCP traffic in Buffer mode and added a regression test that verifies byte-for-byte passthrough in both directions.

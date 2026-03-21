@@ -9,6 +9,7 @@
 	@vnc path_regexp vnc ^/api/vms/[^/]+/vnc$
 	handle @vnc {
 		reverse_proxy 127.0.0.1:3000 {
+			flush_interval -1
 			transport http {
 				versions 1.1
 			}

@@ -190,7 +190,7 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 - `PARALLAIZE_PROVIDER`: `mock` or `incus`, default `mock`
 - `PARALLAIZE_INCUS_BIN`: Incus binary path, default `incus`
 - `PARALLAIZE_INCUS_PROJECT`: optional Incus project name
-- `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5900`
+- `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5901`
 - `PARALLAIZE_ADMIN_USERNAME`: shared admin username for Basic Auth, default `admin`
 - `PARALLAIZE_ADMIN_PASSWORD`: shared admin password; when unset, auth is disabled
 
