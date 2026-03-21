@@ -1,7 +1,7 @@
 # Parallaize POC TODO
 
 Last updated: 2026-03-21
-Current phase: Real Incus-backed browser VNC sessions and Caddy guest-service forwarding are validated; remaining work is codifying the guest VNC bootstrap, browser-session polish, persistence hardening, automation, and template polish
+Current phase: Real Incus-backed browser VNC sessions, Caddy guest-service forwarding, and host bridge internet access are validated; remaining work is codifying the guest VNC bootstrap, browser-session polish, persistence hardening, automation, and template polish
 
 ## Mission
 
@@ -28,6 +28,7 @@ The Electron app is explicitly out of scope until the web proof of concept works
 - Live host validation now confirms `vm-0003` completes a real RFB handshake through both `ws://:3000/api/vms/vm-0003/vnc` and Caddy's `ws://:8080/api/vms/vm-0003/vnc` once the guest advertises x11vnc on IPv6-safe port `5901`.
 - Browser-level validation now confirms a real Chromium session reaches `Desktop connected.` through the same-origin Caddy bridge at `http://monster:8080/?vm=vm-0003`, and the frontend no longer falls back to a direct control-plane websocket on `:3000`.
 - An automated `pnpm smoke:incus` path now validates create -> VNC ready -> guest HTTP injection -> restart -> Caddy forward -> cleanup on the live host.
+- This host's UFW default-drop policy also needed explicit `incusbr0` DHCP, DNS, and forward allowances before guests would receive IPv4 leases and regain outbound internet access.
 
 ## Working Rules
 
@@ -269,3 +270,4 @@ These are the next tasks an agent should actually execute in order:
 - 2026-03-21: Added a host-backed `pnpm smoke:incus` automation path that provisions a throwaway VM, verifies browser VNC, injects a guest HTTP service, validates Caddy forwarding, and cleans the VM up afterward.
 - 2026-03-21: Added shared single-user Basic Auth at the control plane so the dashboard, API, VNC bridge, SSE stream, and forwarded guest-service routes can be protected with env-configured admin credentials.
 - 2026-03-21: Hardened the built-in VNC bridge to keep raw WebSocket-to-TCP traffic in Buffer mode and added a regression test that verifies byte-for-byte passthrough in both directions.
+- 2026-03-21: Verified that this host's Incus bridge was healthy but UFW was dropping guest DHCP, DNS, and forwarded traffic; added the required `incusbr0` UFW allowances so new VM boots now receive IPv4 leases and outbound internet access.

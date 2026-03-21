@@ -95,6 +95,22 @@ Captured templates publish a reusable local Incus image alias and future launche
 
 If you switch from `mock` to `incus`, point `PARALLAIZE_DATA_FILE` at a fresh state file unless you intentionally want to keep old mock records around.
 
+### Guest Networking And Internet Access
+
+On this host, the Incus bridge itself was healthy, but UFW's default-drop rules still blocked guest DHCP, guest DNS, and routed traffic. The symptom was that VMs only showed the Incus IPv6 ULA on `incusbr0`, never received an IPv4 lease, and had no outbound internet access.
+
+If UFW is enabled on the host, allow DHCP and DNS on `incusbr0`, then allow forwarding from `incusbr0` to the host uplink:
+
+```bash
+HOST_UPLINK_IFACE="$(ip route show default | awk '{print $5; exit}')"
+sudo ufw allow in on incusbr0 to any port 67 proto udp comment 'Incus DHCPv4'
+sudo ufw allow in on incusbr0 to any port 53 proto udp comment 'Incus DNS UDP'
+sudo ufw allow in on incusbr0 to any port 53 proto tcp comment 'Incus DNS TCP'
+sudo ufw route allow in on incusbr0 out on "$HOST_UPLINK_IFACE" comment 'Incus outbound'
+```
+
+After those rules were added on this machine, fresh Incus VMs immediately started receiving IPv4 leases from `incusbr0` again.
+
 ### Guest VNC Setup
 
 Inside the Ubuntu desktop guest template, install and enable a VNC server before capturing the base image. One workable `x11vnc` flow is:
