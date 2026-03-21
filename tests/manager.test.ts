@@ -45,7 +45,44 @@ test("mock provider supports create, snapshot, and template capture flows", asyn
   await wait(650);
 
   const summary = manager.getSummary();
-  assert.ok(summary.templates.some((template) => template.name === "Captured Test Template"));
+  const capturedTemplate = summary.templates.find(
+    (template) => template.name === "Captured Test Template",
+  );
+  assert.ok(capturedTemplate);
+  assert.equal(summary.snapshots[0]?.templateId, capturedTemplate?.id);
+  assert.ok(summary.jobs.some((job) => job.kind === "capture-template" && job.status === "succeeded"));
+});
+
+test("template capture can refresh an existing template while preserving history", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-update-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  manager.captureTemplate("vm-0001", {
+    templateId: "tpl-0001",
+    name: "Ubuntu Agent Forge",
+    description: "Refreshed from alpha-workbench",
+  });
+
+  await wait(700);
+
+  const summary = manager.getSummary();
+  const template = summary.templates.find((entry) => entry.id === "tpl-0001");
+
+  assert.ok(template);
+  assert.equal(summary.templates.length, 2);
+  assert.equal(template?.description, "Refreshed from alpha-workbench");
+  assert.equal(template?.snapshotIds.length, 2);
+  assert.equal(template?.snapshotIds[1], "snap-0001");
+  assert.equal(summary.snapshots[0]?.templateId, "tpl-0001");
+  assert.match(template?.notes[0] ?? "", /Captured from VM alpha-workbench/);
   assert.ok(summary.jobs.some((job) => job.kind === "capture-template" && job.status === "succeeded"));
 });
 

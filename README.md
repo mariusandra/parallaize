@@ -4,9 +4,10 @@ Parallaize is a server-first proof of concept for managing many isolated desktop
 
 ## What Works
 
+- React + Tailwind dashboard with live grid, detail drawer, and server-sent updates
 - Live grid of desktop tiles with synthetic frame updates
 - Create, clone, start, stop, delete, resize, and snapshot flows
-- Capture a running VM as a reusable environment template
+- Capture a running VM as a reusable environment template, or refresh an existing one while preserving snapshot history
 - Inject commands into a selected workspace and reflect the result in the UI
 - Persist state to `data/state.json`
 - Server-sent event updates for dashboard refresh
@@ -75,7 +76,7 @@ flox activate -d . -- caddy validate --config infra/Caddyfile
 ## Repo Layout
 
 - `apps/control`: Node HTTP server, provider boundary, state store, and job orchestration
-- `apps/web`: Static dashboard assets and browser TypeScript
+- `apps/web`: React + Tailwind dashboard source and static shell assets
 - `packages/shared`: Shared types and formatting helpers
 - `tests`: Node test runner coverage for the mock provider flow
 - `.flox`: Local environment definition

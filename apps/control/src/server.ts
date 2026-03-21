@@ -28,10 +28,9 @@ const manager = new DesktopManager(store, provider);
 manager.start();
 
 const distRoot = process.cwd();
-const htmlPath = join(distRoot, "dist", "apps", "web", "static", "index.html");
-const cssPath = join(distRoot, "dist", "apps", "web", "static", "styles.css");
-const faviconPath = join(distRoot, "dist", "apps", "web", "static", "favicon.svg");
-const mainJsPath = join(distRoot, "dist", "apps", "web", "src", "main.js");
+const staticRoot = join(distRoot, "dist", "apps", "web", "static");
+const htmlPath = join(staticRoot, "index.html");
+const faviconPath = join(staticRoot, "favicon.svg");
 
 const server = createServer(async (request, response) => {
   try {
@@ -144,10 +143,6 @@ const server = createServer(async (request, response) => {
       return serveFile(response, htmlPath, "text/html; charset=utf-8", method === "HEAD");
     }
 
-    if ((method === "GET" || method === "HEAD") && url.pathname === "/styles.css") {
-      return serveFile(response, cssPath, "text/css; charset=utf-8", method === "HEAD");
-    }
-
     if (
       (method === "GET" || method === "HEAD") &&
       (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")
@@ -156,15 +151,6 @@ const server = createServer(async (request, response) => {
         response,
         faviconPath,
         "image/svg+xml; charset=utf-8",
-        method === "HEAD",
-      );
-    }
-
-    if ((method === "GET" || method === "HEAD") && url.pathname === "/assets/main.js") {
-      return serveFile(
-        response,
-        mainJsPath,
-        "text/javascript; charset=utf-8",
         method === "HEAD",
       );
     }
@@ -287,10 +273,10 @@ function resolveAsset(pathname: string): {
   path: string;
   contentType: string;
 } | null {
-  const localPath = normalize(pathname.replace(/^\/assets\//, ""));
-  const safePath = join(distRoot, "dist", "apps", "web", "src", localPath);
+  const localPath = normalize(pathname.replace(/^\//, ""));
+  const safePath = join(staticRoot, localPath);
 
-  if (!safePath.startsWith(join(distRoot, "dist", "apps", "web", "src"))) {
+  if (!safePath.startsWith(staticRoot)) {
     return null;
   }
 

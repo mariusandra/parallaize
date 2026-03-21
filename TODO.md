@@ -1,7 +1,7 @@
 # Parallaize POC TODO
 
 Last updated: 2026-03-21
-Current phase: mock-provider end-to-end POC delivered; real host integration next
+Current phase: React/Tailwind dashboard delivered; real host integration next
 
 ## Mission
 
@@ -13,7 +13,9 @@ The Electron app is explicitly out of scope until the web proof of concept works
 
 - A runnable end-to-end web POC now exists in this repo.
 - The delivered POC uses a `mock` provider by default and persists state to `data/state.json`.
+- The dashboard now runs as a React + Tailwind frontend served by the Node control plane.
 - The dashboard, API, job flow, template capture, resource editing, and Caddy front-door config are implemented.
+- Template capture now supports updating an existing template while preserving linked snapshot history.
 - The remaining gap to the original vision is real Incus-backed VM lifecycle execution and real browser desktop sessions.
 
 ## Working Rules
@@ -172,6 +174,7 @@ Exit criteria:
 - [x] Show per-tile status, template name, and resource settings
 - [x] Add create, clone, stop, delete, and snapshot controls
 - [x] Add a detail overlay with a live synthetic desktop view for the current POC
+- [x] Migrate the dashboard frontend to React + Tailwind while keeping the existing API and SSE flow
 - [ ] Replace the synthetic detail view with an embedded noVNC session
 - [x] Add live status updates from the backend
 
@@ -183,7 +186,7 @@ Exit criteria:
 
 - [x] Surface templates in the dashboard UI
 - [x] Allow creating a template from a configured VM
-- [ ] Preserve snapshot history when a template is updated
+- [x] Preserve snapshot history when a template is updated
 - [x] Allow launching a VM from any saved template
 
 Exit criteria:
@@ -238,3 +241,5 @@ These are the next tasks an agent should actually execute in order:
 - 2026-03-21: Switched local environment control to `flox` + `pnpm`.
 - 2026-03-21: Delivered an end-to-end mock-provider POC with persisted state, live dashboard updates, and template capture.
 - 2026-03-21: Chose JSON persistence for the first runnable POC and deferred PostgreSQL until the real host adapter is in place.
+- 2026-03-21: Rebuilt the dashboard frontend as a bundled React + Tailwind app while preserving the existing Node HTTP server and SSE contract.
+- 2026-03-21: Extended template capture so an existing template can be refreshed without losing its linked snapshot history.

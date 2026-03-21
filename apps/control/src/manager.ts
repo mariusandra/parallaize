@@ -412,51 +412,84 @@ export class DesktopManager {
   }
 
   captureTemplate(vmId: string, input: CaptureTemplateInput): void {
-    if (!input.name.trim()) {
+    const captureName = input.name.trim();
+    const captureDescription = input.description.trim();
+
+    if (!captureName) {
       throw new Error("Template name is required.");
     }
 
     this.queueVmAction(vmId, "capture-template", async (vm) => {
       await sleep(450);
-      const providerSnapshot = await this.provider.captureTemplate(vm, input.name.trim());
+      const providerSnapshot = await this.provider.captureTemplate(vm, captureName);
+      let updatedExistingTemplate = false;
 
       this.store.update((draft) => {
         const current = this.requireVm(draft, vmId);
+        const existingTemplate = input.templateId
+          ? requireTemplate(draft, input.templateId)
+          : null;
+        const templateId = existingTemplate?.id ?? nextId(draft, "tpl");
         const snapshot = buildSnapshot(
           draft,
           current,
-          `Template capture: ${input.name.trim()}`,
+          `Template capture: ${captureName}`,
           providerSnapshot.providerRef,
           providerSnapshot.summary,
+          templateId,
         );
-        const templateId = nextId(draft, "tpl");
-        const template: EnvironmentTemplate = {
-          id: templateId,
-          name: input.name.trim(),
-          description: input.description.trim() || `Captured from ${current.name}`,
-          baseImage: "ubuntu-desktop-24.04",
-          defaultResources: { ...current.resources },
-          tags: ["captured", slugify(current.name)],
-          notes: [
-            `Captured from VM ${current.name}.`,
-            `Workspace path at capture: ${current.workspacePath}.`,
-          ],
-          snapshotIds: [snapshot.id],
-          createdAt: nowIso(),
-          updatedAt: nowIso(),
-        };
+        const captureNotes = buildCaptureNotes(
+          current,
+          existingTemplate?.notes ?? [],
+        );
 
         current.snapshotIds.unshift(snapshot.id);
-        current.lastAction = `Captured template ${template.name}`;
+        current.lastAction = `Captured template ${captureName}`;
         current.updatedAt = nowIso();
         current.frameRevision += 1;
         draft.snapshots.unshift(snapshot);
-        draft.templates.unshift(template);
-        appendActivity(current, `template: ${template.name} captured`);
+
+        if (existingTemplate) {
+          updatedExistingTemplate = true;
+          existingTemplate.name = captureName;
+          existingTemplate.description =
+            captureDescription || existingTemplate.description || `Captured from ${current.name}`;
+          existingTemplate.defaultResources = { ...current.resources };
+          existingTemplate.snapshotIds.unshift(snapshot.id);
+          existingTemplate.tags = Array.from(
+            new Set(["captured", slugify(current.name), ...existingTemplate.tags]),
+          );
+          existingTemplate.notes = captureNotes;
+          existingTemplate.updatedAt = nowIso();
+        } else {
+          const template: EnvironmentTemplate = {
+            id: templateId,
+            name: captureName,
+            description: captureDescription || `Captured from ${current.name}`,
+            baseImage: "ubuntu-desktop-24.04",
+            defaultResources: { ...current.resources },
+            tags: ["captured", slugify(current.name)],
+            notes: captureNotes,
+            snapshotIds: [snapshot.id],
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+          };
+
+          draft.templates.unshift(template);
+        }
+
+        appendActivity(
+          current,
+          updatedExistingTemplate
+            ? `template: ${captureName} updated`
+            : `template: ${captureName} captured`,
+        );
       });
       this.publish();
 
-      return `${input.name.trim()} template created`;
+      return updatedExistingTemplate
+        ? `${captureName} template updated`
+        : `${captureName} template created`;
     });
   }
 
@@ -620,11 +653,12 @@ function buildSnapshot(
   label: string,
   providerRef: string,
   summary: string,
+  templateId = vm.templateId,
 ): Snapshot {
   return {
     id: nextId(state, "snap"),
     vmId: vm.id,
-    templateId: vm.templateId,
+    templateId,
     label,
     summary,
     providerRef,
@@ -652,6 +686,23 @@ function appendManyActivity(vm: VmInstance, lines: string[]): void {
 
 function trimJobs(state: AppState): void {
   state.jobs = state.jobs.slice(0, MAX_JOBS);
+}
+
+function buildCaptureNotes(
+  vm: VmInstance,
+  previousNotes: string[],
+): string[] {
+  const refreshedNotes = [
+    `Captured from VM ${vm.name}.`,
+    `Workspace path at capture: ${vm.workspacePath}.`,
+    ...previousNotes.filter(
+      (note) =>
+        note !== `Captured from VM ${vm.name}.` &&
+        note !== `Workspace path at capture: ${vm.workspacePath}.`,
+    ),
+  ];
+
+  return refreshedNotes.slice(0, 6);
 }
 
 function requireTemplate(

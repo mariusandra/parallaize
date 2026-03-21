@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+:root {
+  --canvas: #f8efe3;
+  --canvas-alt: #dde7e7;
+  --ink: #14212b;
+  --font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino,
+    "Times New Roman", serif;
+  --font-body: "Trebuchet MS", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
+    monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-body);
+  background:
+    radial-gradient(circle at 8% 0%, rgba(201, 103, 40, 0.24), transparent 28%),
+    radial-gradient(circle at 92% 0%, rgba(55, 121, 142, 0.16), transparent 32%),
+    linear-gradient(135deg, var(--canvas) 0%, #ecdfce 48%, var(--canvas-alt) 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.26) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(20, 33, 43, 0.06) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.7), transparent 84%);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+::selection {
+  background: rgba(201, 103, 40, 0.24);
+}
+
+.display-font {
+  font-family: var(--font-display);
+  letter-spacing: 0.01em;
+}
+
+.mono-font {
+  font-family: var(--font-mono);
+}
+
+.card-raise {
+  animation: stage-rise 720ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.dialog-enter {
+  animation: dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes stage-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

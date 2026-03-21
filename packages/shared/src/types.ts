@@ -145,6 +145,7 @@ export interface SnapshotInput {
 }
 
 export interface CaptureTemplateInput {
+  templateId?: string;
   name: string;
   description: string;
 }

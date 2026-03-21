@@ -6,13 +6,23 @@
   "packageManager": "pnpm@10.29.2",
   "description": "Server-first proof of concept for managing many isolated desktop environments.",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs && node scripts/build-web.mjs",
+    "build:web": "node scripts/copy-static.mjs && node scripts/build-web.mjs",
     "start": "node dist/apps/control/src/server.js",
     "dev": "pnpm build && pnpm start",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm build && node --test dist/tests/*.test.js"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0"
+    "@tailwindcss/cli": "^4.1.13",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "esbuild": "^0.25.10",
+    "tailwindcss": "^4.1.13"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
   }
 }
