@@ -1,21 +1,34 @@
 import { useEffect, useRef, useState, type JSX } from "react";
+
 import {
   buildRfbSocketUrls,
   resolveRfbConstructor,
-  type RfbConstructor,
   type RfbLike,
 } from "./novnc.js";
 
 interface NoVncViewportProps {
-  title: string;
+  className?: string;
+  resizeSession?: boolean;
+  showHeader?: boolean;
+  statusMode?: "header" | "overlay" | "hidden";
+  surfaceClassName?: string;
+  title?: string;
+  viewOnly?: boolean;
   webSocketPath: string;
 }
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
-const RECONNECT_DELAY_MS = 5_000;
+
+const reconnectDelayMs = 5_000;
 
 export function NoVncViewport({
-  title,
+  className,
+  resizeSession = true,
+  showHeader = true,
+  statusMode = showHeader ? "header" : "overlay",
+  surfaceClassName,
+  title = "Desktop session",
+  viewOnly = false,
   webSocketPath,
 }: NoVncViewportProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -64,7 +77,7 @@ export function NoVncViewport({
       container.replaceChildren();
     }
 
-    function scheduleReconnect(message: string, delayMs = RECONNECT_DELAY_MS): void {
+    function scheduleReconnect(message: string, delayMs = reconnectDelayMs): void {
       if (cancelled || retryTimer !== null) {
         return;
       }
@@ -104,10 +117,10 @@ export function NoVncViewport({
           shared: true,
         });
         rfb.scaleViewport = true;
-        rfb.resizeSession = true;
+        rfb.resizeSession = resizeSession;
         rfb.clipViewport = false;
-        rfb.viewOnly = false;
-        rfb.background = "#04070b";
+        rfb.viewOnly = viewOnly;
+        rfb.background = "#05070b";
 
         handleConnect = () => {
           clearRetryTimer();
@@ -155,18 +168,29 @@ export function NoVncViewport({
       clearRetryTimer();
       disposeRfb(true);
     };
-  }, [webSocketPath]);
+  }, [resizeSession, viewOnly, webSocketPath]);
 
   return (
-    <div className="overflow-hidden rounded-3xl border border-slate-900/10 bg-slate-950">
-      <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-[0.22em] text-slate-300">
-        <span>{title}</span>
-        <span className={connectionStateClassName(connectionState)}>{statusMessage}</span>
-      </div>
+    <div className={joinClassNames("novnc-shell", className)}>
+      {showHeader && statusMode === "header" ? (
+        <div className="novnc-shell__header">
+          <span>{title}</span>
+          <span className={connectionStateClassName(connectionState)}>{statusMessage}</span>
+        </div>
+      ) : null}
+
       <div
         ref={containerRef}
-        className="novnc-surface aspect-[16/10] min-h-[320px] w-full bg-slate-950"
+        className={joinClassNames("novnc-surface", surfaceClassName)}
       />
+
+      {!showHeader && statusMode === "overlay" ? (
+        <div className="novnc-shell__overlay">
+          <span className={joinClassNames("novnc-shell__status-pill", connectionStateClassName(connectionState))}>
+            {connectionState === "connected" ? "Live" : statusMessage}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -174,12 +198,16 @@ export function NoVncViewport({
 function connectionStateClassName(state: ConnectionState): string {
   switch (state) {
     case "connected":
-      return "text-emerald-300";
+      return "novnc-shell__status-pill--connected";
     case "disconnected":
-      return "text-amber-300";
+      return "novnc-shell__status-pill--disconnected";
     case "error":
-      return "text-rose-300";
+      return "novnc-shell__status-pill--error";
     default:
-      return "text-sky-300";
+      return "novnc-shell__status-pill--connecting";
   }
+}
+
+function joinClassNames(...values: Array<string | null | undefined | false>): string {
+  return values.filter(Boolean).join(" ");
 }

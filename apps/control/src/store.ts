@@ -198,11 +198,11 @@ function normalizeSession(
       port: session.port ?? null,
       webSocketPath:
         session.kind === "vnc"
-          ? session.webSocketPath ?? buildVncSocketPath(vmId)
+          ? buildVncSocketPath(vmId)
           : null,
       browserPath:
         session.kind === "vnc"
-          ? session.browserPath ?? buildVmBrowserPath(vmId)
+          ? buildVmBrowserPath(vmId)
           : null,
       display:
         session.display ??

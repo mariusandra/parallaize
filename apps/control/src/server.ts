@@ -1,18 +1,20 @@
 import { createReadStream, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { extname, join, normalize } from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import type {
+  AuthStatus,
   ApiResponse,
   CaptureTemplateInput,
   CloneVmInput,
   CreateVmInput,
   DashboardSummary,
   InjectCommandInput,
+  LoginInput,
   ResizeVmInput,
   SnapshotInput,
   UpdateVmForwardedPortsInput,
@@ -39,16 +41,34 @@ const distRoot = process.cwd();
 const staticRoot = join(distRoot, "dist", "apps", "web", "static");
 const htmlPath = join(staticRoot, "index.html");
 const faviconPath = join(staticRoot, "favicon.svg");
+const sessionCookieName = "parallaize_session";
+const sessionMaxAgeSeconds = 60 * 60 * 24 * 7;
+const activeSessionTokens = new Set<string>();
 
 const server = createServer(async (request, response) => {
   try {
-    if (!isAuthorized(request)) {
+    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
+    const method = request.method ?? "GET";
+
+    if (method === "GET" && url.pathname === "/api/auth/status") {
+      return writeJson<AuthStatus>(response, 200, {
+        ok: true,
+        data: buildAuthStatus(request),
+      });
+    }
+
+    if (method === "POST" && url.pathname === "/api/auth/login") {
+      return handleLogin(request, response);
+    }
+
+    if (method === "POST" && url.pathname === "/api/auth/logout") {
+      return handleLogout(request, response);
+    }
+
+    if (!isAuthorized(request) && !isPublicRoute(method, url.pathname)) {
       writeAuthRequired(response);
       return;
     }
-
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
-    const method = request.method ?? "GET";
 
     if (method === "GET" && url.pathname === "/api/health") {
       return writeJson(response, 200, {
@@ -231,7 +251,7 @@ server.listen(config.port, config.host, () => {
   );
   if (config.adminPassword) {
     process.stdout.write(
-      `basic auth enabled for ${config.adminUsername}\n`,
+      `single-admin auth enabled for ${config.adminUsername} (cookie login + basic auth fallback)\n`,
     );
   }
 });
@@ -284,6 +304,7 @@ function writeJson<T>(
   response: ServerResponse,
   statusCode: number,
   payload: ApiResponse<T> | Record<string, unknown>,
+  headers: Record<string, string | string[]> = {},
 ): void {
   if (response.destroyed || response.writableEnded) {
     return;
@@ -292,19 +313,29 @@ function writeJson<T>(
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
+    ...headers,
   });
   response.end(`${JSON.stringify(payload)}\n`);
 }
 
 function isAuthorized(request: IncomingMessage): boolean {
+  return resolveAuthMode(request) !== "unauthenticated";
+}
+
+function resolveAuthMode(request: IncomingMessage): AuthStatus["mode"] {
   if (!config.adminPassword) {
-    return true;
+    return "none";
+  }
+
+  const sessionToken = parseCookies(request.headers.cookie)[sessionCookieName];
+
+  if (sessionToken && activeSessionTokens.has(sessionToken)) {
+    return "session";
   }
 
   const authorization = request.headers.authorization;
-
   if (!authorization?.startsWith("Basic ")) {
-    return false;
+    return "unauthenticated";
   }
 
   let decoded: string;
@@ -312,19 +343,107 @@ function isAuthorized(request: IncomingMessage): boolean {
   try {
     decoded = Buffer.from(authorization.slice("Basic ".length), "base64").toString("utf8");
   } catch {
-    return false;
+    return "unauthenticated";
   }
 
   const separatorIndex = decoded.indexOf(":");
 
   if (separatorIndex === -1) {
-    return false;
+    return "unauthenticated";
   }
 
   const username = decoded.slice(0, separatorIndex);
   const password = decoded.slice(separatorIndex + 1);
 
-  return safeEqual(username, config.adminUsername) && safeEqual(password, config.adminPassword);
+  return safeEqual(username, config.adminUsername) && safeEqual(password, config.adminPassword)
+    ? "basic"
+    : "unauthenticated";
+}
+
+function buildAuthStatus(request: IncomingMessage): AuthStatus {
+  const mode = resolveAuthMode(request);
+
+  return {
+    authEnabled: Boolean(config.adminPassword),
+    authenticated: mode !== "unauthenticated",
+    username: mode === "session" || mode === "basic" ? config.adminUsername : null,
+    mode,
+  };
+}
+
+async function handleLogin(
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  if (!config.adminPassword) {
+    writeJson<AuthStatus>(response, 200, {
+      ok: true,
+      data: buildAuthStatus(request),
+    });
+    return;
+  }
+
+  const payload = await readJsonBody<LoginInput>(request);
+
+  if (
+    !safeEqual(payload.username ?? "", config.adminUsername) ||
+    !safeEqual(payload.password ?? "", config.adminPassword)
+  ) {
+    writeJson(response, 401, {
+      ok: false,
+      error: "Invalid username or password.",
+    });
+    return;
+  }
+
+  const token = createSessionToken();
+  activeSessionTokens.clear();
+  activeSessionTokens.add(token);
+
+  writeJson<AuthStatus>(
+    response,
+    200,
+    {
+      ok: true,
+      data: {
+        authEnabled: true,
+        authenticated: true,
+        username: config.adminUsername,
+        mode: "session",
+      },
+    },
+    {
+      "set-cookie": serializeSessionCookie(token),
+    },
+  );
+}
+
+function handleLogout(
+  request: IncomingMessage,
+  response: ServerResponse,
+): void {
+  const sessionToken = parseCookies(request.headers.cookie)[sessionCookieName];
+
+  if (sessionToken) {
+    activeSessionTokens.delete(sessionToken);
+  }
+
+  writeJson<AuthStatus>(
+    response,
+    200,
+    {
+      ok: true,
+      data: {
+        authEnabled: Boolean(config.adminPassword),
+        authenticated: !config.adminPassword,
+        username: null,
+        mode: config.adminPassword ? "unauthenticated" : "none",
+      },
+    },
+    {
+      "set-cookie": clearSessionCookie(),
+    },
+  );
 }
 
 function safeEqual(left: string, right: string | null): boolean {
@@ -339,22 +458,73 @@ function safeEqual(left: string, right: string | null): boolean {
 }
 
 function writeAuthRequired(response: ServerResponse): void {
-  response.writeHead(401, {
-    "cache-control": "no-store",
-    "content-type": "text/plain; charset=utf-8",
-    "www-authenticate": 'Basic realm="Parallaize"',
+  writeJson(response, 401, {
+    ok: false,
+    error: "Authentication required.",
   });
-  response.end("Authentication required.\n");
 }
 
 function writeSocketAuthRequired(socket: Socket): void {
   socket.write(
     "HTTP/1.1 401 Unauthorized\r\n" +
-      'WWW-Authenticate: Basic realm="Parallaize"\r\n' +
       "Connection: close\r\n" +
       "Content-Length: 0\r\n\r\n",
   );
   socket.destroy();
+}
+
+function isPublicRoute(method: string, pathname: string): boolean {
+  if (method === "GET" || method === "HEAD") {
+    if (pathname === "/" || pathname === "/favicon.svg" || pathname === "/favicon.ico") {
+      return true;
+    }
+
+    if (pathname.startsWith("/assets/")) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function createSessionToken(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+function serializeSessionCookie(token: string): string {
+  return `${sessionCookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionMaxAgeSeconds}`;
+}
+
+function clearSessionCookie(): string {
+  return `${sessionCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  if (!header) {
+    return {};
+  }
+
+  const entries = header.split(";").map((part) => part.trim()).filter(Boolean);
+  const cookies: Record<string, string> = {};
+
+  for (const entry of entries) {
+    const separatorIndex = entry.indexOf("=");
+
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const key = entry.slice(0, separatorIndex).trim();
+    const value = entry.slice(separatorIndex + 1).trim();
+
+    if (!key) {
+      continue;
+    }
+
+    cookies[key] = value;
+  }
+
+  return cookies;
 }
 
 async function serveFile(

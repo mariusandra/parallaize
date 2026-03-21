@@ -39,11 +39,11 @@ The smoke command:
 - Deletes the temporary VM unless `PARALLAIZE_SMOKE_KEEP_VM=1` is set
 
 It assumes the current user can run `sudo` for the temporary guest-disk mount operations.
-If Basic Auth is enabled, the smoke command will reuse `PARALLAIZE_ADMIN_USERNAME` and `PARALLAIZE_ADMIN_PASSWORD` unless you override them with `PARALLAIZE_SMOKE_ADMIN_USERNAME` and `PARALLAIZE_SMOKE_ADMIN_PASSWORD`.
+If admin auth is enabled, the smoke command will reuse `PARALLAIZE_ADMIN_USERNAME` and `PARALLAIZE_ADMIN_PASSWORD` unless you override them with `PARALLAIZE_SMOKE_ADMIN_USERNAME` and `PARALLAIZE_SMOKE_ADMIN_PASSWORD`.
 
 ## Authentication
 
-The control plane now supports shared single-user Basic Auth.
+The control plane now supports a shared single-admin browser session with cookie login, while still accepting Basic Auth headers for CLI and automation clients.
 
 Set these env vars before starting the server:
 
@@ -52,15 +52,26 @@ PARALLAIZE_ADMIN_USERNAME=admin
 PARALLAIZE_ADMIN_PASSWORD=change-me
 ```
 
-When `PARALLAIZE_ADMIN_PASSWORD` is set, the server requires valid credentials for:
+When `PARALLAIZE_ADMIN_PASSWORD` is set:
 
-- Dashboard HTML and static assets
+- The browser loads the app shell and then signs in through an in-app login form that sets an HttpOnly session cookie.
+- API clients, smoke tests, and scripts can continue sending Basic Auth headers directly.
+- The same authenticated session protects:
+
 - API routes
 - Server-sent events
 - Browser VNC websocket upgrades
 - Forwarded guest-service routes
 
 If the password is unset, auth is disabled.
+
+## Guest Service Presets
+
+Current working decision:
+
+- Template images should only bake in the core desktop and VNC bootstrap needed for browser access.
+- Guest HTTP/WebSocket services stay workload-specific and are configured as forwarded-port defaults on templates, not hardcoded into the base image.
+- When you capture or refresh a template from a VM, the VM's forwarded-service defaults are preserved with that template for future launches.
 
 ## Incus Mode
 
@@ -207,7 +218,7 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 - `PARALLAIZE_INCUS_BIN`: Incus binary path, default `incus`
 - `PARALLAIZE_INCUS_PROJECT`: optional Incus project name
 - `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5901`
-- `PARALLAIZE_ADMIN_USERNAME`: shared admin username for Basic Auth, default `admin`
+- `PARALLAIZE_ADMIN_USERNAME`: shared admin username for browser-session login or Basic Auth fallback, default `admin`
 - `PARALLAIZE_ADMIN_PASSWORD`: shared admin password; when unset, auth is disabled
 
 An example production env file is included at `infra/parallaize.env.example`.

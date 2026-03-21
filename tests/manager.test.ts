@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type {
+  AppState,
   EnvironmentTemplate,
   VmInstance,
 } from "../packages/shared/src/types.js";
@@ -697,6 +698,168 @@ test("manager derives browser VNC and forwarded service routes for incus VMs", a
   assert.equal(updated.vm.forwardedPorts.length, 1);
   assert.equal(updated.vm.forwardedPorts[0]?.guestPort, 8080);
   assert.equal(updated.vm.forwardedPorts[0]?.publicPath, `/vm/${vm.id}/forwards/port-01/`);
+});
+
+test("incus clones do not reuse the source VM VNC identity", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-incus-clone-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const calls: string[][] = [];
+  const sourceInstanceName = "parallaize-vm-0055-origin";
+  const cloneInstanceName = "parallaize-vm-0056-origin-clone";
+  const instanceAddresses = new Map<string, string>([
+    [sourceInstanceName, "10.55.0.12"],
+    [cloneInstanceName, "10.55.0.13"],
+  ]);
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (args[0] === "list" && args[2] === "--format" && args[3] === "json") {
+        const address = instanceAddresses.get(args[1]);
+
+        if (!address) {
+          return ok("[]", args);
+        }
+
+        return ok(
+          JSON.stringify([
+            {
+              name: args[1],
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address,
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5901,
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const now = new Date().toISOString();
+  const template: EnvironmentTemplate = {
+    id: "tpl-0055",
+    name: "Clone Test Template",
+    description: "Used to verify clone identity isolation",
+    launchSource: "images:ubuntu/noble/desktop",
+    defaultResources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    defaultForwardedPorts: [],
+    tags: [],
+    notes: [],
+    snapshotIds: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  const state: AppState = {
+    sequence: 56,
+    provider: provider.state,
+    templates: [template],
+    vms: [
+      {
+        id: "vm-0055",
+        name: "origin",
+        templateId: template.id,
+        provider: "incus",
+        providerRef: sourceInstanceName,
+        status: "running",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: now,
+        lastAction: "Booted",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 55,
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        session: {
+          kind: "vnc",
+          host: "10.55.0.12",
+          port: 5901,
+          webSocketPath: "/api/vms/vm-9999/vnc",
+          browserPath: "/?vm=vm-9999",
+          display: "10.55.0.12:5901",
+        },
+        forwardedPorts: [],
+        activityLog: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [],
+    lastUpdated: now,
+  };
+
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  store.save(state);
+  const manager = new DesktopManager(store, provider);
+
+  const sourceDetail = manager.getVmDetail("vm-0055");
+  assert.equal(sourceDetail.vm.session?.webSocketPath, "/api/vms/vm-0055/vnc");
+  assert.equal(sourceDetail.vm.session?.browserPath, "/?vm=vm-0055");
+
+  const clone = manager.cloneVm({
+    sourceVmId: "vm-0055",
+    name: "origin-clone",
+  });
+
+  assert.equal(clone.id, "vm-0056");
+  assert.equal(clone.providerRef, cloneInstanceName);
+  assert.equal(clone.session, null);
+
+  await wait(700);
+
+  const detail = manager.getVmDetail(clone.id);
+  assert.equal(detail.vm.status, "running");
+  assert.equal(detail.vm.session?.host, "10.55.0.13");
+  assert.equal(detail.vm.session?.webSocketPath, `/api/vms/${clone.id}/vnc`);
+  assert.equal(detail.vm.session?.browserPath, `/?vm=${clone.id}`);
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "copy" &&
+        args[1] === sourceInstanceName &&
+        args[2] === cloneInstanceName,
+    ),
+  );
 });
 
 function ok(stdout: string, args: string[]) {

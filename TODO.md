@@ -15,9 +15,10 @@ The Electron app is explicitly out of scope until the web proof of concept works
 - The delivered POC uses a `mock` provider by default and persists state to `data/state.json`.
 - The dashboard now runs as a React + Tailwind frontend served by the Node control plane.
 - The dashboard, API, job flow, template capture, resource editing, and Caddy front-door config are implemented.
+- The dashboard UI now also ships a tighter split-screen shell with a collapsible VM rail, live thumbnail previews for reachable VNC guests, a fullscreen browser desktop stage, and a light/dark mode toggle.
 - Template capture now supports updating an existing template while preserving linked snapshot history.
 - The control plane now contains a real Incus CLI-backed provider, template launch-source tracking, embedded noVNC browser transport, and configurable guest-service forwarding.
-- The control plane now supports shared single-user Basic Auth when admin credentials are supplied through env vars.
+- The control plane now supports a shared single-admin browser session flow with Basic Auth fallback when admin credentials are supplied through env vars.
 - This machine now has `incus`, `incusd`, `attr`, and `qemu_kvm` available through the repo Flox environment.
 - This host also needed the Ubuntu system packages `attr`, `ovmf`, `qemu-system-x86`, and `qemu-utils` for a VM-capable Incus runtime.
 - The Incus daemon is now initialized, reachable from the dashboard user via `/var/lib/incus/unix.socket`, and the provider card can report `ready` in the browser.
@@ -33,6 +34,7 @@ The Electron app is explicitly out of scope until the web proof of concept works
 ## Working Rules
 
 - Keep this file current as tasks are completed or scope changes.
+- After each code change, start the server in real mode (`PARALLAIZE_PROVIDER=incus`) with an Incus-backed state file and confirm it boots before considering the task complete.
 - Build the smallest vertical slice first: create VM -> view desktop -> control VM -> clone VM.
 - Prefer one host and one operator for the POC. Do not design for clustering yet.
 - Make infrastructure decisions that preserve a path to a richer version later, but do not overbuild now.
@@ -223,9 +225,9 @@ These are the next tasks an agent should actually execute in order:
 
 1. Run a live browser interaction pass against a host-backed VM now that the built-in VNC bridge preserves raw binary RFB traffic end to end.
 2. Replace JSON persistence with PostgreSQL once the host-backed adapter shape is stable.
-3. Decide which guest service presets should ship in template images versus being configured per workload.
+3. Audit seeded templates and docs against the current guest-service preset policy so the image/bootstrap split stays explicit.
 4. Clean up probe and validation VMs, then tighten template capture/update ergonomics around the validated image path.
-5. Tighten auth from shared Basic Auth into a more ergonomic single-admin session flow if the POC needs a friendlier browser login.
+5. Evaluate whether the new cookie-backed single-admin session flow needs expiry/rotation refinements beyond the initial browser-login pass.
 
 ## Risks And Watchouts
 
@@ -238,7 +240,6 @@ These are the next tasks an agent should actually execute in order:
 ## Open Questions
 
 - Will the target host use ZFS already, or do we need a btrfs-based fallback from day one?
-- Should the first auth layer be single shared admin auth or local-user accounts?
 - Do we want templates to include startup commands and working-directory defaults immediately, or defer that?
 - Is live tile rendering required to be truly continuous, or is a low-frequency refresh acceptable for the first pass?
 
@@ -271,3 +272,6 @@ These are the next tasks an agent should actually execute in order:
 - 2026-03-21: Added shared single-user Basic Auth at the control plane so the dashboard, API, VNC bridge, SSE stream, and forwarded guest-service routes can be protected with env-configured admin credentials.
 - 2026-03-21: Hardened the built-in VNC bridge to keep raw WebSocket-to-TCP traffic in Buffer mode and added a regression test that verifies byte-for-byte passthrough in both directions.
 - 2026-03-21: Verified that this host's Incus bridge was healthy but UFW was dropping guest DHCP, DNS, and forwarded traffic; added the required `incusbr0` UFW allowances so new VM boots now receive IPv4 leases and outbound internet access.
+- 2026-03-21: Replaced the browser-facing Basic Auth challenge with a cookie-backed single-admin login flow while keeping Basic Auth header support for CLI clients and smoke automation.
+- 2026-03-21: Decided that template images should only ship the core desktop and VNC bootstrap; workload-specific guest services remain forwarded-port defaults captured on templates instead of being baked into the base image.
+- 2026-03-21: Added a standing working rule to boot the control plane in real Incus mode after each change so host-backed regressions surface immediately.

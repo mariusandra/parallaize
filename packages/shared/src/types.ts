@@ -198,6 +198,18 @@ export interface UpdateVmForwardedPortsInput {
   forwardedPorts: TemplatePortForward[];
 }
 
+export interface LoginInput {
+  username: string;
+  password: string;
+}
+
+export interface AuthStatus {
+  authEnabled: boolean;
+  authenticated: boolean;
+  username: string | null;
+  mode: "none" | "session" | "basic" | "unauthenticated";
+}
+
 export interface ApiEnvelope<T> {
   ok: true;
   data: T;

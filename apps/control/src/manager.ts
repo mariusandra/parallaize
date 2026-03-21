@@ -243,8 +243,7 @@ export class DesktopManager {
       );
       vm.activeWindow = source.activeWindow;
       vm.activityLog = [...source.activityLog];
-      vm.workspacePath = source.workspacePath;
-      vm.session = cloneVmSession(vm.id, source.session);
+      vm.session = cloneVmSession(source.session);
 
       const job = buildJob(draft, "clone", vm.id, template.id, `Queued clone from ${source.name}`);
 
@@ -949,20 +948,27 @@ function enrichVmSession(
 
   return {
     ...session,
-    webSocketPath: session.webSocketPath ?? buildVncSocketPath(vmId),
-    browserPath: session.browserPath ?? buildVmBrowserPath(vmId),
+    webSocketPath: buildVncSocketPath(vmId),
+    browserPath: buildVmBrowserPath(vmId),
   };
 }
 
 function cloneVmSession(
-  vmId: string,
   session: VmInstance["session"],
 ): VmInstance["session"] {
   if (!session) {
     return null;
   }
 
-  return enrichVmSession(vmId, { ...session });
+  if (session.kind === "vnc") {
+    return null;
+  }
+
+  return {
+    ...session,
+    browserPath: null,
+    webSocketPath: null,
+  };
 }
 
 function sameProviderState(left: ProviderState, right: ProviderState): boolean {
