@@ -1,4 +1,10 @@
 export type ProviderKind = "mock" | "incus";
+export type ProviderHostStatus =
+  | "ready"
+  | "missing-cli"
+  | "daemon-unreachable"
+  | "error";
+export type ProviderDesktopTransport = "synthetic" | "novnc";
 
 export type VmStatus =
   | "creating"
@@ -8,6 +14,9 @@ export type VmStatus =
   | "error";
 
 export type VmWindow = "editor" | "terminal" | "browser" | "logs";
+
+export type VmSessionKind = "synthetic" | "vnc";
+export type VmForwardProtocol = "http";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -32,14 +41,41 @@ export interface ProviderState {
   kind: ProviderKind;
   available: boolean;
   detail: string;
+  hostStatus: ProviderHostStatus;
+  binaryPath: string | null;
+  project: string | null;
+  desktopTransport: ProviderDesktopTransport;
+  nextSteps: string[];
+}
+
+export interface VmSession {
+  kind: VmSessionKind;
+  host: string | null;
+  port: number | null;
+  webSocketPath: string | null;
+  browserPath: string | null;
+  display: string;
+}
+
+export interface TemplatePortForward {
+  name: string;
+  guestPort: number;
+  protocol: VmForwardProtocol;
+  description: string;
+}
+
+export interface VmPortForward extends TemplatePortForward {
+  id: string;
+  publicPath: string;
 }
 
 export interface EnvironmentTemplate {
   id: string;
   name: string;
   description: string;
-  baseImage: string;
+  launchSource: string;
   defaultResources: ResourceSpec;
+  defaultForwardedPorts: TemplatePortForward[];
   tags: string[];
   notes: string[];
   snapshotIds: string[];
@@ -52,6 +88,7 @@ export interface VmInstance {
   name: string;
   templateId: string;
   provider: ProviderKind;
+  providerRef: string;
   status: VmStatus;
   resources: ResourceSpec;
   createdAt: string;
@@ -63,6 +100,8 @@ export interface VmInstance {
   screenSeed: number;
   activeWindow: VmWindow;
   workspacePath: string;
+  session: VmSession | null;
+  forwardedPorts: VmPortForward[];
   activityLog: string[];
 }
 
@@ -129,6 +168,7 @@ export interface CreateVmInput {
   templateId: string;
   name: string;
   resources: ResourceSpec;
+  forwardedPorts?: TemplatePortForward[];
 }
 
 export interface CloneVmInput {
@@ -152,6 +192,10 @@ export interface CaptureTemplateInput {
 
 export interface InjectCommandInput {
   command: string;
+}
+
+export interface UpdateVmForwardedPortsInput {
+  forwardedPorts: TemplatePortForward[];
 }
 
 export interface ApiEnvelope<T> {

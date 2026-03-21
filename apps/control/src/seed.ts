@@ -4,7 +4,10 @@ import {
   type ProviderState,
   type Snapshot,
   type VmInstance,
+  type VmSession,
 } from "../../../packages/shared/src/types.js";
+
+const DEFAULT_UBUNTU_DESKTOP_IMAGE = "images:ubuntu/noble/desktop";
 
 export function createSeedState(provider: ProviderState): AppState {
   const now = new Date().toISOString();
@@ -15,18 +18,19 @@ export function createSeedState(provider: ProviderState): AppState {
       name: "Ubuntu Agent Forge",
       description:
         "Balanced Ubuntu desktop for coding agents, shell tasks, and browser-based reviews.",
-      baseImage: "ubuntu-desktop-24.04",
+      launchSource: DEFAULT_UBUNTU_DESKTOP_IMAGE,
       defaultResources: {
         cpu: 6,
         ramMb: 12288,
         diskGb: 80,
       },
+      defaultForwardedPorts: [],
       tags: ["coding", "agents", "ubuntu"],
       notes: [
         "GNOME desktop with terminal and editor workspace layout.",
         "Base image is intended for iterative snapshotting during development.",
       ],
-      snapshotIds: ["snap-0001"],
+      snapshotIds: provider.kind === "mock" ? ["snap-0001"] : [],
       createdAt: now,
       updatedAt: now,
     },
@@ -35,21 +39,36 @@ export function createSeedState(provider: ProviderState): AppState {
       name: "Research Bench",
       description:
         "Heavier desktop profile for docs, browser automation, and parallel review sessions.",
-      baseImage: "ubuntu-desktop-24.04",
+      launchSource: DEFAULT_UBUNTU_DESKTOP_IMAGE,
       defaultResources: {
         cpu: 10,
         ramMb: 24576,
         diskGb: 140,
       },
+      defaultForwardedPorts: [],
       tags: ["research", "browser", "analysis"],
       notes: [
         "Configured for large-browser workloads and long-running analysis tasks.",
       ],
-      snapshotIds: ["snap-0002"],
+      snapshotIds: provider.kind === "mock" ? ["snap-0002"] : [],
       createdAt: now,
       updatedAt: now,
     },
   ];
+
+  if (provider.kind === "incus") {
+    return {
+      sequence: 3,
+      provider,
+      templates,
+      vms: [],
+      snapshots: [],
+      jobs: [],
+      lastUpdated: now,
+    };
+  }
+
+  const syntheticSession = createSyntheticSession();
 
   const vms: VmInstance[] = [
     {
@@ -57,6 +76,7 @@ export function createSeedState(provider: ProviderState): AppState {
       name: "alpha-workbench",
       templateId: "tpl-0001",
       provider: provider.kind,
+      providerRef: "alpha-workbench",
       status: "running",
       resources: {
         cpu: 8,
@@ -72,6 +92,8 @@ export function createSeedState(provider: ProviderState): AppState {
       screenSeed: 38,
       activeWindow: "editor",
       workspacePath: "/srv/workspaces/alpha-workbench",
+      session: syntheticSession,
+      forwardedPorts: [],
       activityLog: [
         "boot: desktop session resumed",
         "workspace: /srv/workspaces/alpha-workbench",
@@ -83,6 +105,7 @@ export function createSeedState(provider: ProviderState): AppState {
       name: "research-orbit",
       templateId: "tpl-0002",
       provider: provider.kind,
+      providerRef: "research-orbit",
       status: "stopped",
       resources: {
         cpu: 12,
@@ -98,6 +121,8 @@ export function createSeedState(provider: ProviderState): AppState {
       screenSeed: 212,
       activeWindow: "browser",
       workspacePath: "/srv/workspaces/research-orbit",
+      session: syntheticSession,
+      forwardedPorts: [],
       activityLog: [
         "boot: session checkpoint saved",
         "browser: 16 tabs pinned for ongoing research",
@@ -146,5 +171,16 @@ export function createSeedState(provider: ProviderState): AppState {
     snapshots,
     jobs: [],
     lastUpdated: now,
+  };
+}
+
+function createSyntheticSession(): VmSession {
+  return {
+    kind: "synthetic",
+    host: null,
+    port: null,
+    webSocketPath: null,
+    browserPath: null,
+    display: "Synthetic frame stream",
   };
 }

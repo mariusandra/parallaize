@@ -6,9 +6,32 @@
 :8080 {
 	encode gzip zstd
 
-	@api path /api/* /events
+	@vnc path_regexp vnc ^/api/vms/[^/]+/vnc$
+	handle @vnc {
+		reverse_proxy 127.0.0.1:3000 {
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+
+	@events path /events
+	handle @events {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	@api path /api/*
 	handle @api {
 		reverse_proxy 127.0.0.1:3000
+	}
+
+	@vm_forwards path /vm/*
+	handle @vm_forwards {
+		reverse_proxy 127.0.0.1:3000 {
+			transport http {
+				versions 1.1
+			}
+		}
 	}
 
 	handle {

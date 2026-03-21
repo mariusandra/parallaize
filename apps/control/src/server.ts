@@ -1,6 +1,8 @@
 import { createReadStream, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { extname, join, normalize } from "node:path";
 import { pipeline } from "node:stream/promises";
 
@@ -13,18 +15,24 @@ import type {
   InjectCommandInput,
   ResizeVmInput,
   SnapshotInput,
+  UpdateVmForwardedPortsInput,
   VmDetail,
 } from "../../../packages/shared/src/types.js";
 import { loadConfig } from "./config.js";
 import { DesktopManager } from "./manager.js";
+import { VmNetworkBridge } from "./network.js";
 import { createProvider } from "./providers.js";
 import { createSeedState } from "./seed.js";
 import { JsonStateStore } from "./store.js";
 
 const config = loadConfig();
-const provider = createProvider(config.providerKind, config.incusBinary);
+const provider = createProvider(config.providerKind, config.incusBinary, {
+  project: config.incusProject ?? undefined,
+  guestVncPort: config.guestVncPort,
+});
 const store = new JsonStateStore(config.dataFile, () => createSeedState(provider.state));
 const manager = new DesktopManager(store, provider);
+const networkBridge = new VmNetworkBridge(manager);
 manager.start();
 
 const distRoot = process.cwd();
@@ -34,6 +42,11 @@ const faviconPath = join(staticRoot, "favicon.svg");
 
 const server = createServer(async (request, response) => {
   try {
+    if (!isAuthorized(request)) {
+      writeAuthRequired(response);
+      return;
+    }
+
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
     const method = request.method ?? "GET";
 
@@ -57,6 +70,10 @@ const server = createServer(async (request, response) => {
 
     if (method === "GET" && url.pathname === "/events") {
       return handleEvents(response);
+    }
+
+    if (await networkBridge.maybeHandleRequest(request, response, url)) {
+      return;
     }
 
     const vmMatch = url.pathname.match(/^\/api\/vms\/([^/]+)$/);
@@ -86,6 +103,13 @@ const server = createServer(async (request, response) => {
         ok: true,
         data: vm,
       });
+    }
+
+    const forwardsMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/forwards$/);
+    if (method === "POST" && forwardsMatch) {
+      const payload = await readJsonBody<UpdateVmForwardedPortsInput>(request);
+      manager.updateVmForwardedPorts(forwardsMatch[1], payload);
+      return writeAccepted(response);
     }
 
     const actionMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/(clone|start|stop|delete|snapshot|resize|template|input)$/);
@@ -180,10 +204,28 @@ const server = createServer(async (request, response) => {
   }
 });
 
+server.on("upgrade", (request, socket, head) => {
+  if (!isAuthorized(request)) {
+    writeSocketAuthRequired(socket as Socket);
+    return;
+  }
+
+  if (networkBridge.maybeHandleUpgrade(request, socket as Socket, head)) {
+    return;
+  }
+
+  socket.destroy();
+});
+
 server.listen(config.port, config.host, () => {
   process.stdout.write(
     `parallaize listening on http://${config.host}:${config.port} using ${provider.state.kind} provider\n`,
   );
+  if (config.adminPassword) {
+    process.stdout.write(
+      `basic auth enabled for ${config.adminUsername}\n`,
+    );
+  }
 });
 
 function handleEvents(response: ServerResponse): void {
@@ -240,6 +282,67 @@ function writeJson<T>(
     "cache-control": "no-store",
   });
   response.end(`${JSON.stringify(payload)}\n`);
+}
+
+function isAuthorized(request: IncomingMessage): boolean {
+  if (!config.adminPassword) {
+    return true;
+  }
+
+  const authorization = request.headers.authorization;
+
+  if (!authorization?.startsWith("Basic ")) {
+    return false;
+  }
+
+  let decoded: string;
+
+  try {
+    decoded = Buffer.from(authorization.slice("Basic ".length), "base64").toString("utf8");
+  } catch {
+    return false;
+  }
+
+  const separatorIndex = decoded.indexOf(":");
+
+  if (separatorIndex === -1) {
+    return false;
+  }
+
+  const username = decoded.slice(0, separatorIndex);
+  const password = decoded.slice(separatorIndex + 1);
+
+  return safeEqual(username, config.adminUsername) && safeEqual(password, config.adminPassword);
+}
+
+function safeEqual(left: string, right: string | null): boolean {
+  if (right === null) {
+    return false;
+  }
+
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function writeAuthRequired(response: ServerResponse): void {
+  response.writeHead(401, {
+    "cache-control": "no-store",
+    "content-type": "text/plain; charset=utf-8",
+    "www-authenticate": 'Basic realm="Parallaize"',
+  });
+  response.end("Authentication required.\n");
+}
+
+function writeSocketAuthRequired(socket: Socket): void {
+  socket.write(
+    "HTTP/1.1 401 Unauthorized\r\n" +
+      'WWW-Authenticate: Basic realm="Parallaize"\r\n' +
+      "Connection: close\r\n" +
+      "Content-Length: 0\r\n\r\n",
+  );
+  socket.destroy();
 }
 
 async function serveFile(

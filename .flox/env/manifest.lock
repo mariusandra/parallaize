@@ -3,14 +3,31 @@
   "manifest": {
     "schema-version": "1.10.0",
     "install": {
+      "attr": {
+        "pkg-path": "attr",
+        "systems": [
+          "x86_64-linux",
+          "aarch64-linux"
+        ]
+      },
       "caddy": {
         "pkg-path": "caddy"
+      },
+      "incus": {
+        "pkg-path": "incus",
+        "systems": [
+          "aarch64-linux",
+          "x86_64-linux"
+        ]
       },
       "nodejs_24": {
         "pkg-path": "nodejs_24"
       },
       "pnpm_10": {
         "pkg-path": "pnpm_10"
+      },
+      "qemu_kvm": {
+        "pkg-path": "qemu_kvm"
       },
       "typescript": {
         "pkg-path": "typescript"
@@ -19,6 +36,74 @@
     "options": {}
   },
   "packages": [
+    {
+      "attr_path": "attr",
+      "broken": false,
+      "derivation": "/nix/store/59k7z9yf2ah11d1kfr739ilsl2cnv55y-attr-2.5.2.drv",
+      "description": "Library and tools for manipulating extended attributes",
+      "install_id": "attr",
+      "license": "GPL-2.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "attr-2.5.2",
+      "pname": "attr",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T05:23:23.718006Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.5.2",
+      "outputs_to_install": [
+        "bin",
+        "man"
+      ],
+      "outputs": {
+        "bin": "/nix/store/dmsmmdflg5v4p336vvba271i0g02qqbf-attr-2.5.2-bin",
+        "dev": "/nix/store/dsai9rsjkhdijaakxa8c6ypzw2jmd0l6-attr-2.5.2-dev",
+        "doc": "/nix/store/hpcalyg1ykbx39bpgdf6bdjfsqslrz0x-attr-2.5.2-doc",
+        "man": "/nix/store/w3cwhi17y6v7pavhsbmwb2ryxckg06sr-attr-2.5.2-man",
+        "out": "/nix/store/a2lv3jn423hz9y40syi0ahlqlnj1jfkr-attr-2.5.2"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "attr",
+      "broken": false,
+      "derivation": "/nix/store/6gz6lcfacrml52i547kgh9l2km6mh36x-attr-2.5.2.drv",
+      "description": "Library and tools for manipulating extended attributes",
+      "install_id": "attr",
+      "license": "GPL-2.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "attr-2.5.2",
+      "pname": "attr",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:46:38.808189Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.5.2",
+      "outputs_to_install": [
+        "bin",
+        "man"
+      ],
+      "outputs": {
+        "bin": "/nix/store/vsrrp71y4n4491g89zya0qwjy7fp5cd8-attr-2.5.2-bin",
+        "dev": "/nix/store/f083dkd4fr1j5k9az3bwdig2yf76wy1d-attr-2.5.2-dev",
+        "doc": "/nix/store/5w3ga8sgj22lg5dxcdp1755406kwl6gy-attr-2.5.2-doc",
+        "man": "/nix/store/fkliai4j8n4ypi40c5ybw70c7chkvifs-attr-2.5.2-man",
+        "out": "/nix/store/7ssfvw8z4ylzjkw73z1y78svbhkdlkvb-attr-2.5.2"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
     {
       "attr_path": "caddy",
       "broken": false,
@@ -130,6 +215,68 @@
       ],
       "outputs": {
         "out": "/nix/store/0y8w75a33h8qxxmg5jglxk0kvibcgx4p-caddy-2.11.1"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "incus",
+      "broken": false,
+      "derivation": "/nix/store/dammlsqwgsiqzq975aklsqz8myjd59dj-incus-6.22.0.drv",
+      "description": "Powerful system container and virtual machine manager",
+      "install_id": "incus",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "incus-6.22.0",
+      "pname": "incus",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T05:23:44.452997Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "6.22.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "agent_loader": "/nix/store/h82iqrri8h00if48qjyrv8x1zbw297ph-incus-6.22.0-agent_loader",
+        "doc": "/nix/store/4hmjx1kjxrvbaj4182hcvs7y8mgg6ny9-incus-6.22.0-doc",
+        "out": "/nix/store/iqzdr9h0rl33ib13qdn5jvs20ifi1g76-incus-6.22.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "incus",
+      "broken": false,
+      "derivation": "/nix/store/s69k85g6ga57fwspp7fbf5cfjw74pz39-incus-6.22.0.drv",
+      "description": "Powerful system container and virtual machine manager",
+      "install_id": "incus",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "incus-6.22.0",
+      "pname": "incus",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:47:00.015485Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "6.22.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "agent_loader": "/nix/store/wfw202ql7ykxhbw2nw2qcpsj2qv0b47k-incus-6.22.0-agent_loader",
+        "doc": "/nix/store/dny4k993ryw06cx4vjcywyywclglr7hi-incus-6.22.0-doc",
+        "out": "/nix/store/rnpj23yihfk9y6gx14l1asjn2nrnp9p5-incus-6.22.0"
       },
       "system": "x86_64-linux",
       "group": "toplevel",
@@ -366,6 +513,130 @@
       ],
       "outputs": {
         "out": "/nix/store/hzfx2jjklyfa3lyrwa0n9h037dnsf1i7-pnpm-10.29.2"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "qemu_kvm",
+      "broken": false,
+      "derivation": "/nix/store/n0d5mqxmg5i3rsz54r1vb3ngvx5ycakz-qemu-host-cpu-only-10.2.1.drv",
+      "description": "Generic and open source machine emulator and virtualizer",
+      "install_id": "qemu_kvm",
+      "license": "GPL-2.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "qemu-host-cpu-only-10.2.1",
+      "pname": "qemu_kvm",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T04:48:06.373719Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "10.2.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/yynpq38an7k2gd3d5ivnv6x19gxvpf18-qemu-host-cpu-only-10.2.1-doc",
+        "out": "/nix/store/h1wf185b0pzayp4i5xi6plxdvjp1zfxp-qemu-host-cpu-only-10.2.1"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "qemu_kvm",
+      "broken": false,
+      "derivation": "/nix/store/1jip0bn0857lrs39pwn66p4cyqb3xsy7-qemu-host-cpu-only-10.2.1.drv",
+      "description": "Generic and open source machine emulator and virtualizer",
+      "install_id": "qemu_kvm",
+      "license": "GPL-2.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "qemu-host-cpu-only-10.2.1",
+      "pname": "qemu_kvm",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T05:25:19.659754Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "10.2.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/vcyw0yjh76c5qv0vgcp5840bm9n9rdb6-qemu-host-cpu-only-10.2.1-debug",
+        "doc": "/nix/store/izpp84y2lsvbwhi8h00x2ygiaf34rm1j-qemu-host-cpu-only-10.2.1-doc",
+        "ga": "/nix/store/24j6vkdqdxhvhbni7k216xdw1w9zcd89-qemu-host-cpu-only-10.2.1-ga",
+        "out": "/nix/store/bw2fvv1bskm4yk1qqvz1byp44jgak2mh-qemu-host-cpu-only-10.2.1"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "qemu_kvm",
+      "broken": false,
+      "derivation": "/nix/store/i4lijfjx3dd6mxfl3ibpdj39mx8ckqd3-qemu-host-cpu-only-10.2.1.drv",
+      "description": "Generic and open source machine emulator and virtualizer",
+      "install_id": "qemu_kvm",
+      "license": "GPL-2.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "qemu-host-cpu-only-10.2.1",
+      "pname": "qemu_kvm",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:05:10.055020Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "10.2.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/phji9vyhf8yg0p9dv9k9y11zifpgh355-qemu-host-cpu-only-10.2.1-doc",
+        "out": "/nix/store/wshyzx8x85y5b0cg1vc2cm7ky1ap2an8-qemu-host-cpu-only-10.2.1"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "qemu_kvm",
+      "broken": false,
+      "derivation": "/nix/store/k6fkl7j5qmqlzvh71if2kj8f3c87hqc8-qemu-host-cpu-only-10.2.1.drv",
+      "description": "Generic and open source machine emulator and virtualizer",
+      "install_id": "qemu_kvm",
+      "license": "GPL-2.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=aca4d95fce4914b3892661bcb80b8087293536c6",
+      "name": "qemu-host-cpu-only-10.2.1",
+      "pname": "qemu_kvm",
+      "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+      "rev_count": 958961,
+      "rev_date": "2026-03-06T04:56:59Z",
+      "scrape_date": "2026-03-08T06:48:39.130455Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "10.2.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/xq9w4bcm2szqxkbvk50lxpji7cksx92a-qemu-host-cpu-only-10.2.1-debug",
+        "doc": "/nix/store/b30zvl5f4nsjxafsvsp9y8q6f3c6dgf1-qemu-host-cpu-only-10.2.1-doc",
+        "ga": "/nix/store/gs5mp6l52cr4pgpb52f8cf46fgw9zpyl-qemu-host-cpu-only-10.2.1-ga",
+        "out": "/nix/store/6zisb2ixz2gv0rprrnd7n1wx1ls7zi63-qemu-host-cpu-only-10.2.1"
       },
       "system": "x86_64-linux",
       "group": "toplevel",

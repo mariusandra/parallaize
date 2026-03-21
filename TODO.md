@@ -1,7 +1,7 @@
 # Parallaize POC TODO
 
 Last updated: 2026-03-21
-Current phase: React/Tailwind dashboard delivered; real host integration next
+Current phase: Real Incus-backed browser VNC sessions and Caddy guest-service forwarding are validated; remaining work is persistence hardening, automation, and template polish
 
 ## Mission
 
@@ -16,7 +16,15 @@ The Electron app is explicitly out of scope until the web proof of concept works
 - The dashboard now runs as a React + Tailwind frontend served by the Node control plane.
 - The dashboard, API, job flow, template capture, resource editing, and Caddy front-door config are implemented.
 - Template capture now supports updating an existing template while preserving linked snapshot history.
-- The remaining gap to the original vision is real Incus-backed VM lifecycle execution and real browser desktop sessions.
+- The control plane now contains a real Incus CLI-backed provider, template launch-source tracking, embedded noVNC browser transport, and configurable guest-service forwarding.
+- The control plane now supports shared single-user Basic Auth when admin credentials are supplied through env vars.
+- This machine now has `incus`, `incusd`, `attr`, and `qemu_kvm` available through the repo Flox environment.
+- This host also needed the Ubuntu system packages `attr`, `ovmf`, `qemu-system-x86`, and `qemu-utils` for a VM-capable Incus runtime.
+- The Incus daemon is now initialized, reachable from the dashboard user via `/var/lib/incus/unix.socket`, and the provider card can report `ready` in the browser.
+- A manual `incus launch images:ubuntu/noble/desktop --vm` probe succeeded on this host, then was deleted after validation.
+- Host validation also exposed an IPv6-only guest path, so the provider now falls back to a global IPv6 address when no global IPv4 address is present.
+- Real-host validation now covers a captured template image, guest VNC reachability, browser noVNC sessions, and Caddy-backed guest-service forwarding.
+- An automated `pnpm smoke:incus` path now validates create -> VNC ready -> guest HTTP injection -> restart -> Caddy forward -> cleanup on the live host.
 
 ## Working Rules
 
@@ -133,7 +141,7 @@ Reasoning:
 - [x] Convert raw notes into a structured, agent-friendly execution plan
 - [x] Create an apps/packages TypeScript repo layout
 - [x] Add `flox` + `pnpm` local environment control and typecheck/build scripts
-- [ ] Add a local dev stack definition for PostgreSQL
+- [x] Add a local dev stack definition for PostgreSQL
 - [x] Add a `README.md` with local setup and project goals
 
 Exit criteria:
@@ -142,12 +150,12 @@ Exit criteria:
 
 ### Phase 1: Host Integration Spike
 
-- [ ] Install and configure Incus on the target host
-- [ ] Create a reusable Ubuntu desktop base image
-- [ ] Validate manual create / stop / delete / snapshot / clone flows
-- [ ] Validate CPU, RAM, and disk limits can be set and changed
-- [ ] Validate a guest VNC server can be reached from the host
-- [ ] Document exact host commands and assumptions
+- [x] Install and configure Incus on the target host
+- [x] Create a reusable Ubuntu desktop base image
+- [x] Validate manual create / stop / delete / snapshot / clone flows
+- [x] Validate CPU, RAM, and disk limits can be set and changed
+- [x] Validate a guest VNC server can be reached from the host
+- [x] Document exact host commands and assumptions
 
 Exit criteria:
 
@@ -157,8 +165,8 @@ Exit criteria:
 
 - [x] Build persisted state models for templates, VMs, snapshots, and jobs
 - [x] Add a provider boundary with `mock` and `incus` modes
-- [ ] Implement real Incus lifecycle and snapshot operations
-- [ ] Implement real VNC session provisioning metadata
+- [x] Implement real Incus lifecycle and snapshot operations
+- [x] Implement real VNC session provisioning metadata
 - [x] Add job execution for long-running actions
 - [x] Add API endpoints for create, list, clone, stop, delete, snapshot, resize, template capture, and command injection
 - [x] Add server-side validation for CPU, RAM, and disk inputs
@@ -175,7 +183,7 @@ Exit criteria:
 - [x] Add create, clone, stop, delete, and snapshot controls
 - [x] Add a detail overlay with a live synthetic desktop view for the current POC
 - [x] Migrate the dashboard frontend to React + Tailwind while keeping the existing API and SSE flow
-- [ ] Replace the synthetic detail view with an embedded noVNC session
+- [x] Replace the synthetic detail view with an embedded noVNC session
 - [x] Add live status updates from the backend
 
 Exit criteria:
@@ -196,9 +204,9 @@ Exit criteria:
 ### Phase 5: Reverse Proxy And Deployment
 
 - [x] Put Caddy in front of the web app for local/proxy use
-- [ ] Extend Caddy config for future VNC websocket routes
-- [ ] Add production env configuration
-- [ ] Add systemd or container-based service definitions for the app services
+- [x] Extend Caddy config for future VNC websocket routes
+- [x] Add production env configuration
+- [x] Add systemd or container-based service definitions for the app services
 - [x] Document local run and proxy steps in `README.md`
 
 Exit criteria:
@@ -209,11 +217,10 @@ Exit criteria:
 
 These are the next tasks an agent should actually execute in order:
 
-1. Install and validate Incus on the target host.
-2. Create the first Ubuntu desktop base image and document the exact host commands.
-3. Replace the mock provider lifecycle methods with real Incus-backed create/clone/start/stop/delete/snapshot operations.
-4. Replace synthetic desktop frames with real guest VNC + noVNC/websockify transport.
-5. Replace JSON persistence with PostgreSQL once the real host adapter shape is stable.
+1. Replace JSON persistence with PostgreSQL once the host-backed adapter shape is stable.
+2. Decide which guest service presets should ship in template images versus being configured per workload.
+3. Clean up probe and validation VMs, then tighten template capture/update ergonomics around the validated image path.
+4. Tighten auth from shared Basic Auth into a more ergonomic single-admin session flow if the POC needs a friendlier browser login.
 
 ## Risks And Watchouts
 
@@ -243,3 +250,17 @@ These are the next tasks an agent should actually execute in order:
 - 2026-03-21: Chose JSON persistence for the first runnable POC and deferred PostgreSQL until the real host adapter is in place.
 - 2026-03-21: Rebuilt the dashboard frontend as a bundled React + Tailwind app while preserving the existing Node HTTP server and SSE contract.
 - 2026-03-21: Extended template capture so an existing template can be refreshed without losing its linked snapshot history.
+- 2026-03-21: Implemented a real Incus CLI-backed provider for lifecycle, snapshot, template publish, and guest command execution while keeping synthetic rendering until noVNC is wired in.
+- 2026-03-21: Changed templates to track a real launch source and VMs to track provider references plus VNC session metadata so captured templates can boot from published images later.
+- 2026-03-21: Added `incus` to the repo Flox environment so the project now ships both `incus` and `incusd` binaries locally.
+- 2026-03-21: Promoted provider state to a live host-readiness model and surfaced Incus binary, transport, session, and next-step diagnostics directly in the React dashboard.
+- 2026-03-21: Bootstrapped a working local Incus daemon by combining the Flox-provided `incusd` binary with Ubuntu host packages for firmware and QEMU tooling.
+- 2026-03-21: Validated the first manual Ubuntu VM launch on this host and updated the provider session resolver to fall back to IPv6 guest addresses when IPv4 is absent.
+- 2026-03-21: Replaced the synthetic detail pane with an embedded noVNC client backed by a built-in WebSocket-to-TCP bridge in the Node control plane.
+- 2026-03-21: Added per-VM forwarded guest-service routes so Caddy can front guest HTTP/WebSocket apps through `/vm/:id/forwards/:forwardId/`.
+- 2026-03-21: Simplified the operator dashboard around the real session view, forward configuration, command console, and core lifecycle controls.
+- 2026-03-21: Added deployment scaffolding for Caddy, systemd, env files, and a local PostgreSQL dev stack while keeping JSON persistence as the active store.
+- 2026-03-21: Reworked the web build to emit a browser-safe bundled noVNC asset after patching the upstream package's top-level-await issue during build time.
+- 2026-03-21: Captured a reusable Incus image alias with a resilient guest `x11vnc` service, then validated fresh VM browser VNC sessions and Caddy-backed guest-service forwarding on the live host.
+- 2026-03-21: Added a host-backed `pnpm smoke:incus` automation path that provisions a throwaway VM, verifies browser VNC, injects a guest HTTP service, validates Caddy forwarding, and cleans the VM up afterward.
+- 2026-03-21: Added shared single-user Basic Auth at the control plane so the dashboard, API, VNC bridge, SSE stream, and forwarded guest-service routes can be protected with env-configured admin credentials.

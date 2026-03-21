@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { connect as connectTcp } from "node:net";
 
 import { slugify } from "../../../packages/shared/src/helpers.js";
 import type {
@@ -7,27 +8,46 @@ import type {
   ProviderState,
   ResourceSpec,
   VmInstance,
+  VmSession,
   VmWindow,
 } from "../../../packages/shared/src/types.js";
 
+const DEFAULT_GUEST_VNC_PORT = 5900;
+const DEFAULT_GUEST_WORKSPACE = "/root";
+
+export interface CaptureTemplateTarget {
+  templateId: string;
+  name: string;
+}
+
+export interface CreateProviderOptions {
+  project?: string;
+  guestVncPort?: number;
+  commandRunner?: IncusCommandRunner;
+  guestPortProbe?: GuestPortProbe;
+}
+
 export interface DesktopProvider {
-  readonly state: ProviderState;
+  state: ProviderState;
+  refreshState(): ProviderState;
   createVm(
-    template: EnvironmentTemplate,
-    name: string,
-    resources: ResourceSpec,
-  ): Promise<ProviderMutation>;
-  cloneVm(
     vm: VmInstance,
     template: EnvironmentTemplate,
-    name: string,
+  ): Promise<ProviderMutation>;
+  cloneVm(
+    sourceVm: VmInstance,
+    targetVm: VmInstance,
+    template: EnvironmentTemplate,
   ): Promise<ProviderMutation>;
   startVm(vm: VmInstance): Promise<ProviderMutation>;
   stopVm(vm: VmInstance): Promise<ProviderMutation>;
   deleteVm(vm: VmInstance): Promise<ProviderMutation>;
   resizeVm(vm: VmInstance, resources: ResourceSpec): Promise<ProviderMutation>;
   snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot>;
-  captureTemplate(vm: VmInstance, name: string): Promise<ProviderSnapshot>;
+  captureTemplate(
+    vm: VmInstance,
+    target: CaptureTemplateTarget,
+  ): Promise<ProviderSnapshot>;
   injectCommand(vm: VmInstance, command: string): Promise<ProviderMutation>;
   tickVm(vm: VmInstance, template: EnvironmentTemplate): ProviderTick | null;
   renderFrame(
@@ -42,11 +62,13 @@ export interface ProviderMutation {
   activity: string[];
   activeWindow?: VmWindow;
   workspacePath?: string;
+  session?: VmSession | null;
 }
 
 export interface ProviderSnapshot {
   providerRef: string;
   summary: string;
+  launchSource?: string;
 }
 
 export interface ProviderTick {
@@ -54,56 +76,92 @@ export interface ProviderTick {
   activeWindow?: VmWindow;
 }
 
+interface IncusCommandRunner {
+  execute(args: string[]): CommandResult;
+}
+
+interface CommandResult {
+  args: string[];
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: Error;
+}
+
+interface GuestPortProbe {
+  probe(host: string, port: number): Promise<boolean>;
+}
+
+interface IncusListInstance {
+  name?: string;
+  status?: string;
+  state?: {
+    status?: string;
+    network?: Record<
+      string,
+      {
+        addresses?: Array<{
+          family?: string;
+          address?: string;
+          scope?: string;
+        }>;
+      }
+    >;
+  };
+}
+
 export function createProvider(
   kind: ProviderKind,
   incusBinary: string,
+  options: CreateProviderOptions = {},
 ): DesktopProvider {
   if (kind === "incus") {
-    return new IncusProvider(incusBinary);
+    return new IncusProvider(incusBinary, options);
   }
 
   return new MockProvider();
 }
 
 class MockProvider implements DesktopProvider {
-  readonly state: ProviderState = {
-    kind: "mock",
-    available: true,
-    detail:
-      "Demo mode is active. Actions update persisted state and synthetic desktop frames.",
-  };
+  state: ProviderState = buildMockProviderState();
+
+  refreshState(): ProviderState {
+    return this.state;
+  }
 
   async createVm(
+    vm: VmInstance,
     template: EnvironmentTemplate,
-    name: string,
-    resources: ResourceSpec,
   ): Promise<ProviderMutation> {
     return {
       lastAction: `Provisioned from ${template.name}`,
       activity: [
-        `boot: ubuntu desktop launched from ${template.baseImage}`,
-        `resources: ${resources.cpu} CPU / ${resources.ramMb} MB / ${resources.diskGb} GB`,
-        `workspace: /srv/workspaces/${slugify(name)}`,
+        `boot: ubuntu desktop launched from ${template.launchSource}`,
+        `provider ref: ${vm.providerRef}`,
+        `resources: ${vm.resources.cpu} CPU / ${vm.resources.ramMb} MB / ${vm.resources.diskGb} GB`,
+        `workspace: /srv/workspaces/${slugify(vm.name)}`,
       ],
       activeWindow: "editor",
-      workspacePath: `/srv/workspaces/${slugify(name)}`,
+      workspacePath: `/srv/workspaces/${slugify(vm.name)}`,
+      session: buildSyntheticSession(),
     };
   }
 
   async cloneVm(
     vm: VmInstance,
+    targetVm: VmInstance,
     template: EnvironmentTemplate,
-    name: string,
   ): Promise<ProviderMutation> {
     return {
       lastAction: `Cloned from ${vm.name}`,
       activity: [
         `clone: copied disks and metadata from ${vm.name}`,
         `template: ${template.name}`,
-        `workspace: /srv/workspaces/${slugify(name)}`,
+        `workspace: /srv/workspaces/${slugify(targetVm.name)}`,
       ],
       activeWindow: vm.activeWindow,
-      workspacePath: `/srv/workspaces/${slugify(name)}`,
+      workspacePath: `/srv/workspaces/${slugify(targetVm.name)}`,
+      session: buildSyntheticSession(),
     };
   }
 
@@ -115,6 +173,7 @@ class MockProvider implements DesktopProvider {
         "agent: session heartbeat restored",
       ],
       activeWindow: "terminal",
+      session: buildSyntheticSession(),
     };
   }
 
@@ -126,6 +185,7 @@ class MockProvider implements DesktopProvider {
         "session: desktop marked inactive",
       ],
       activeWindow: "logs",
+      session: buildSyntheticSession(),
     };
   }
 
@@ -134,6 +194,7 @@ class MockProvider implements DesktopProvider {
       lastAction: `Workspace ${vm.name} deleted`,
       activity: ["delete: disks and metadata released"],
       activeWindow: "logs",
+      session: null,
     };
   }
 
@@ -147,6 +208,7 @@ class MockProvider implements DesktopProvider {
         `limits: cpu=${resources.cpu} ram=${resources.ramMb}MB disk=${resources.diskGb}GB`,
       ],
       activeWindow: "logs",
+      session: buildSyntheticSession(),
     };
   }
 
@@ -159,11 +221,12 @@ class MockProvider implements DesktopProvider {
 
   async captureTemplate(
     vm: VmInstance,
-    name: string,
+    target: CaptureTemplateTarget,
   ): Promise<ProviderSnapshot> {
     return {
-      providerRef: `mock://templates/${slugify(name)}`,
-      summary: `Template ${name} captured from ${vm.name}.`,
+      providerRef: `mock://snapshots/${target.templateId}`,
+      summary: `Template ${target.name} captured from ${vm.name}.`,
+      launchSource: `mock://templates/${slugify(target.name)}`,
     };
   }
 
@@ -173,14 +236,16 @@ class MockProvider implements DesktopProvider {
   ): Promise<ProviderMutation> {
     const trimmed = command.trim();
     const reply = buildCommandReply(trimmed, vm.workspacePath);
+    const nextWorkspacePath = reply.startsWith("cwd:")
+      ? reply.replace("cwd: ", "")
+      : vm.workspacePath;
 
     return {
       lastAction: `Executed: ${trimmed}`,
       activity: [`$ ${trimmed}`, reply],
       activeWindow: "terminal",
-      workspacePath: reply.startsWith("cwd:")
-        ? reply.replace("cwd: ", "")
-        : undefined,
+      workspacePath: nextWorkspacePath,
+      session: buildSyntheticSession(),
     };
   }
 
@@ -211,65 +276,282 @@ class MockProvider implements DesktopProvider {
 }
 
 class IncusProvider implements DesktopProvider {
-  readonly state: ProviderState;
+  state: ProviderState;
+  private readonly guestVncPort: number;
+  private readonly runner: IncusCommandRunner;
+  private readonly project: string | null;
+  private readonly guestPortProbe: GuestPortProbe;
 
-  constructor(private readonly incusBinary: string) {
-    const version = spawnSync(this.incusBinary, ["--version"], {
-      encoding: "utf8",
-    });
+  constructor(
+    private readonly incusBinary: string,
+    options: CreateProviderOptions,
+  ) {
+    this.guestVncPort = options.guestVncPort ?? DEFAULT_GUEST_VNC_PORT;
+    this.project = options.project ?? null;
+    this.runner =
+      options.commandRunner ??
+      new SpawnIncusCommandRunner(this.incusBinary, options.project);
+    this.guestPortProbe = options.guestPortProbe ?? new TcpGuestPortProbe();
+    this.state = this.probeState();
+  }
 
-    if (version.status === 0) {
-      this.state = {
-        kind: "incus",
-        available: true,
-        detail:
-          "Incus CLI detected. Provider commands are reserved for later host integration work.",
-      };
-      return;
-    }
+  refreshState(): ProviderState {
+    this.state = this.probeState();
+    return this.state;
+  }
 
-    this.state = {
-      kind: "incus",
-      available: false,
-      detail:
-        "Incus mode requested, but the incus CLI was not found on this machine.",
+  async createVm(
+    vm: VmInstance,
+    template: EnvironmentTemplate,
+  ): Promise<ProviderMutation> {
+    this.assertAvailable();
+    this.assertLaunchSource(template);
+
+    this.run([
+      "init",
+      template.launchSource,
+      vm.providerRef,
+      "--vm",
+      "-c",
+      `limits.cpu=${vm.resources.cpu}`,
+      "-c",
+      `limits.memory=${formatMemoryLimit(vm.resources.ramMb)}`,
+      "-d",
+      `root,size=${formatDiskSize(vm.resources.diskGb)}`,
+    ]);
+    this.run([
+      "config",
+      "set",
+      vm.providerRef,
+      "cloud-init.user-data",
+      buildGuestVncCloudInit(this.guestVncPort),
+    ]);
+    this.run(["start", vm.providerRef]);
+
+    const session = await this.resolveSession(vm.providerRef);
+
+    return {
+      lastAction: `Provisioned from ${template.name}`,
+      activity: [
+        `incus: launched ${vm.providerRef} from ${template.launchSource}`,
+        `resources: ${vm.resources.cpu} CPU / ${formatMemoryLimit(vm.resources.ramMb)} / ${formatDiskSize(vm.resources.diskGb)}`,
+        session ? `vnc: ${session.display}` : "vnc: guest network pending",
+      ],
+      activeWindow: "terminal",
+      workspacePath: DEFAULT_GUEST_WORKSPACE,
+      session,
     };
   }
 
-  async createVm(): Promise<ProviderMutation> {
-    return this.reject();
+  async cloneVm(
+    sourceVm: VmInstance,
+    targetVm: VmInstance,
+    template: EnvironmentTemplate,
+  ): Promise<ProviderMutation> {
+    this.assertAvailable();
+
+    this.run([
+      "copy",
+      sourceVm.providerRef,
+      targetVm.providerRef,
+      "--instance-only",
+      "-c",
+      `limits.cpu=${targetVm.resources.cpu}`,
+      "-c",
+      `limits.memory=${formatMemoryLimit(targetVm.resources.ramMb)}`,
+      "-d",
+      `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
+    ]);
+    this.run(["start", targetVm.providerRef]);
+
+    const session = await this.resolveSession(targetVm.providerRef);
+
+    return {
+      lastAction: `Cloned from ${sourceVm.name}`,
+      activity: [
+        `incus: cloned ${sourceVm.providerRef} to ${targetVm.providerRef}`,
+        `template: ${template.name}`,
+        session ? `vnc: ${session.display}` : "vnc: guest network pending",
+      ],
+      activeWindow: "terminal",
+      workspacePath: sourceVm.workspacePath || DEFAULT_GUEST_WORKSPACE,
+      session,
+    };
   }
 
-  async cloneVm(): Promise<ProviderMutation> {
-    return this.reject();
+  async startVm(vm: VmInstance): Promise<ProviderMutation> {
+    this.assertAvailable();
+    this.run(["start", vm.providerRef]);
+    const session = await this.resolveSession(vm.providerRef);
+
+    return {
+      lastAction: "Workspace resumed",
+      activity: [
+        `incus: started ${vm.providerRef}`,
+        session ? `vnc: ${session.display}` : "vnc: guest network pending",
+      ],
+      activeWindow: "terminal",
+      workspacePath: vm.workspacePath || DEFAULT_GUEST_WORKSPACE,
+      session,
+    };
   }
 
-  async startVm(): Promise<ProviderMutation> {
-    return this.reject();
+  async stopVm(vm: VmInstance): Promise<ProviderMutation> {
+    this.assertAvailable();
+    const stopArgs = ["stop", vm.providerRef, "--timeout", "30"];
+    const stopResult = this.runner.execute(stopArgs);
+
+    if (stopResult.status !== 0 && !this.instanceMatchesStatus(vm.providerRef, "stopped")) {
+      const forceArgs = ["stop", vm.providerRef, "--force"];
+      const forceResult = this.runner.execute(forceArgs);
+
+      if (forceResult.status !== 0 && !this.instanceMatchesStatus(vm.providerRef, "stopped")) {
+        throw new Error(
+          [formatCommandFailure(stopArgs, stopResult), formatCommandFailure(forceArgs, forceResult)]
+            .filter(Boolean)
+            .join("\n"),
+        );
+      }
+    }
+
+    return {
+      lastAction: "Workspace stopped",
+      activity: [`incus: stopped ${vm.providerRef}`],
+      activeWindow: "logs",
+      session: null,
+    };
   }
 
-  async stopVm(): Promise<ProviderMutation> {
-    return this.reject();
+  async deleteVm(vm: VmInstance): Promise<ProviderMutation> {
+    this.assertAvailable();
+    this.run(["delete", vm.providerRef, "--force"]);
+
+    return {
+      lastAction: `Workspace ${vm.name} deleted`,
+      activity: [`incus: deleted ${vm.providerRef}`],
+      activeWindow: "logs",
+      session: null,
+    };
   }
 
-  async deleteVm(): Promise<ProviderMutation> {
-    return this.reject();
+  async resizeVm(
+    vm: VmInstance,
+    resources: ResourceSpec,
+  ): Promise<ProviderMutation> {
+    this.assertAvailable();
+
+    this.run([
+      "config",
+      "set",
+      vm.providerRef,
+      `limits.cpu=${resources.cpu}`,
+      `limits.memory=${formatMemoryLimit(resources.ramMb)}`,
+    ]);
+    this.run([
+      "config",
+      "device",
+      "set",
+      vm.providerRef,
+      "root",
+      `size=${formatDiskSize(resources.diskGb)}`,
+    ]);
+
+    return {
+      lastAction: `Resources updated for ${vm.name}`,
+      activity: [
+        `incus: resized ${vm.providerRef}`,
+        `limits: cpu=${resources.cpu} ram=${formatMemoryLimit(resources.ramMb)} disk=${formatDiskSize(resources.diskGb)}`,
+      ],
+      activeWindow: "logs",
+      session: vm.status === "running" ? await this.resolveSession(vm.providerRef) : vm.session,
+    };
   }
 
-  async resizeVm(): Promise<ProviderMutation> {
-    return this.reject();
+  async snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot> {
+    this.assertAvailable();
+    const snapshotName = buildSnapshotName(label);
+
+    this.run(["snapshot", "create", vm.providerRef, snapshotName]);
+
+    return {
+      providerRef: `${vm.providerRef}/${snapshotName}`,
+      summary: `Snapshot ${label} captured from ${vm.name}.`,
+    };
   }
 
-  async snapshotVm(): Promise<ProviderSnapshot> {
-    throw new Error(this.state.detail);
+  async captureTemplate(
+    vm: VmInstance,
+    target: CaptureTemplateTarget,
+  ): Promise<ProviderSnapshot> {
+    this.assertAvailable();
+    const snapshotName = buildTemplateSnapshotName(target.templateId);
+    const alias = buildTemplateAlias(target.templateId);
+
+    this.run(["snapshot", "create", vm.providerRef, snapshotName]);
+    this.run([
+      "publish",
+      `${vm.providerRef}/${snapshotName}`,
+      "--alias",
+      alias,
+      "--reuse",
+    ]);
+
+    return {
+      providerRef: `${vm.providerRef}/${snapshotName}`,
+      summary: `Template ${target.name} published as ${alias}.`,
+      launchSource: alias,
+    };
   }
 
-  async captureTemplate(): Promise<ProviderSnapshot> {
-    throw new Error(this.state.detail);
-  }
+  async injectCommand(
+    vm: VmInstance,
+    command: string,
+  ): Promise<ProviderMutation> {
+    this.assertAvailable();
+    const workspacePath = vm.workspacePath || DEFAULT_GUEST_WORKSPACE;
+    const cdMatch = command.match(/^cd(?:\s+(.+))?$/);
 
-  async injectCommand(): Promise<ProviderMutation> {
-    return this.reject();
+    if (cdMatch) {
+      const result = this.run([
+        "exec",
+        vm.providerRef,
+        "--cwd",
+        workspacePath,
+        "--",
+        "sh",
+        "-lc",
+        `${command} && pwd`,
+      ]);
+      const nextWorkspacePath = result.stdout.trim() || workspacePath;
+
+      return {
+        lastAction: `Changed directory for ${vm.name}`,
+        activity: [`$ ${command}`, `cwd: ${nextWorkspacePath}`],
+        activeWindow: "terminal",
+        workspacePath: nextWorkspacePath,
+        session: vm.session,
+      };
+    }
+
+    const result = this.run([
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      workspacePath,
+      "--",
+      "sh",
+      "-lc",
+      command,
+    ]);
+    const activity = [`$ ${command}`, ...summarizeCommandOutput(result)];
+
+    return {
+      lastAction: `Executed: ${command}`,
+      activity,
+      activeWindow: "terminal",
+      workspacePath,
+      session: vm.session,
+    };
   }
 
   tickVm(): ProviderTick | null {
@@ -281,11 +563,144 @@ class IncusProvider implements DesktopProvider {
     template: EnvironmentTemplate | null,
     mode: "tile" | "detail",
   ): string {
-    return renderSyntheticFrame(vm, template, mode, this.state.detail);
+    const providerLine =
+      vm.session?.kind === "vnc"
+        ? `VNC ${vm.session.display}`
+        : this.state.detail;
+
+    return renderSyntheticFrame(vm, template, mode, providerLine);
   }
 
-  private reject(): never {
-    throw new Error(this.state.detail);
+  private assertAvailable(): void {
+    const state = this.refreshState();
+
+    if (!state.available) {
+      throw new Error(state.detail);
+    }
+  }
+
+  private probeState(): ProviderState {
+    const probe = this.runner.execute(["list", "--format", "json"]);
+    return buildIncusProviderState(this.incusBinary, this.project, probe);
+  }
+
+  private assertLaunchSource(template: EnvironmentTemplate): void {
+    if (template.launchSource.startsWith("mock://")) {
+      throw new Error(
+        `Template ${template.name} was captured in mock mode and cannot be launched with Incus.`,
+      );
+    }
+  }
+
+  private async resolveSession(instanceName: string): Promise<VmSession | null> {
+    let address: string | null = null;
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const info = this.inspectInstance(instanceName);
+      address = findGlobalGuestAddress(info);
+
+      if (
+        address &&
+        (await this.guestPortProbe.probe(address, this.guestVncPort))
+      ) {
+        return buildVncSession(address, this.guestVncPort);
+      }
+
+      if (normalizeStatus(info.status ?? info.state?.status) !== "running") {
+        break;
+      }
+
+      await sleep(5000);
+    }
+
+    return address ? buildVncSession(address, this.guestVncPort) : null;
+  }
+
+  private inspectInstance(instanceName: string): IncusListInstance {
+    const match = this.inspectInstanceSafe(instanceName);
+
+    if (!match) {
+      throw new Error(`Incus did not return instance metadata for ${instanceName}.`);
+    }
+
+    return match;
+  }
+
+  private inspectInstanceSafe(instanceName: string): IncusListInstance | null {
+    const result = this.run(["list", instanceName, "--format", "json"]);
+    const instances = parseJson<IncusListInstance[]>(result.stdout);
+    const match =
+      instances.find((entry) => entry.name === instanceName) ?? instances[0] ?? null;
+
+    return match;
+  }
+
+  private instanceMatchesStatus(
+    instanceName: string,
+    expectedStatus: "running" | "stopped",
+  ): boolean {
+    const info = this.inspectInstanceSafe(instanceName);
+    return normalizeStatus(info?.status ?? info?.state?.status) === expectedStatus;
+  }
+
+  private run(args: string[]): CommandResult {
+    const result = this.runner.execute(args);
+
+    if (result.status === 0) {
+      return result;
+    }
+
+    throw new Error(formatCommandFailure(args, result));
+  }
+}
+
+class SpawnIncusCommandRunner implements IncusCommandRunner {
+  constructor(
+    private readonly incusBinary: string,
+    private readonly project?: string,
+  ) {}
+
+  execute(args: string[]): CommandResult {
+    const fullArgs = this.project
+      ? ["--project", this.project, ...args]
+      : args;
+    const result = spawnSync(this.incusBinary, fullArgs, {
+      encoding: "utf8",
+    });
+
+    return {
+      args: fullArgs,
+      status: result.status,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      error: result.error ?? undefined,
+    };
+  }
+}
+
+class TcpGuestPortProbe implements GuestPortProbe {
+  async probe(host: string, port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = connectTcp({
+        host,
+        port,
+      });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 2000);
+
+      socket.once("connect", () => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(true);
+      });
+
+      socket.once("error", () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
   }
 }
 
@@ -321,6 +736,60 @@ function buildCommandReply(command: string, currentWorkspace: string): string {
   return `completed: ${command}`;
 }
 
+function buildMockProviderState(): ProviderState {
+  return {
+    kind: "mock",
+    available: true,
+    detail:
+      "Demo mode is active. Actions update persisted state and synthetic desktop frames.",
+    hostStatus: "ready",
+    binaryPath: null,
+    project: null,
+    desktopTransport: "synthetic",
+    nextSteps: [],
+  };
+}
+
+function buildIncusProviderState(
+  incusBinary: string,
+  project: string | null,
+  result: CommandResult,
+): ProviderState {
+  if (result.status === 0) {
+    return {
+      kind: "incus",
+      available: true,
+      detail:
+        "Incus is reachable. Browser sessions use the built-in noVNC bridge when the guest VNC server is reachable.",
+      hostStatus: "ready",
+      binaryPath: incusBinary,
+      project,
+      desktopTransport: "novnc",
+      nextSteps: [
+        "Ensure the guest image starts a VNC server on the configured guest port so the browser bridge can connect.",
+      ],
+    };
+  }
+
+  return {
+    kind: "incus",
+    available: false,
+    detail: describeProbeFailure(result),
+    hostStatus: classifyProbeFailure(result),
+    binaryPath: incusBinary,
+    project,
+    desktopTransport: "novnc",
+    nextSteps: buildProbeNextSteps(classifyProbeFailure(result)),
+  };
+}
+
+function summarizeCommandOutput(result: CommandResult): string[] {
+  const lines = `${result.stdout}${result.stderr}`.split("\n").map((line) => line.trim());
+  const filtered = lines.filter(Boolean).slice(0, 6);
+
+  return filtered.length > 0 ? filtered : ["command completed without output"];
+}
+
 function selectActivityLine(
   window: VmWindow,
   templateName: string,
@@ -331,7 +800,7 @@ function selectActivityLine(
     editor: [
       `editor: refining control-plane routes for ${vmName}`,
       `editor: updating template metadata derived from ${templateName}`,
-      `editor: checkpointing UI changes before snapshot`,
+      "editor: checkpointing UI changes before snapshot",
     ],
     terminal: [
       "terminal: pnpm build completed in 1.3s",
@@ -436,7 +905,7 @@ function renderSyntheticFrame(
   <rect x="24" y="${height - 144}" width="${width - 48}" height="116" rx="24" fill="rgba(5, 9, 14, 0.82)" stroke="rgba(255,255,255,0.08)" />
   <text x="44" y="${height - 118}" fill="${statusColor}" font-size="${mode === "detail" ? 18 : 12}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">ACTIVITY FEED</text>
   ${activityMarkup}
-  <text x="${width - 480}" y="${height - 20}" fill="rgba(244,247,249,0.66)" font-size="${mode === "detail" ? 16 : 11}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">workspace: ${workspacePath} • ${providerLine} • last action: ${lastAction}</text>
+  <text x="${width - 480}" y="${height - 20}" fill="rgba(244,247,249,0.66)" font-size="${mode === "detail" ? 16 : 11}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">workspace: ${workspacePath} • ${escapeXml(providerLine)} • last action: ${lastAction}</text>
 </svg>`;
 }
 
@@ -479,4 +948,194 @@ function escapeXml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function buildSyntheticSession(): VmSession {
+  return {
+    kind: "synthetic",
+    host: null,
+    port: null,
+    webSocketPath: null,
+    browserPath: null,
+    display: "Synthetic frame stream",
+  };
+}
+
+function buildVncSession(
+  host: string | null,
+  port: number,
+): VmSession {
+  return {
+    kind: "vnc",
+    host,
+    port,
+    webSocketPath: null,
+    browserPath: null,
+    display: host ? `${formatNetworkEndpoint(host, port)}` : `guest VNC on port ${port} pending DHCP`,
+  };
+}
+
+function buildGuestVncCloudInit(port: number): string {
+  return `#cloud-config
+package_update: true
+packages:
+  - x11vnc
+write_files:
+  - path: /etc/gdm3/custom.conf
+    permissions: '0644'
+    content: |
+      [daemon]
+      AutomaticLoginEnable=true
+      AutomaticLogin=ubuntu
+      WaylandEnable=false
+  - path: /etc/systemd/system/parallaize-x11vnc.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Parallaize x11vnc bridge
+      After=display-manager.service
+      Wants=display-manager.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/x11vnc -display WAIT:0 -auth guess -forever -loop -shared -nopw -rfbport ${port} -o /var/log/x11vnc.log
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+  - systemctl daemon-reload
+  - systemctl enable parallaize-x11vnc.service
+  - systemctl restart gdm3 || true
+  - systemctl start parallaize-x11vnc.service
+`;
+}
+
+function findGlobalGuestAddress(instance: IncusListInstance): string | null {
+  const networks = instance.state?.network ?? {};
+  let ipv6Address: string | null = null;
+
+  for (const network of Object.values(networks)) {
+    for (const address of network.addresses ?? []) {
+      if (address.family === "inet" && address.scope === "global" && address.address) {
+        return address.address;
+      }
+
+      if (
+        !ipv6Address &&
+        address.family === "inet6" &&
+        address.scope === "global" &&
+        address.address
+      ) {
+        ipv6Address = address.address;
+      }
+    }
+  }
+
+  return ipv6Address;
+}
+
+function formatNetworkEndpoint(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
+function formatMemoryLimit(ramMb: number): string {
+  return `${ramMb}MiB`;
+}
+
+function formatDiskSize(diskGb: number): string {
+  return `${diskGb}GiB`;
+}
+
+function buildSnapshotName(label: string): string {
+  const slug = slugify(label) || "snapshot";
+  return `parallaize-${Date.now().toString(36)}-${slug}`;
+}
+
+function buildTemplateSnapshotName(templateId: string): string {
+  return `parallaize-template-${slugify(templateId)}-${Date.now().toString(36)}`;
+}
+
+function buildTemplateAlias(templateId: string): string {
+  return `parallaize-template-${slugify(templateId)}`;
+}
+
+function normalizeStatus(value: string | undefined): string {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function parseJson<T>(value: string): T {
+  return JSON.parse(value) as T;
+}
+
+function describeProbeFailure(result: CommandResult): string {
+  if (result.error?.message.includes("ENOENT")) {
+    return "Incus mode requested, but the incus CLI was not found on this host.";
+  }
+
+  const detail = result.stderr.trim() || result.error?.message || "Unknown Incus error.";
+  return `Incus CLI was found, but the daemon is unavailable: ${detail}`;
+}
+
+function classifyProbeFailure(result: CommandResult): ProviderState["hostStatus"] {
+  if (result.error?.message.includes("ENOENT")) {
+    return "missing-cli";
+  }
+
+  const detail = `${result.stderr} ${result.stdout}`.trim().toLowerCase();
+
+  if (
+    detail.includes("daemon doesn't appear to be started") ||
+    detail.includes("server version: unreachable") ||
+    detail.includes("unix.socket")
+  ) {
+    return "daemon-unreachable";
+  }
+
+  return "error";
+}
+
+function buildProbeNextSteps(status: ProviderState["hostStatus"]): string[] {
+  switch (status) {
+    case "missing-cli":
+      return [
+        "Run the control plane inside Flox or set PARALLAIZE_INCUS_BIN to a valid Incus binary.",
+        "Install the package with `flox install -d . incus` if this environment still lacks Incus.",
+        "Initialize the daemon after install with `flox activate -d . -- incus admin init --minimal`.",
+      ];
+    case "daemon-unreachable":
+      return [
+        "Start the daemon with your service manager or `flox activate -d . -- incusd` on the target Linux host.",
+        "Initialize storage and networking with `flox activate -d . -- incus admin init --minimal` if this is the first run.",
+        "Restart the dashboard with PARALLAIZE_PROVIDER=incus once `incus list --format json` succeeds.",
+      ];
+    case "error":
+      return [
+        "Run `flox activate -d . -- incus list --format json` on the host and resolve the reported error.",
+        "Check any configured Incus project value and host permissions before retrying.",
+      ];
+    case "ready":
+    default:
+      return [];
+  }
+}
+
+function formatCommandFailure(args: string[], result: CommandResult): string {
+  if (result.error?.message.includes("ENOENT")) {
+    return "Incus mode requested, but the incus CLI was not found on this host.";
+  }
+
+  const detail =
+    result.stderr.trim() ||
+    result.error?.message ||
+    `Command exited with status ${result.status ?? "unknown"}.`;
+
+  return `incus ${args.join(" ")} failed: ${detail}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

@@ -12,12 +12,20 @@ import type {
   ResizeVmInput,
   Snapshot,
   SnapshotInput,
+  TemplatePortForward,
+  UpdateVmForwardedPortsInput,
   VmDetail,
   VmInstance,
+  VmPortForward,
 } from "../../../packages/shared/src/types.js";
-import type { DesktopProvider } from "./providers.js";
+import type {
+  CaptureTemplateTarget,
+  DesktopProvider,
+  ProviderMutation,
+} from "./providers.js";
 import type { JsonStateStore } from "./store.js";
 
+const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 const MAX_ACTIVITY_LINES = 8;
 const MAX_JOBS = 20;
 
@@ -28,7 +36,9 @@ export class DesktopManager {
   constructor(
     private readonly store: JsonStateStore,
     private readonly provider: DesktopProvider,
-  ) {}
+  ) {
+    this.syncProviderState();
+  }
 
   start(): void {
     if (this.ticker) {
@@ -36,6 +46,7 @@ export class DesktopManager {
     }
 
     this.ticker = setInterval(() => {
+      const providerChanged = this.syncProviderState();
       const { changed } = this.store.update((state) => {
         let dirty = false;
 
@@ -77,6 +88,11 @@ export class DesktopManager {
 
       if (changed) {
         this.publish();
+        return;
+      }
+
+      if (providerChanged) {
+        this.publish();
       }
     }, 2400);
   }
@@ -89,10 +105,12 @@ export class DesktopManager {
   }
 
   getProviderState(): ProviderState {
+    this.syncProviderState();
     return this.store.load().provider;
   }
 
   getSummary(): DashboardSummary {
+    this.syncProviderState();
     const state = this.store.load();
 
     return {
@@ -107,6 +125,7 @@ export class DesktopManager {
   }
 
   getVmDetail(vmId: string): VmDetail {
+    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
 
@@ -121,6 +140,7 @@ export class DesktopManager {
   }
 
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {
+    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
     const template =
@@ -145,6 +165,7 @@ export class DesktopManager {
     const { state } = this.store.update((draft) => {
       const template = requireTemplate(draft, input.templateId);
       validateResources(input.resources);
+      validateForwardedPorts(input.forwardedPorts ?? template.defaultForwardedPorts);
       const name = input.name.trim();
 
       if (!name) {
@@ -156,6 +177,7 @@ export class DesktopManager {
         template,
         name,
         input.resources,
+        input.forwardedPorts ?? template.defaultForwardedPorts,
         draft.provider.kind,
         "creating",
       );
@@ -181,22 +203,13 @@ export class DesktopManager {
     void this.runJob(jobRecord.id, async () => {
       await sleep(550);
       const template = requireTemplate(state, vmRecord.templateId);
-      const mutation = await this.provider.createVm(
-        template,
-        vmRecord.name,
-        vmRecord.resources,
-      );
+      const mutation = await this.provider.createVm(vmRecord, template);
 
       this.store.update((draft) => {
         const vm = this.requireVm(draft, vmRecord.id);
         vm.status = "running";
         vm.liveSince = nowIso();
-        vm.lastAction = mutation.lastAction;
-        vm.frameRevision += 1;
-        vm.updatedAt = nowIso();
-        vm.activeWindow = mutation.activeWindow ?? vm.activeWindow;
-        vm.workspacePath = mutation.workspacePath ?? vm.workspacePath;
-        appendManyActivity(vm, mutation.activity);
+        applyProviderMutation(vm, mutation);
       });
 
       this.publish();
@@ -213,6 +226,7 @@ export class DesktopManager {
 
     this.store.update((draft) => {
       const source = this.requireVm(draft, input.sourceVmId);
+      this.ensureActiveProvider(source);
       const template = requireTemplate(draft, source.templateId);
       const cloneName =
         input.name?.trim() ||
@@ -223,11 +237,14 @@ export class DesktopManager {
         template,
         cloneName,
         source.resources,
+        source.forwardedPorts.map(copyForwardAsTemplatePort),
         draft.provider.kind,
         "creating",
       );
       vm.activeWindow = source.activeWindow;
       vm.activityLog = [...source.activityLog];
+      vm.workspacePath = source.workspacePath;
+      vm.session = cloneVmSession(vm.id, source.session);
 
       const job = buildJob(draft, "clone", vm.id, template.id, `Queued clone from ${source.name}`);
 
@@ -250,26 +267,23 @@ export class DesktopManager {
 
     void this.runJob(jobRecord.id, async () => {
       await sleep(500);
-      const current = this.getVmDetail(vmRecord.id).vm;
+      const target = this.getVmDetail(vmRecord.id).vm;
       const source = this.getVmDetail(input.sourceVmId).vm;
       const template = this.getVmDetail(vmRecord.id).template;
+
+      this.ensureActiveProvider(source);
 
       if (!template) {
         throw new Error("Template for clone target was not found.");
       }
 
-      const mutation = await this.provider.cloneVm(source, template, current.name);
+      const mutation = await this.provider.cloneVm(source, target, template);
 
       this.store.update((draft) => {
         const vm = this.requireVm(draft, vmRecord.id);
         vm.status = "running";
         vm.liveSince = nowIso();
-        vm.lastAction = mutation.lastAction;
-        vm.frameRevision += 1;
-        vm.updatedAt = nowIso();
-        vm.activeWindow = mutation.activeWindow ?? vm.activeWindow;
-        vm.workspacePath = mutation.workspacePath ?? vm.workspacePath;
-        appendManyActivity(vm, mutation.activity);
+        applyProviderMutation(vm, mutation);
       });
 
       this.publish();
@@ -293,11 +307,7 @@ export class DesktopManager {
         const current = this.requireVm(draft, vmId);
         current.status = "running";
         current.liveSince = nowIso();
-        current.lastAction = mutation.lastAction;
-        current.frameRevision += 1;
-        current.updatedAt = nowIso();
-        current.activeWindow = mutation.activeWindow ?? current.activeWindow;
-        appendManyActivity(current, mutation.activity);
+        applyProviderMutation(current, mutation);
       });
 
       this.publish();
@@ -319,11 +329,7 @@ export class DesktopManager {
         const current = this.requireVm(draft, vmId);
         current.status = "stopped";
         current.liveSince = null;
-        current.lastAction = mutation.lastAction;
-        current.frameRevision += 1;
-        current.updatedAt = nowIso();
-        current.activeWindow = mutation.activeWindow ?? current.activeWindow;
-        appendManyActivity(current, mutation.activity);
+        applyProviderMutation(current, mutation);
       });
 
       this.publish();
@@ -367,11 +373,7 @@ export class DesktopManager {
       this.store.update((draft) => {
         const current = this.requireVm(draft, vmId);
         current.resources = input.resources;
-        current.lastAction = mutation.lastAction;
-        current.updatedAt = nowIso();
-        current.frameRevision += 1;
-        current.activeWindow = mutation.activeWindow ?? current.activeWindow;
-        appendManyActivity(current, mutation.activity);
+        applyProviderMutation(current, mutation);
       });
       this.publish();
 
@@ -414,29 +416,73 @@ export class DesktopManager {
   captureTemplate(vmId: string, input: CaptureTemplateInput): void {
     const captureName = input.name.trim();
     const captureDescription = input.description.trim();
+    const requestedTemplateId = input.templateId?.trim() || null;
 
     if (!captureName) {
       throw new Error("Template name is required.");
     }
 
-    this.queueVmAction(vmId, "capture-template", async (vm) => {
+    let jobId = "";
+    let targetTemplateId = requestedTemplateId;
+
+    this.store.update((draft) => {
+      const vm = this.requireVm(draft, vmId);
+      this.ensureActiveProvider(vm);
+
+      if (targetTemplateId) {
+        requireTemplate(draft, targetTemplateId);
+      } else {
+        targetTemplateId = nextId(draft, "tpl");
+      }
+
+      const job = buildJob(
+        draft,
+        "capture-template",
+        vm.id,
+        targetTemplateId,
+        `Queued capture-template for ${vm.name}`,
+      );
+
+      draft.jobs.unshift(job);
+      trimJobs(draft);
+      jobId = job.id;
+    });
+
+    this.publish();
+
+    if (!targetTemplateId) {
+      throw new Error("Failed to reserve a template target.");
+    }
+
+    const reservedTemplateId = targetTemplateId;
+
+    void this.runJob(jobId, async () => {
       await sleep(450);
-      const providerSnapshot = await this.provider.captureTemplate(vm, captureName);
+      const detail = this.getVmDetail(vmId);
+      this.ensureActiveProvider(detail.vm);
+
+      const providerSnapshot = await this.provider.captureTemplate(detail.vm, {
+        templateId: reservedTemplateId,
+        name: captureName,
+      });
+      const launchSource =
+        providerSnapshot.launchSource ??
+        detail.template?.launchSource ??
+        DEFAULT_TEMPLATE_LAUNCH_SOURCE;
       let updatedExistingTemplate = false;
 
       this.store.update((draft) => {
         const current = this.requireVm(draft, vmId);
-        const existingTemplate = input.templateId
-          ? requireTemplate(draft, input.templateId)
+        const existingTemplate = requestedTemplateId
+          ? requireTemplate(draft, requestedTemplateId)
           : null;
-        const templateId = existingTemplate?.id ?? nextId(draft, "tpl");
         const snapshot = buildSnapshot(
           draft,
           current,
           `Template capture: ${captureName}`,
           providerSnapshot.providerRef,
           providerSnapshot.summary,
-          templateId,
+          reservedTemplateId,
         );
         const captureNotes = buildCaptureNotes(
           current,
@@ -454,7 +500,11 @@ export class DesktopManager {
           existingTemplate.name = captureName;
           existingTemplate.description =
             captureDescription || existingTemplate.description || `Captured from ${current.name}`;
+          existingTemplate.launchSource = launchSource;
           existingTemplate.defaultResources = { ...current.resources };
+          existingTemplate.defaultForwardedPorts = current.forwardedPorts.map(
+            copyForwardAsTemplatePort,
+          );
           existingTemplate.snapshotIds.unshift(snapshot.id);
           existingTemplate.tags = Array.from(
             new Set(["captured", slugify(current.name), ...existingTemplate.tags]),
@@ -463,11 +513,12 @@ export class DesktopManager {
           existingTemplate.updatedAt = nowIso();
         } else {
           const template: EnvironmentTemplate = {
-            id: templateId,
+            id: reservedTemplateId,
             name: captureName,
             description: captureDescription || `Captured from ${current.name}`,
-            baseImage: "ubuntu-desktop-24.04",
+            launchSource,
             defaultResources: { ...current.resources },
+            defaultForwardedPorts: current.forwardedPorts.map(copyForwardAsTemplatePort),
             tags: ["captured", slugify(current.name)],
             notes: captureNotes,
             snapshotIds: [snapshot.id],
@@ -509,17 +560,35 @@ export class DesktopManager {
 
       this.store.update((draft) => {
         const current = this.requireVm(draft, vmId);
-        current.lastAction = mutation.lastAction;
-        current.updatedAt = nowIso();
-        current.frameRevision += 1;
-        current.activeWindow = mutation.activeWindow ?? current.activeWindow;
-        current.workspacePath = mutation.workspacePath ?? current.workspacePath;
-        appendManyActivity(current, mutation.activity);
+        applyProviderMutation(current, mutation);
       });
       this.publish();
 
       return `${vm.name} command completed`;
     });
+  }
+
+  updateVmForwardedPorts(vmId: string, input: UpdateVmForwardedPortsInput): void {
+    validateForwardedPorts(input.forwardedPorts);
+
+    this.store.update((draft) => {
+      const vm = this.requireVm(draft, vmId);
+      vm.forwardedPorts = buildVmForwardedPorts(vm.id, input.forwardedPorts);
+      vm.updatedAt = nowIso();
+      vm.frameRevision += 1;
+      vm.lastAction =
+        vm.forwardedPorts.length > 0
+          ? `Updated ${vm.forwardedPorts.length} forwarded service port${vm.forwardedPorts.length === 1 ? "" : "s"}`
+          : "Cleared forwarded service ports";
+      appendActivity(
+        vm,
+        vm.forwardedPorts.length > 0
+          ? `forwarding: ${vm.forwardedPorts.map((entry) => `${entry.name}:${entry.guestPort}`).join(", ")}`
+          : "forwarding: cleared",
+      );
+    });
+
+    this.publish();
   }
 
   private queueVmAction(
@@ -531,6 +600,7 @@ export class DesktopManager {
 
     this.store.update((draft) => {
       const vm = this.requireVm(draft, vmId);
+      this.ensureActiveProvider(vm);
       const job = buildJob(draft, kind, vm.id, vm.templateId, `Queued ${kind} for ${vm.name}`);
       draft.jobs.unshift(job);
       trimJobs(draft);
@@ -541,6 +611,7 @@ export class DesktopManager {
 
     void this.runJob(jobId, async () => {
       const vm = this.getVmDetail(vmId).vm;
+      this.ensureActiveProvider(vm);
       return runner(vm);
     });
   }
@@ -584,6 +655,30 @@ export class DesktopManager {
     return requireVm(state, vmId);
   }
 
+  private ensureActiveProvider(vm: VmInstance): void {
+    if (vm.provider === this.provider.state.kind) {
+      return;
+    }
+
+    throw new Error(
+      `VM ${vm.name} belongs to ${vm.provider} data, but the server is running in ${this.provider.state.kind} mode.`,
+    );
+  }
+
+  private syncProviderState(): boolean {
+    const nextProviderState = this.provider.refreshState();
+    const { changed } = this.store.update((draft) => {
+      if (sameProviderState(draft.provider, nextProviderState)) {
+        return false;
+      }
+
+      draft.provider = nextProviderState;
+      return true;
+    });
+
+    return changed;
+  }
+
   private publish(): void {
     const summary = this.getSummary();
 
@@ -598,16 +693,19 @@ function buildVmRecord(
   template: EnvironmentTemplate,
   name: string,
   resources: CreateVmInput["resources"],
+  forwardedPorts: TemplatePortForward[],
   provider: ProviderState["kind"],
   status: VmInstance["status"],
 ): VmInstance {
   const now = nowIso();
+  const id = nextId(state, "vm");
 
   return {
-    id: nextId(state, "vm"),
+    id,
     name,
     templateId: template.id,
     provider,
+    providerRef: buildProviderRef(id, name),
     status,
     resources: { ...resources },
     createdAt: now,
@@ -618,7 +716,12 @@ function buildVmRecord(
     frameRevision: 1,
     screenSeed: state.sequence * 47,
     activeWindow: "editor",
-    workspacePath: `/srv/workspaces/${slugify(name)}`,
+    workspacePath: provider === "mock" ? `/srv/workspaces/${slugify(name)}` : "/root",
+    session:
+      provider === "mock"
+        ? buildSyntheticSession()
+        : null,
+    forwardedPorts: buildVmForwardedPorts(id, forwardedPorts),
     activityLog: [
       `template: ${template.name}`,
       `status: ${status}`,
@@ -671,6 +774,26 @@ function nextId(state: AppState, prefix: string): string {
   const value = String(state.sequence).padStart(4, "0");
   state.sequence += 1;
   return `${prefix}-${value}`;
+}
+
+function applyProviderMutation(vm: VmInstance, mutation: ProviderMutation): void {
+  vm.lastAction = mutation.lastAction;
+  vm.updatedAt = nowIso();
+  vm.frameRevision += 1;
+
+  if (mutation.activeWindow) {
+    vm.activeWindow = mutation.activeWindow;
+  }
+
+  if (mutation.workspacePath !== undefined) {
+    vm.workspacePath = mutation.workspacePath;
+  }
+
+  if ("session" in mutation) {
+    vm.session = enrichVmSession(vm.id, mutation.session ?? null);
+  }
+
+  appendManyActivity(vm, mutation.activity);
 }
 
 function appendActivity(vm: VmInstance, line: string): void {
@@ -741,6 +864,131 @@ function validateResources(resources: CreateVmInput["resources"]): void {
       "Resources must be within sane ranges: cpu 1-96, ram 1024-262144 MB, disk 10-4096 GB.",
     );
   }
+}
+
+function buildProviderRef(vmId: string, name: string): string {
+  const slug = slugify(name) || "workspace";
+  return `parallaize-${vmId}-${slug}`;
+}
+
+function buildSyntheticSession(): VmInstance["session"] {
+  return {
+    kind: "synthetic",
+    host: null,
+    port: null,
+    webSocketPath: null,
+    browserPath: null,
+    display: "Synthetic frame stream",
+  };
+}
+
+function validateForwardedPorts(forwardedPorts: TemplatePortForward[]): void {
+  const seenNames = new Set<string>();
+
+  for (const forwardedPort of forwardedPorts) {
+    const name = forwardedPort.name.trim();
+
+    if (!name) {
+      throw new Error("Forwarded port names are required.");
+    }
+
+    if (seenNames.has(name.toLowerCase())) {
+      throw new Error(`Forwarded port name ${name} is duplicated.`);
+    }
+
+    seenNames.add(name.toLowerCase());
+
+    if (forwardedPort.guestPort < 1 || forwardedPort.guestPort > 65535) {
+      throw new Error("Forwarded guest ports must be between 1 and 65535.");
+    }
+  }
+}
+
+function buildVmForwardedPorts(
+  vmId: string,
+  forwardedPorts: TemplatePortForward[],
+): VmPortForward[] {
+  return forwardedPorts.map((forwardedPort, index) => {
+    const id = `port-${String(index + 1).padStart(2, "0")}`;
+
+    return {
+      name: forwardedPort.name.trim(),
+      guestPort: forwardedPort.guestPort,
+      protocol: forwardedPort.protocol,
+      description: forwardedPort.description.trim(),
+      id,
+      publicPath: buildVmForwardPath(vmId, id),
+    };
+  });
+}
+
+function copyForwardAsTemplatePort(forwardedPort: VmPortForward): TemplatePortForward {
+  return {
+    name: forwardedPort.name,
+    guestPort: forwardedPort.guestPort,
+    protocol: forwardedPort.protocol,
+    description: forwardedPort.description,
+  };
+}
+
+function enrichVmSession(
+  vmId: string,
+  session: VmInstance["session"],
+): VmInstance["session"] {
+  if (!session) {
+    return null;
+  }
+
+  if (session.kind !== "vnc") {
+    return {
+      ...session,
+      browserPath: null,
+      webSocketPath: null,
+    };
+  }
+
+  return {
+    ...session,
+    webSocketPath: session.webSocketPath ?? buildVncSocketPath(vmId),
+    browserPath: session.browserPath ?? buildVmBrowserPath(vmId),
+  };
+}
+
+function cloneVmSession(
+  vmId: string,
+  session: VmInstance["session"],
+): VmInstance["session"] {
+  if (!session) {
+    return null;
+  }
+
+  return enrichVmSession(vmId, { ...session });
+}
+
+function sameProviderState(left: ProviderState, right: ProviderState): boolean {
+  return (
+    left.kind === right.kind &&
+    left.available === right.available &&
+    left.detail === right.detail &&
+    left.hostStatus === right.hostStatus &&
+    left.binaryPath === right.binaryPath &&
+    left.project === right.project &&
+    left.desktopTransport === right.desktopTransport &&
+    left.nextSteps.length === right.nextSteps.length &&
+    left.nextSteps.every((step, index) => step === right.nextSteps[index])
+  );
+}
+
+function buildVncSocketPath(vmId: string): string {
+  return `/api/vms/${vmId}/vnc`;
+}
+
+function buildVmBrowserPath(vmId: string): string {
+  return `/?vm=${vmId}`;
+}
+
+function buildVmForwardPath(vmId: string, forwardId: string): string {
+  return `/vm/${vmId}/forwards/${forwardId}/`;
 }
 
 function errorMessage(error: unknown): string {

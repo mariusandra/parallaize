@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: parallaize-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: parallaize
+      POSTGRES_USER: parallaize
+      POSTGRES_PASSWORD: parallaize
+    ports:
+      - "5432:5432"
+    volumes:
+      - parallaize-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  parallaize-postgres-data:
