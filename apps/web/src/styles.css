@@ -1202,7 +1202,16 @@ textarea {
   overflow: auto;
 }
 
+.novnc-shell--fit {
+  overflow: hidden;
+}
+
 .novnc-surface--remote {
+  display: grid;
+  place-items: center;
+}
+
+.novnc-surface--fit {
   display: grid;
   place-items: center;
 }
@@ -1214,6 +1223,7 @@ textarea {
   max-height: none;
 }
 
+.novnc-surface--fit canvas,
 .novnc-surface--scale canvas {
   width: 100%;
   height: 100%;
@@ -2359,7 +2369,7 @@ section.workspace-shell {
 .workspace-stage__viewport-shell--fixed {
   display: grid;
   place-items: center;
-  overflow: auto;
+  overflow: hidden;
   padding: 1rem;
 }
 
@@ -2868,12 +2878,45 @@ section.workspace-shell {
   padding: 0.78rem 0.82rem;
 }
 
+.field-pair--compact {
+  padding: 0.58rem 0.68rem;
+  border-radius: 0.88rem;
+}
+
 .field-pair__value {
   margin: 0.35rem 0 0;
   color: var(--ink);
   font-size: 0.88rem;
   line-height: 1.5;
   word-break: break-word;
+}
+
+.field-pair--compact .field-pair__value {
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+}
+
+.inline-note {
+  display: grid;
+  gap: 0.3rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--line));
+  border-radius: 0.95rem;
+  background: var(--warning-soft);
+  padding: 0.72rem 0.8rem;
+}
+
+.inline-note strong {
+  color: var(--warning);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.inline-note p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.84rem;
+  line-height: 1.45;
 }
 
 .list-card {
@@ -3071,7 +3114,16 @@ section.workspace-shell {
   overflow: auto;
 }
 
+.novnc-shell--fit {
+  overflow: hidden;
+}
+
 .novnc-surface--remote {
+  display: grid;
+  place-items: center;
+}
+
+.novnc-surface--fit {
   display: grid;
   place-items: center;
 }
@@ -3087,6 +3139,7 @@ section.workspace-shell {
   max-height: none;
 }
 
+.novnc-surface--fit canvas,
 .novnc-surface--scale canvas {
   width: 100%;
   height: 100%;

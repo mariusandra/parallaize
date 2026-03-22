@@ -7,7 +7,7 @@ export interface RfbLike extends EventTarget {
   disconnect(): void;
 }
 
-export type RfbViewportMode = "remote" | "scale";
+export type RfbViewportMode = "fit" | "remote" | "scale";
 
 export type RfbConstructor = new (
   target: Element,
@@ -73,6 +73,12 @@ export function buildRfbSocketUrls(
 
 export function viewportSettingsForMode(mode: RfbViewportMode): RfbViewportSettings {
   switch (mode) {
+    case "fit":
+      return {
+        clipViewport: false,
+        resizeSession: false,
+        scaleViewport: true,
+      };
     case "scale":
       return {
         clipViewport: false,

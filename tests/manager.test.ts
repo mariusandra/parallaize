@@ -700,6 +700,191 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /xrandr --output "\$OUTPUT" --mode "\$MODE_TO_APPLY"/);
 });
 
+test("incus provider targets the configured storage pool for creates and copies", async () => {
+  const calls: string[][] = [];
+  const sourceInstanceName = "parallaize-vm-0200-storage-origin";
+  const targetInstanceName = "parallaize-vm-0201-storage-clone";
+  const snapshotTargetInstanceName = "parallaize-vm-0202-storage-snapshot";
+  const instanceAddresses = new Map<string, string>([
+    [sourceInstanceName, "10.55.1.20"],
+    [targetInstanceName, "10.55.1.21"],
+    [snapshotTargetInstanceName, "10.55.1.22"],
+  ]);
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (args[0] === "list" && args[2] === "--format" && args[3] === "json") {
+        const address = instanceAddresses.get(args[1]);
+
+        if (!address) {
+          return ok("[]", args);
+        }
+
+        return ok(
+          JSON.stringify([
+            {
+              name: args[1],
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address,
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    storagePool: "fastpool",
+    guestVncPort: 5901,
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const template: EnvironmentTemplate = {
+    id: "tpl-0200",
+    name: "Storage Pool Template",
+    description: "Verifies Incus storage targeting",
+    launchSource: "images:ubuntu/noble/desktop",
+    defaultResources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    defaultForwardedPorts: [],
+    tags: [],
+    notes: [],
+    snapshotIds: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const sourceVm: VmInstance = {
+    id: "vm-0200",
+    name: "storage-origin",
+    templateId: template.id,
+    provider: "incus",
+    providerRef: sourceInstanceName,
+    status: "running",
+    resources: template.defaultResources,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 20,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: {
+      kind: "vnc",
+      host: "10.55.1.20",
+      port: 5901,
+      webSocketPath: "/api/vms/vm-0200/vnc",
+      browserPath: "/?vm=vm-0200",
+      display: "10.55.1.20:5901",
+    },
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const targetVm: VmInstance = {
+    ...sourceVm,
+    id: "vm-0201",
+    name: "storage-clone",
+    providerRef: targetInstanceName,
+    session: null,
+  };
+
+  const snapshotTargetVm: VmInstance = {
+    ...sourceVm,
+    id: "vm-0202",
+    name: "storage-snapshot",
+    providerRef: snapshotTargetInstanceName,
+    session: null,
+  };
+
+  await provider.createVm(
+    {
+      ...sourceVm,
+      status: "creating",
+      liveSince: null,
+      session: null,
+    },
+    template,
+  );
+  await provider.cloneVm(sourceVm, targetVm, template);
+  await provider.launchVmFromSnapshot(
+    {
+      id: "snap-0200",
+      vmId: sourceVm.id,
+      templateId: template.id,
+      label: "checkpoint",
+      summary: "Snapshot checkpoint captured from storage-origin.",
+      providerRef: `${sourceInstanceName}/parallaize-snap-checkpoint`,
+      resources: template.defaultResources,
+      createdAt: new Date().toISOString(),
+    },
+    snapshotTargetVm,
+    template,
+  );
+
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "init" &&
+        args[1] === template.launchSource &&
+        args[2] === sourceInstanceName &&
+        args.includes("-s") &&
+        args.includes("fastpool"),
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "copy" &&
+        args[1] === sourceInstanceName &&
+        args[2] === targetInstanceName &&
+        args.includes("-s") &&
+        args.includes("fastpool"),
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "copy" &&
+        args[1] === `${sourceInstanceName}/parallaize-snap-checkpoint` &&
+        args[2] === snapshotTargetInstanceName &&
+        args.includes("-s") &&
+        args.includes("fastpool"),
+    ),
+  );
+});
+
 test("incus provider launches and restores snapshots with VM commands", async () => {
   const calls: string[][] = [];
   const sourceInstanceName = "parallaize-vm-0109-snap-origin";

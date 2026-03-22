@@ -104,6 +104,19 @@ flox activate -d . -- pnpm start
 
 Captured templates publish a reusable local Incus image alias and future launches use that alias as the template launch source.
 
+### VM Storage Performance
+
+On this host, `incus info` reports the active storage backend as `dir`. That works, but for VM-heavy create, clone, and snapshot workflows it is usually the slow path because the backend cannot use thin-provisioned or filesystem-native snapshot/copy features.
+
+If you want faster VM provisioning and snapshot churn, create a faster Incus storage pool such as `lvm`, `btrfs`, or `zfs` and point Parallaize at it:
+
+```bash
+PARALLAIZE_INCUS_STORAGE_POOL=fastpool
+flox activate -d . -- pnpm start
+```
+
+Parallaize will then pass `--storage fastpool` to `incus init` and `incus copy` for new VM launches, clones, and launches-from-snapshot. Existing instances stay on their current pool until you migrate them separately in Incus.
+
 If you need the old demo path, run `pnpm run start:mock`.
 
 ### Guest Networking And Internet Access
@@ -217,6 +230,7 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 - `PARALLAIZE_PROVIDER`: `mock` or `incus`, default `incus` for `pnpm start`
 - `PARALLAIZE_INCUS_BIN`: Incus binary path, default `incus`
 - `PARALLAIZE_INCUS_PROJECT`: optional Incus project name
+- `PARALLAIZE_INCUS_STORAGE_POOL`: optional Incus storage pool for new VM creates and copies; use this to move Parallaize off a slow `dir` pool
 - `PARALLAIZE_TEMPLATE_COMPRESSION`: image compression for template capture, default `none`; accepted values mirror Incus (`bzip2`, `gzip`, `lz4`, `lzma`, `xz`, `zstd`, `none`)
 - `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5901`
 - `PARALLAIZE_ADMIN_USERNAME`: shared admin username for browser-session login or Basic Auth fallback, default `admin`

@@ -178,6 +178,8 @@ const desktopViewportScaleDefault = 1;
 const desktopViewportScaleMin = 0.5;
 const desktopViewportScaleMax = 3;
 const desktopViewportScaleStep = 0.25;
+const liveCaptureWarningCopy =
+  "This is fine, but you might capture inconsistent state or leave lockfiles open. Shut the VM down first if you need a clean checkpoint.";
 const desktopFixedWidthDefault = 1280;
 const desktopFixedHeightDefault = 800;
 const desktopFixedWidthMin = 640;
@@ -330,18 +332,12 @@ export function DashboardApp(): JSX.Element {
           availableViewportBounds.height,
         )
       : null;
-  const stageViewportFrameStyle =
-    desktopResolutionMode === "fixed"
-      ? ({
-          width: `${appliedDesktopWidth}px`,
-          height: `${appliedDesktopHeight}px`,
-        } satisfies CSSProperties)
-      : viewportFrameBounds
-        ? ({
-            width: `${viewportFrameBounds.width}px`,
-            height: `${viewportFrameBounds.height}px`,
-          } satisfies CSSProperties)
-      : undefined;
+  const stageViewportFrameStyle = viewportFrameBounds
+    ? ({
+        width: `${viewportFrameBounds.width}px`,
+        height: `${viewportFrameBounds.height}px`,
+      } satisfies CSSProperties)
+    : undefined;
   const effectiveDesktopResolution = applyViewportBoundsToResolution(
     desktopResolution,
     observedViewportBounds,
@@ -1137,6 +1133,62 @@ export function DashboardApp(): JSX.Element {
     });
   }
 
+  function applyViewportScalePreference(vmId: string, scaleValue: number): void {
+    const requestedScale = Number.isFinite(scaleValue)
+      ? scaleValue
+      : appliedDesktopViewportScale;
+    const nextScale = clampDesktopViewportScale(requestedScale);
+
+    setVmDesktopResolutionPreference(vmId, {
+      mode: "viewport",
+      scale: nextScale,
+      width: appliedDesktopWidth,
+      height: appliedDesktopHeight,
+    });
+    setResolutionDraft((current) => ({
+      ...current,
+      mode: "viewport",
+      scale: formatViewportScale(nextScale),
+    }));
+    lastResolutionRequestKeyRef.current = null;
+  }
+
+  function applyResolutionMode(vmId: string, mode: DesktopResolutionMode): void {
+    if (mode === "viewport") {
+      applyViewportScalePreference(vmId, Number(resolutionDraft.scale));
+      return;
+    }
+
+    const requestedWidth = Number(resolutionDraft.width);
+    const requestedHeight = Number(resolutionDraft.height);
+    const nextWidth = Number.isFinite(requestedWidth)
+      ? clampDesktopFixedWidth(requestedWidth)
+      : appliedDesktopWidth;
+    const nextHeight = Number.isFinite(requestedHeight)
+      ? clampDesktopFixedHeight(requestedHeight)
+      : appliedDesktopHeight;
+    const normalizedFixedResolution = normalizeGuestDisplayResolution(
+      nextWidth,
+      nextHeight,
+    );
+
+    setVmDesktopResolutionPreference(vmId, {
+      mode: "fixed",
+      scale: appliedDesktopViewportScale,
+      width: normalizedFixedResolution.width,
+      height: normalizedFixedResolution.height,
+    });
+    setResolutionDraft(
+      buildResolutionDraft(
+        "fixed",
+        appliedDesktopViewportScale,
+        normalizedFixedResolution.width,
+        normalizedFixedResolution.height,
+      ),
+    );
+    lastResolutionRequestKeyRef.current = null;
+  }
+
   function selectVm(vmId: string): void {
     setSelectedVmId(vmId);
     setOpenVmMenuId(null);
@@ -1287,7 +1339,9 @@ export function DashboardApp(): JSX.Element {
 
   async function handleSnapshot(vm: VmInstance): Promise<void> {
     const label = window.prompt(
-      "Snapshot label",
+      vm.status === "running"
+        ? `Snapshot label\n\n${liveCaptureWarningCopy}`
+        : "Snapshot label",
       `snapshot-${new Date().toISOString().slice(0, 16)}`,
     );
 
@@ -2053,7 +2107,7 @@ export function DashboardApp(): JSX.Element {
                         onResolutionChange={setDesktopResolution}
                         surfaceClassName="workspace-stage__canvas"
                         viewportMode={
-                          desktopResolutionMode === "viewport" ? "scale" : "remote"
+                          desktopResolutionMode === "viewport" ? "scale" : "fit"
                         }
                         webSocketPath={currentDetail.vm.session.webSocketPath}
                         showHeader={false}
@@ -2113,7 +2167,10 @@ export function DashboardApp(): JSX.Element {
                 onCommandDraftChange={setCommandDraft}
                 onDelete={handleDelete}
                 onForwardDraftChange={setForwardDraft}
+                onResolutionModeChange={(mode) => applyResolutionMode(selectedVm.id, mode)}
                 onResolutionDraftChange={setResolutionDraft}
+                onViewportScaleChange={(scale) =>
+                  applyViewportScalePreference(selectedVm.id, scale)}
                 onRemoveForward={handleRemoveForward}
                 onResourceDraftChange={setResourceDraft}
                 onApplyResolution={handleApplyResolution}
@@ -2616,7 +2673,9 @@ interface WorkspaceSidepanelProps {
   onCommandDraftChange: (value: string) => void;
   onDelete: (vm: VmInstance) => Promise<void>;
   onForwardDraftChange: (draft: ForwardDraft) => void;
+  onResolutionModeChange: (mode: DesktopResolutionMode) => void;
   onResolutionDraftChange: (draft: ResolutionDraft) => void;
+  onViewportScaleChange: (scale: number) => void;
   onRemoveForward: (forwardId: string) => Promise<void>;
   onResourceDraftChange: (draft: ResourceDraft) => void;
   onResize: (event: FormEvent<HTMLFormElement>) => Promise<void>;
@@ -2730,7 +2789,9 @@ function WorkspaceSidepanel({
   onCommandDraftChange,
   onDelete,
   onForwardDraftChange,
+  onResolutionModeChange,
   onResolutionDraftChange,
+  onViewportScaleChange,
   onRemoveForward,
   onResourceDraftChange,
   onResize,
@@ -2873,36 +2934,17 @@ function WorkspaceSidepanel({
               </div>
             </SidepanelSection>
 
-            <SidepanelSection title="Resolution" defaultOpen>
+            <SidepanelSection title="Viewport" defaultOpen>
               <form className="sidepanel-form" onSubmit={onApplyResolution}>
-                <div className="compact-grid">
-                  <FieldPair
-                    label="Current"
-                    mono
-                    value={formatCurrentResolution(resolutionState)}
-                  />
-                  <FieldPair
-                    label="Viewport"
-                    mono
-                    value={formatViewportResolution(resolutionState)}
-                  />
-                  <FieldPair
-                    label="Target"
-                    mono
-                    value={formatTargetResolution(resolutionDraft, resolutionState)}
-                  />
-                </div>
-
                 <label className="field-shell">
                   <span>Mode</span>
                   <select
                     className="field-input"
                     value={resolutionDraft.mode}
                     onChange={(event) =>
-                      onResolutionDraftChange({
-                        ...resolutionDraft,
-                        mode: event.target.value === "fixed" ? "fixed" : "viewport",
-                      })
+                      onResolutionModeChange(
+                        event.target.value === "fixed" ? "fixed" : "viewport",
+                      )
                     }
                   >
                     <option value="viewport">Match viewport</option>
@@ -2945,12 +2987,7 @@ function WorkspaceSidepanel({
                         step={desktopViewportScaleStep}
                         value={Number(resolutionDraft.scale) || desktopViewportScaleDefault}
                         onChange={(event) =>
-                          onResolutionDraftChange({
-                            ...resolutionDraft,
-                            scale: formatViewportScale(
-                              clampDesktopViewportScale(Number(event.target.value)),
-                            ),
-                          })
+                          onViewportScaleChange(Number(event.target.value))
                         }
                       />
                       <span className="field-range__value mono-font">
@@ -2963,15 +3000,32 @@ function WorkspaceSidepanel({
                   </label>
                 )}
 
-                <p className="empty-copy">
-                  {resolutionDraft.mode === "fixed"
-                    ? "Fixed mode keeps the desktop at a chosen size and centers it in the stage."
-                    : "Viewport mode resizes the guest desktop to the viewport size multiplied by the selected scale, then fits the result back into view."}
-                </p>
+                <div className="compact-grid compact-grid--triple">
+                  <FieldPair
+                    compact
+                    label="Current"
+                    mono
+                    value={formatCurrentResolution(resolutionState)}
+                  />
+                  <FieldPair
+                    compact
+                    label="Viewport"
+                    mono
+                    value={formatViewportResolution(resolutionState)}
+                  />
+                  <FieldPair
+                    compact
+                    label="Target"
+                    mono
+                    value={formatTargetResolution(resolutionDraft, resolutionState)}
+                  />
+                </div>
 
-                <button className="button button--secondary button--full" type="submit">
-                  Apply display mode
-                </button>
+                {resolutionDraft.mode === "fixed" ? (
+                  <button className="button button--secondary button--full" type="submit">
+                    Apply fixed size
+                  </button>
+                ) : null}
               </form>
             </SidepanelSection>
 
@@ -3167,6 +3221,10 @@ function WorkspaceSidepanel({
 
               <SidepanelSection title="Capture template">
                 <form className="sidepanel-form" onSubmit={onSubmitCapture}>
+                  {vm.status === "running" ? (
+                    <InlineWarningNote>{liveCaptureWarningCopy}</InlineWarningNote>
+                  ) : null}
+
                   <label className="field-shell">
                     <span>Mode</span>
                     <select
@@ -3309,6 +3367,10 @@ function WorkspaceSidepanel({
 
               <SidepanelSection title="Snapshots">
                 <div className="stack">
+                  {vm.status === "running" ? (
+                    <InlineWarningNote>{liveCaptureWarningCopy}</InlineWarningNote>
+                  ) : null}
+
                   {detail.snapshots.length > 0 ? (
                     detail.snapshots.map((snapshot) => (
                       <div key={snapshot.id} className="list-card">
@@ -3491,11 +3553,23 @@ function OverviewSidepanel({
 
         <SidepanelSection title="Fleet" defaultOpen>
           <div className="compact-grid">
-            <FieldPair label="Workspaces" value={String(summary.metrics.totalVmCount)} />
-            <FieldPair label="Running" value={String(summary.metrics.runningVmCount)} />
-            <FieldPair label="CPU" value={String(summary.metrics.totalCpu)} />
-            <FieldPair label="RAM" value={formatRam(summary.metrics.totalRamMb)} />
-            <FieldPair label="Disk" value={`${summary.metrics.totalDiskGb} GB`} />
+            <FieldPair label="VMs" value={String(summary.metrics.totalVmCount)} />
+            <FieldPair
+              label="Running"
+              value={`${summary.metrics.runningVmCount}/${summary.metrics.totalVmCount}`}
+            />
+            <FieldPair
+              label="CPU"
+              value={formatUsageCount(summary.metrics.totalCpu, summary.metrics.hostCpuCount)}
+            />
+            <FieldPair
+              label="RAM"
+              value={formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
+            />
+            <FieldPair
+              label="Disk"
+              value={formatDiskUsage(summary.metrics.totalDiskGb, summary.metrics.hostDiskGb)}
+            />
             <FieldPair label="Active jobs" value={String(runningJobCount)} />
           </div>
           <button className="button button--secondary button--full" type="button" onClick={onCreate}>
@@ -3723,18 +3797,29 @@ function StatusBadge({
 }
 
 function FieldPair({
+  compact = false,
   label,
   mono = false,
   value,
 }: {
+  compact?: boolean;
   label: string;
   mono?: boolean;
   value: string;
 }): JSX.Element {
   return (
-    <div className="field-pair">
+    <div className={joinClassNames("field-pair", compact ? "field-pair--compact" : "")}>
       <p className="field-pair__label">{label}</p>
       <p className={joinClassNames("field-pair__value", mono ? "mono-font" : "")}>{value}</p>
+    </div>
+  );
+}
+
+function InlineWarningNote({ children }: { children: ReactNode }): JSX.Element {
+  return (
+    <div className="inline-note inline-note--warning">
+      <strong>Running VM</strong>
+      <p>{children}</p>
     </div>
   );
 }
@@ -4382,6 +4467,10 @@ function formatTelemetryPercent(value: number | null | undefined): string {
 }
 
 function formatRamUsage(usedRamMb: number, totalRamMb: number): string {
+  if (totalRamMb <= 0) {
+    return formatRam(usedRamMb);
+  }
+
   if (usedRamMb >= 1024 && totalRamMb >= 1024) {
     const used = (usedRamMb / 1024).toFixed(usedRamMb % 1024 === 0 ? 0 : 1);
     const total = (totalRamMb / 1024).toFixed(totalRamMb % 1024 === 0 ? 0 : 1);
@@ -4389,6 +4478,22 @@ function formatRamUsage(usedRamMb: number, totalRamMb: number): string {
   }
 
   return `${usedRamMb}/${totalRamMb} MB`;
+}
+
+function formatDiskUsage(usedDiskGb: number, totalDiskGb: number): string {
+  if (totalDiskGb <= 0) {
+    return `${usedDiskGb} GB`;
+  }
+
+  return `${usedDiskGb}/${totalDiskGb} GB`;
+}
+
+function formatUsageCount(used: number, total: number): string {
+  if (total <= 0) {
+    return String(used);
+  }
+
+  return `${used}/${total}`;
 }
 
 function buildSparklinePoints(

@@ -11,6 +11,7 @@ export interface AppConfig {
   providerKind: ProviderKind;
   incusBinary: string;
   incusProject: string | null;
+  incusStoragePool: string | null;
   templateCompression: IncusImageCompression;
   guestVncPort: number;
   adminUsername: string;
@@ -29,6 +30,7 @@ export function loadConfig(): AppConfig {
     providerKind: parseProviderKind(process.env.PARALLAIZE_PROVIDER),
     incusBinary: process.env.PARALLAIZE_INCUS_BIN ?? "incus",
     incusProject: parseOptionalString(process.env.PARALLAIZE_INCUS_PROJECT),
+    incusStoragePool: parseOptionalString(process.env.PARALLAIZE_INCUS_STORAGE_POOL),
     templateCompression: parseTemplateCompression(process.env.PARALLAIZE_TEMPLATE_COMPRESSION),
     guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5901),
     adminUsername: process.env.PARALLAIZE_ADMIN_USERNAME?.trim() || "admin",

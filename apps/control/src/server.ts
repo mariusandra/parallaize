@@ -32,6 +32,7 @@ import { JsonStateStore } from "./store.js";
 const config = loadConfig();
 const provider = createProvider(config.providerKind, config.incusBinary, {
   project: config.incusProject ?? undefined,
+  storagePool: config.incusStoragePool ?? undefined,
   guestVncPort: config.guestVncPort,
   templateCompression: config.templateCompression,
 });

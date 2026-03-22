@@ -27,6 +27,7 @@ export interface CaptureTemplateTarget {
 
 export interface CreateProviderOptions {
   project?: string;
+  storagePool?: string;
   guestVncPort?: number;
   commandRunner?: IncusCommandRunner;
   guestPortProbe?: GuestPortProbe;
@@ -412,6 +413,7 @@ class IncusProvider implements DesktopProvider {
   private readonly guestVncPort: number;
   private readonly runner: IncusCommandRunner;
   private readonly project: string | null;
+  private readonly storagePool: string | null;
   private readonly guestPortProbe: GuestPortProbe;
   private readonly templatePublishHeartbeatMs: number;
   private readonly templateCompression: IncusImageCompression | null;
@@ -425,6 +427,7 @@ class IncusProvider implements DesktopProvider {
   ) {
     this.guestVncPort = options.guestVncPort ?? DEFAULT_GUEST_VNC_PORT;
     this.project = options.project ?? null;
+    this.storagePool = options.storagePool ?? null;
     this.runner =
       options.commandRunner ??
       new SpawnIncusCommandRunner(this.incusBinary, options.project);
@@ -501,18 +504,27 @@ class IncusProvider implements DesktopProvider {
     this.assertAvailable();
     this.assertLaunchSource(template);
 
-    this.run([
+    const initArgs = [
       "init",
       template.launchSource,
       vm.providerRef,
       "--vm",
+    ];
+
+    if (this.storagePool) {
+      initArgs.push("-s", this.storagePool);
+    }
+
+    initArgs.push(
       "-c",
       `limits.cpu=${vm.resources.cpu}`,
       "-c",
       `limits.memory=${formatMemoryLimit(vm.resources.ramMb)}`,
       "-d",
       `root,size=${formatDiskSize(vm.resources.diskGb)}`,
-    ]);
+    );
+
+    this.run(initArgs);
     this.run([
       "config",
       "set",
@@ -545,18 +557,27 @@ class IncusProvider implements DesktopProvider {
   ): Promise<ProviderMutation> {
     this.assertAvailable();
 
-    this.run([
+    const copyArgs = [
       "copy",
       sourceVm.providerRef,
       targetVm.providerRef,
       "--instance-only",
+    ];
+
+    if (this.storagePool) {
+      copyArgs.push("-s", this.storagePool);
+    }
+
+    copyArgs.push(
       "-c",
       `limits.cpu=${targetVm.resources.cpu}`,
       "-c",
       `limits.memory=${formatMemoryLimit(targetVm.resources.ramMb)}`,
       "-d",
       `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
-    ]);
+    );
+
+    this.run(copyArgs);
     this.ensureAgentDevice(targetVm.providerRef);
     this.run(["start", targetVm.providerRef]);
 
@@ -697,17 +718,26 @@ class IncusProvider implements DesktopProvider {
     this.assertAvailable();
     this.assertLaunchSource(template);
 
-    this.run([
+    const copyArgs = [
       "copy",
       snapshot.providerRef,
       targetVm.providerRef,
+    ];
+
+    if (this.storagePool) {
+      copyArgs.push("-s", this.storagePool);
+    }
+
+    copyArgs.push(
       "-c",
       `limits.cpu=${targetVm.resources.cpu}`,
       "-c",
       `limits.memory=${formatMemoryLimit(targetVm.resources.ramMb)}`,
       "-d",
       `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
-    ]);
+    );
+
+    this.run(copyArgs);
     this.ensureAgentDevice(targetVm.providerRef);
     this.run(["start", targetVm.providerRef]);
 

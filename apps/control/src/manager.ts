@@ -1,4 +1,5 @@
 import { collectMetrics, slugify } from "../../../packages/shared/src/helpers.js";
+import { statfsSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import type {
   ActionJob,
@@ -45,6 +46,7 @@ export class DesktopManager {
   private readonly vmTelemetry = new Map<string, ResourceTelemetry>();
   private readonly hostCpuCount = cpus().length;
   private readonly hostRamMb = Math.round(totalmem() / (1024 * 1024));
+  private readonly hostDiskGb = detectHostDiskGb();
 
   constructor(
     private readonly store: JsonStateStore,
@@ -165,6 +167,7 @@ export class DesktopManager {
     const metrics = collectMetrics(state.vms);
     metrics.hostCpuCount = this.hostCpuCount;
     metrics.hostRamMb = this.hostRamMb;
+    metrics.hostDiskGb = this.hostDiskGb;
 
     return {
       hostTelemetry: this.hostTelemetry,
@@ -1430,6 +1433,23 @@ function buildVmBrowserPath(vmId: string): string {
 
 function buildVmForwardPath(vmId: string, forwardId: string): string {
   return `/vm/${vmId}/forwards/${forwardId}/`;
+}
+
+function detectHostDiskGb(): number {
+  for (const path of ["/var/lib/incus", process.cwd(), "/"]) {
+    try {
+      const stats = statfsSync(path);
+      const totalBytes = stats.bsize * stats.blocks;
+
+      if (Number.isFinite(totalBytes) && totalBytes > 0) {
+        return Math.round(totalBytes / (1024 ** 3));
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return 0;
 }
 
 function errorMessage(error: unknown): string {

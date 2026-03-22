@@ -71,6 +71,14 @@ test("viewportSettingsForMode defaults the main session to remote resize", () =>
   });
 });
 
+test("viewportSettingsForMode keeps fixed sessions at a fixed remote size but scales to fit", () => {
+  assert.deepEqual(viewportSettingsForMode("fit"), {
+    clipViewport: false,
+    resizeSession: false,
+    scaleViewport: true,
+  });
+});
+
 test("viewportSettingsForMode keeps previews on local scaling", () => {
   assert.deepEqual(viewportSettingsForMode("scale"), {
     clipViewport: false,

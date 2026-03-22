@@ -164,6 +164,7 @@ export interface DashboardMetrics {
   totalRamMb: number;
   hostRamMb: number;
   totalDiskGb: number;
+  hostDiskGb: number;
 }
 
 export interface DashboardSummary {
