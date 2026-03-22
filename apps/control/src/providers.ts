@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { connect as connectTcp } from "node:net";
+import { cpus, freemem, loadavg, totalmem } from "node:os";
 
 import { slugify } from "../../../packages/shared/src/helpers.js";
 import type {
@@ -31,6 +32,8 @@ export interface CreateProviderOptions {
 export interface DesktopProvider {
   state: ProviderState;
   refreshState(): ProviderState;
+  sampleHostTelemetry(): ProviderTelemetrySample | null;
+  sampleVmTelemetry(vm: VmInstance): ProviderTelemetrySample | null;
   createVm(
     vm: VmInstance,
     template: EnvironmentTemplate,
@@ -94,6 +97,11 @@ interface ProviderCommandResult {
   workspacePath: string;
 }
 
+export interface ProviderTelemetrySample {
+  cpuPercent: number | null;
+  ramPercent: number | null;
+}
+
 interface IncusCommandRunner {
   execute(args: string[]): CommandResult;
 }
@@ -125,6 +133,14 @@ interface IncusListInstance {
         }>;
       }
     >;
+    memory?: {
+      usage?: number;
+      total?: number;
+    };
+    cpu?: {
+      usage?: number;
+      allocated_time?: number;
+    };
   };
 }
 
@@ -145,6 +161,23 @@ class MockProvider implements DesktopProvider {
 
   refreshState(): ProviderState {
     return this.state;
+  }
+
+  sampleHostTelemetry(): ProviderTelemetrySample {
+    const clock = Date.now() / 1000;
+    return {
+      cpuPercent: 28 + Math.sin(clock / 8) * 12,
+      ramPercent: 44 + Math.cos(clock / 11) * 9,
+    };
+  }
+
+  sampleVmTelemetry(vm: VmInstance): ProviderTelemetrySample {
+    const clock = Date.now() / 1000;
+    const seed = vm.screenSeed / 37;
+    return {
+      cpuPercent: 18 + ((Math.sin(clock / 5 + seed) + 1) * 28),
+      ramPercent: 32 + ((Math.cos(clock / 7 + seed) + 1) * 18),
+    };
   }
 
   async createVm(
@@ -348,6 +381,9 @@ class IncusProvider implements DesktopProvider {
   private readonly runner: IncusCommandRunner;
   private readonly project: string | null;
   private readonly guestPortProbe: GuestPortProbe;
+  private telemetrySnapshotAt = 0;
+  private telemetryInstances = new Map<string, IncusListInstance>();
+  private readonly vmCpuUsage = new Map<string, { capturedAt: number; usage: number }>();
 
   constructor(
     private readonly incusBinary: string,
@@ -365,6 +401,58 @@ class IncusProvider implements DesktopProvider {
   refreshState(): ProviderState {
     this.state = this.probeState();
     return this.state;
+  }
+
+  sampleHostTelemetry(): ProviderTelemetrySample {
+    const cpuCount = Math.max(cpus().length, 1);
+    const normalizedLoad = (loadavg()[0] / cpuCount) * 100;
+    const memoryPercent = ((totalmem() - freemem()) / totalmem()) * 100;
+
+    return {
+      cpuPercent: normalizedLoad,
+      ramPercent: memoryPercent,
+    };
+  }
+
+  sampleVmTelemetry(vm: VmInstance): ProviderTelemetrySample | null {
+    try {
+      const info = this.getTelemetryInstanceInfo(vm.providerRef);
+
+      if (!info || normalizeStatus(info.status ?? info.state?.status) !== "running") {
+        this.vmCpuUsage.delete(vm.providerRef);
+        return null;
+      }
+
+      const ramUsageBytes = info.state?.memory?.usage ?? null;
+      const ramPercent =
+        ramUsageBytes === null
+          ? null
+          : (ramUsageBytes / (Math.max(vm.resources.ramMb, 1) * 1024 * 1024)) * 100;
+      const cpuUsage = info.state?.cpu?.usage;
+      const capturedAt = Date.now();
+      let cpuPercent: number | null = null;
+
+      if (typeof cpuUsage === "number") {
+        const previous = this.vmCpuUsage.get(vm.providerRef);
+
+        if (previous && capturedAt > previous.capturedAt) {
+          const elapsedNs = (capturedAt - previous.capturedAt) * 1_000_000;
+          cpuPercent = ((cpuUsage - previous.usage) / elapsedNs / Math.max(vm.resources.cpu, 1)) * 100;
+        }
+
+        this.vmCpuUsage.set(vm.providerRef, {
+          capturedAt,
+          usage: cpuUsage,
+        });
+      }
+
+      return {
+        cpuPercent,
+        ramPercent,
+      };
+    } catch {
+      return null;
+    }
   }
 
   async createVm(
@@ -480,7 +568,16 @@ class IncusProvider implements DesktopProvider {
 
   async deleteVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
-    this.run(["delete", vm.providerRef, "--force"]);
+    const deleteArgs = ["delete", vm.providerRef, "--force"];
+    const deleteResult = this.runner.execute(deleteArgs);
+
+    if (deleteResult.status !== 0) {
+      const failure = formatCommandFailure(deleteArgs, deleteResult);
+
+      if (!isMissingInstanceFailure(failure)) {
+        throw new Error(failure);
+      }
+    }
 
     return {
       lastAction: `Workspace ${vm.name} deleted`,
@@ -565,7 +662,6 @@ class IncusProvider implements DesktopProvider {
       "copy",
       snapshot.providerRef,
       targetVm.providerRef,
-      "--instance-only",
       "-c",
       `limits.cpu=${targetVm.resources.cpu}`,
       "-c",
@@ -839,6 +935,23 @@ class IncusProvider implements DesktopProvider {
       instances.find((entry) => entry.name === instanceName) ?? instances[0] ?? null;
 
     return match;
+  }
+
+  private getTelemetryInstanceInfo(instanceName: string): IncusListInstance | null {
+    const now = Date.now();
+
+    if (now - this.telemetrySnapshotAt > 1000 || this.telemetryInstances.size === 0) {
+      const result = this.run(["list", "--format", "json"]);
+      const instances = parseJson<IncusListInstance[]>(result.stdout);
+      this.telemetryInstances = new Map(
+        instances
+          .filter((entry): entry is IncusListInstance & { name: string } => typeof entry.name === "string")
+          .map((entry) => [entry.name, entry]),
+      );
+      this.telemetrySnapshotAt = now;
+    }
+
+    return this.telemetryInstances.get(instanceName) ?? null;
   }
 
   private instanceMatchesStatus(
@@ -1499,6 +1612,13 @@ function formatCommandFailure(args: string[], result: CommandResult): string {
     `Command exited with status ${result.status ?? "unknown"}.`;
 
   return `incus ${args.join(" ")} failed: ${detail}`;
+}
+
+function isMissingInstanceFailure(message: string): boolean {
+  return (
+    message.includes("Instance not found") ||
+    message.includes("Failed to fetch instance")
+  );
 }
 
 function sleep(ms: number): Promise<void> {

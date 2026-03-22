@@ -39,6 +39,13 @@ export interface ResourceSpec {
   diskGb: number;
 }
 
+export interface ResourceTelemetry {
+  cpuHistory: number[];
+  cpuPercent: number | null;
+  ramHistory: number[];
+  ramPercent: number | null;
+}
+
 export interface ProviderState {
   kind: ProviderKind;
   available: boolean;
@@ -113,6 +120,7 @@ export interface VmInstance {
   forwardedPorts: VmPortForward[];
   activityLog: string[];
   commandHistory?: VmCommandResult[];
+  telemetry?: ResourceTelemetry;
 }
 
 export interface Snapshot {
@@ -157,6 +165,7 @@ export interface DashboardMetrics {
 }
 
 export interface DashboardSummary {
+  hostTelemetry: ResourceTelemetry;
   provider: ProviderState;
   templates: EnvironmentTemplate[];
   vms: VmInstance[];

@@ -148,6 +148,89 @@ test("command output is retained and snapshots can launch or restore VMs", async
   );
 });
 
+test("failed snapshot launches leave the placeholder VM in an error state", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-snapshot-launch-error-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  manager.snapshotVm("vm-0001", { label: "checkpoint" });
+  await wait(550);
+
+  const snapshot = manager.getVmDetail("vm-0001").snapshots[0];
+  assert.ok(snapshot);
+
+  provider.launchVmFromSnapshot = async () => {
+    throw new Error("snapshot copy failed");
+  };
+
+  const launchedVm = manager.launchVmFromSnapshot("vm-0001", snapshot!.id, {
+    sourceVmId: "vm-0001",
+    name: "broken-from-snapshot",
+  });
+
+  await wait(500);
+
+  const detail = manager.getVmDetail(launchedVm.id);
+  assert.equal(detail.vm.status, "error");
+  assert.equal(detail.vm.lastAction, "snapshot copy failed");
+  assert.ok(detail.vm.activityLog.some((entry) => entry === "error: snapshot copy failed"));
+  assert.ok(
+    detail.recentJobs.some(
+      (job) => job.kind === "launch-snapshot" && job.status === "failed",
+    ),
+  );
+});
+
+test("manager marks queued or running jobs as failed after a server restart", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-interrupted-jobs-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+
+  store.update((draft) => {
+    draft.jobs.unshift({
+      id: "job-interrupted",
+      kind: "resize",
+      targetVmId: "vm-0001",
+      targetTemplateId: "tpl-0001",
+      status: "running",
+      message: "Action in progress",
+      progressPercent: 14,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  });
+
+  const manager = new DesktopManager(store, provider);
+  const detail = manager.getVmDetail("vm-0001");
+
+  assert.equal(detail.recentJobs[0]?.id, "job-interrupted");
+  assert.equal(detail.recentJobs[0]?.status, "failed");
+  assert.equal(
+    detail.recentJobs[0]?.message,
+    "Control server restarted before resize could finish.",
+  );
+  assert.equal(detail.recentJobs[0]?.progressPercent, null);
+  assert.equal(detail.vm.lastAction, "Control server restarted before resize could finish.");
+  assert.ok(
+    detail.vm.activityLog.some(
+      (entry) => entry === "error: Control server restarted before resize could finish.",
+    ),
+  );
+});
+
 test("captured templates become reusable launch sources for subsequent VMs", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-captured-template-"));
   context.after(() => {
@@ -632,14 +715,14 @@ test("incus provider launches and restores snapshots with VM commands", async ()
 
   const launchMutation = await provider.launchVmFromSnapshot(snapshot, targetVm, template);
   assert.equal(launchMutation.session?.display, "10.55.0.22:5901");
-  assert.ok(
-    calls.some(
-      (args) =>
-        args[0] === "copy" &&
-        args[1] === snapshot.providerRef &&
-        args[2] === targetInstanceName,
-    ),
+  const copyCall = calls.find(
+    (args) =>
+      args[0] === "copy" &&
+      args[1] === snapshot.providerRef &&
+      args[2] === targetInstanceName,
   );
+  assert.ok(copyCall);
+  assert.ok(!copyCall?.includes("--instance-only"));
 
   const restoreMutation = await provider.restoreVmToSnapshot(sourceVm, snapshot);
   assert.equal(restoreMutation.session?.display, "10.55.0.21:5901");
@@ -970,6 +1053,72 @@ test("incus provider treats a timed-out stop as success once the VM is stopped",
   assert.equal(
     calls.some((args) => args[0] === "stop" && args.includes("--force")),
     false,
+  );
+});
+
+test("incus provider treats a missing instance during delete as already removed", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0102-missing-delete";
+
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (args[0] === "delete" && args[1] === instanceName) {
+        return {
+          args,
+          status: 1,
+          stdout: "",
+          stderr:
+            `Error: Failed checking instance exists "local:${instanceName}": Failed to fetch instance "${instanceName}" in project "default": Instance not found`,
+        };
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0102",
+    name: "missing-delete",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "error",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Launch failed",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 102,
+    activeWindow: "logs",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.deleteVm(vm);
+
+  assert.equal(mutation.lastAction, "Workspace missing-delete deleted");
+  assert.ok(
+    calls.some(
+      (args) => args[0] === "delete" && args[1] === instanceName && args[2] === "--force",
+    ),
   );
 });
 

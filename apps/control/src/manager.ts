@@ -10,6 +10,7 @@ import type {
   JobKind,
   ProviderState,
   ResizeVmInput,
+  ResourceTelemetry,
   SetVmResolutionInput,
   Snapshot,
   SnapshotInput,
@@ -23,6 +24,7 @@ import type {
 import type {
   CaptureTemplateTarget,
   DesktopProvider,
+  ProviderTelemetrySample,
   ProviderMutation,
 } from "./providers.js";
 import type { JsonStateStore } from "./store.js";
@@ -31,18 +33,27 @@ const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 const MAX_ACTIVITY_LINES = 8;
 const MAX_COMMAND_RESULTS = 6;
 const MAX_JOBS = 20;
+const MAX_TELEMETRY_SAMPLES = 28;
 const QUEUED_PROGRESS_PERCENT = 6;
 const RUNNING_PROGRESS_PERCENT = 14;
 
 export class DesktopManager {
   private readonly listeners = new Set<(summary: DashboardSummary) => void>();
   private ticker: NodeJS.Timeout | null = null;
+  private hostTelemetry: ResourceTelemetry = emptyResourceTelemetry();
+  private readonly vmTelemetry = new Map<string, ResourceTelemetry>();
 
   constructor(
     private readonly store: JsonStateStore,
     private readonly provider: DesktopProvider,
   ) {
     this.syncProviderState();
+    this.reconcileInterruptedJobs();
+    this.reconcileFailedProvisioningJobs();
+    this.hostTelemetry = appendTelemetrySample(
+      emptyResourceTelemetry(),
+      this.provider.sampleHostTelemetry(),
+    );
   }
 
   start(): void {
@@ -52,12 +63,36 @@ export class DesktopManager {
 
     this.ticker = setInterval(() => {
       const providerChanged = this.syncProviderState();
+      let telemetryChanged = false;
+      const nextHostTelemetry = appendTelemetrySample(
+        this.hostTelemetry,
+        this.provider.sampleHostTelemetry(),
+      );
+
+      if (!sameTelemetry(nextHostTelemetry, this.hostTelemetry)) {
+        this.hostTelemetry = nextHostTelemetry;
+        telemetryChanged = true;
+      }
+
+      const activeTelemetryVmIds = new Set<string>();
       const { changed } = this.store.update((state) => {
         let dirty = false;
 
         for (const vm of state.vms) {
           if (vm.status !== "running") {
             continue;
+          }
+
+          activeTelemetryVmIds.add(vm.id);
+
+          const nextVmTelemetry = appendTelemetrySample(
+            this.vmTelemetry.get(vm.id) ?? emptyResourceTelemetry(),
+            this.provider.sampleVmTelemetry(vm),
+          );
+
+          if (!sameTelemetry(nextVmTelemetry, this.vmTelemetry.get(vm.id) ?? null)) {
+            this.vmTelemetry.set(vm.id, nextVmTelemetry);
+            telemetryChanged = true;
           }
 
           const template = state.templates.find(
@@ -91,12 +126,19 @@ export class DesktopManager {
         return dirty;
       });
 
+      for (const vmId of [...this.vmTelemetry.keys()]) {
+        if (!activeTelemetryVmIds.has(vmId)) {
+          this.vmTelemetry.delete(vmId);
+          telemetryChanged = true;
+        }
+      }
+
       if (changed) {
         this.publish();
         return;
       }
 
-      if (providerChanged) {
+      if (providerChanged || telemetryChanged) {
         this.publish();
       }
     }, 2400);
@@ -119,9 +161,13 @@ export class DesktopManager {
     const state = this.store.load();
 
     return {
+      hostTelemetry: this.hostTelemetry,
       provider: state.provider,
       templates: state.templates,
-      vms: state.vms,
+      vms: state.vms.map((vm) => ({
+        ...vm,
+        telemetry: this.vmTelemetry.get(vm.id) ?? emptyResourceTelemetry(),
+      })),
       snapshots: state.snapshots,
       jobs: state.jobs,
       metrics: collectMetrics(state.vms),
@@ -136,7 +182,10 @@ export class DesktopManager {
 
     return {
       provider: state.provider,
-      vm,
+      vm: {
+        ...vm,
+        telemetry: this.vmTelemetry.get(vm.id) ?? emptyResourceTelemetry(),
+      },
       template: state.templates.find((template) => template.id === vm.templateId) ?? null,
       snapshots: state.snapshots.filter((snapshot) => snapshot.vmId === vm.id),
       recentJobs: state.jobs.filter((job) => job.targetVmId === vm.id).slice(0, 8),
@@ -206,23 +255,28 @@ export class DesktopManager {
     const jobRecord = createdJob as ActionJob;
 
     void this.runJob(jobRecord.id, async (report) => {
-      report("Allocating workspace", 18);
-      await sleep(550);
-      report("Provisioning VM", 42);
-      const template = requireTemplate(state, vmRecord.templateId);
-      const mutation = await this.provider.createVm(vmRecord, template);
-      report("Booting desktop", 86);
+      try {
+        report("Allocating workspace", 18);
+        await sleep(550);
+        report("Provisioning VM", 42);
+        const template = requireTemplate(state, vmRecord.templateId);
+        const mutation = await this.provider.createVm(vmRecord, template);
+        report("Booting desktop", 86);
 
-      this.store.update((draft) => {
-        const vm = this.requireVm(draft, vmRecord.id);
-        vm.status = "running";
-        vm.liveSince = nowIso();
-        applyProviderMutation(vm, mutation);
-      });
+        this.store.update((draft) => {
+          const vm = this.requireVm(draft, vmRecord.id);
+          vm.status = "running";
+          vm.liveSince = nowIso();
+          applyProviderMutation(vm, mutation);
+        });
 
-      this.publish();
+        this.publish();
 
-      return `${vmRecord.name} is running`;
+        return `${vmRecord.name} is running`;
+      } catch (error) {
+        this.markVmFailed(vmRecord.id, error);
+        throw error;
+      }
     });
 
     return vmRecord;
@@ -273,32 +327,37 @@ export class DesktopManager {
     const jobRecord = createdJob as ActionJob;
 
     void this.runJob(jobRecord.id, async (report) => {
-      report("Preparing clone", 18);
-      await sleep(500);
-      report("Cloning disks", 46);
-      const target = this.getVmDetail(vmRecord.id).vm;
-      const source = this.getVmDetail(input.sourceVmId).vm;
-      const template = this.getVmDetail(vmRecord.id).template;
+      try {
+        report("Preparing clone", 18);
+        await sleep(500);
+        report("Cloning disks", 46);
+        const target = this.getVmDetail(vmRecord.id).vm;
+        const source = this.getVmDetail(input.sourceVmId).vm;
+        const template = this.getVmDetail(vmRecord.id).template;
 
-      this.ensureActiveProvider(source);
+        this.ensureActiveProvider(source);
 
-      if (!template) {
-        throw new Error("Template for clone target was not found.");
+        if (!template) {
+          throw new Error("Template for clone target was not found.");
+        }
+
+        const mutation = await this.provider.cloneVm(source, target, template);
+        report("Booting desktop", 86);
+
+        this.store.update((draft) => {
+          const vm = this.requireVm(draft, vmRecord.id);
+          vm.status = "running";
+          vm.liveSince = nowIso();
+          applyProviderMutation(vm, mutation);
+        });
+
+        this.publish();
+
+        return `${vmRecord.name} cloned successfully`;
+      } catch (error) {
+        this.markVmFailed(vmRecord.id, error);
+        throw error;
       }
-
-      const mutation = await this.provider.cloneVm(source, target, template);
-      report("Booting desktop", 86);
-
-      this.store.update((draft) => {
-        const vm = this.requireVm(draft, vmRecord.id);
-        vm.status = "running";
-        vm.liveSince = nowIso();
-        applyProviderMutation(vm, mutation);
-      });
-
-      this.publish();
-
-      return `${vmRecord.name} cloned successfully`;
     });
 
     return vmRecord;
@@ -477,32 +536,37 @@ export class DesktopManager {
     const jobRecord = createdJob as ActionJob;
 
     void this.runJob(jobRecord.id, async (report) => {
-      report("Preparing snapshot launch", 18);
-      await sleep(350);
-      report("Cloning snapshot", 48);
-      const detail = this.getVmDetail(vmId);
-      const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
-      const template = requireTemplate(this.store.load(), snapshot.templateId);
+      try {
+        report("Preparing snapshot launch", 18);
+        await sleep(350);
+        report("Cloning snapshot", 48);
+        const detail = this.getVmDetail(vmId);
+        const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
+        const template = requireTemplate(this.store.load(), snapshot.templateId);
 
-      this.ensureActiveProvider(detail.vm);
+        this.ensureActiveProvider(detail.vm);
 
-      const mutation = await this.provider.launchVmFromSnapshot(
-        snapshot,
-        vmRecord,
-        template,
-      );
-      report("Booting desktop", 86);
+        const mutation = await this.provider.launchVmFromSnapshot(
+          snapshot,
+          vmRecord,
+          template,
+        );
+        report("Booting desktop", 86);
 
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmRecord.id);
-        current.status = "running";
-        current.liveSince = nowIso();
-        applyProviderMutation(current, mutation);
-      });
+        this.store.update((draft) => {
+          const current = this.requireVm(draft, vmRecord.id);
+          current.status = "running";
+          current.liveSince = nowIso();
+          applyProviderMutation(current, mutation);
+        });
 
-      this.publish();
+        this.publish();
 
-      return `${vmRecord.name} launched from ${snapshot.label}`;
+        return `${vmRecord.name} launched from ${snapshot.label}`;
+      } catch (error) {
+        this.markVmFailed(vmRecord.id, error);
+        throw error;
+      }
     });
 
     return vmRecord;
@@ -799,6 +863,109 @@ export class DesktopManager {
 
   private requireVm(state: AppState, vmId: string): VmInstance {
     return requireVm(state, vmId);
+  }
+
+  private markVmFailed(vmId: string, error: unknown): void {
+    const message = errorMessage(error);
+
+    this.store.update((draft) => {
+      const vm = draft.vms.find((entry) => entry.id === vmId);
+
+      if (!vm) {
+        return false;
+      }
+
+      vm.status = "error";
+      vm.liveSince = null;
+      vm.lastAction = message;
+      vm.updatedAt = nowIso();
+      appendActivity(vm, `error: ${message}`);
+      return true;
+    });
+
+    this.publish();
+  }
+
+  private reconcileFailedProvisioningJobs(): void {
+    this.store.update((draft) => {
+      let dirty = false;
+
+      for (const vm of draft.vms) {
+        if (vm.status !== "creating") {
+          continue;
+        }
+
+        const failedJob = draft.jobs.find(
+          (job) =>
+            job.targetVmId === vm.id &&
+            job.status === "failed" &&
+            (job.kind === "create" ||
+              job.kind === "clone" ||
+              job.kind === "launch-snapshot"),
+        );
+
+        if (!failedJob) {
+          continue;
+        }
+
+        vm.status = "error";
+        vm.liveSince = null;
+        vm.lastAction = failedJob.message;
+        vm.updatedAt = nowIso();
+
+        const errorLine = `error: ${failedJob.message}`;
+        if (!vm.activityLog.includes(errorLine)) {
+          appendActivity(vm, errorLine);
+        }
+
+        dirty = true;
+      }
+
+      return dirty;
+    });
+  }
+
+  private reconcileInterruptedJobs(): void {
+    this.store.update((draft) => {
+      let dirty = false;
+
+      for (const job of draft.jobs) {
+        if (job.status !== "queued" && job.status !== "running") {
+          continue;
+        }
+
+        const message = `Control server restarted before ${job.kind} could finish.`;
+        job.status = "failed";
+        job.message = message;
+        job.progressPercent = null;
+        job.updatedAt = nowIso();
+        dirty = true;
+
+        const vm =
+          job.targetVmId
+            ? draft.vms.find((entry) => entry.id === job.targetVmId) ?? null
+            : null;
+
+        if (!vm) {
+          continue;
+        }
+
+        if (vm.status === "creating" || vm.status === "deleting") {
+          vm.status = "error";
+        }
+
+        vm.liveSince = vm.status === "running" ? vm.liveSince : null;
+        vm.lastAction = message;
+        vm.updatedAt = nowIso();
+
+        const errorLine = `error: ${message}`;
+        if (!vm.activityLog.includes(errorLine)) {
+          appendActivity(vm, errorLine);
+        }
+      }
+
+      return dirty;
+    });
   }
 
   private ensureActiveProvider(vm: VmInstance): void {
@@ -1167,6 +1334,68 @@ function cloneVmSession(
     browserPath: null,
     webSocketPath: null,
   };
+}
+
+function appendTelemetrySample(
+  current: ResourceTelemetry,
+  sample: ProviderTelemetrySample | null,
+): ResourceTelemetry {
+  if (!sample) {
+    return {
+      ...current,
+      cpuPercent: null,
+      ramPercent: null,
+    };
+  }
+
+  const cpuPercent =
+    sample.cpuPercent === null ? null : normalizeTelemetryPercent(sample.cpuPercent);
+  const ramPercent =
+    sample.ramPercent === null ? null : normalizeTelemetryPercent(sample.ramPercent);
+
+  return {
+    cpuPercent,
+    ramPercent,
+    cpuHistory:
+      cpuPercent === null ? current.cpuHistory : appendTelemetryPoint(current.cpuHistory, cpuPercent),
+    ramHistory:
+      ramPercent === null ? current.ramHistory : appendTelemetryPoint(current.ramHistory, ramPercent),
+  };
+}
+
+function appendTelemetryPoint(history: number[], value: number): number[] {
+  return [...history, value].slice(-MAX_TELEMETRY_SAMPLES);
+}
+
+function emptyResourceTelemetry(): ResourceTelemetry {
+  return {
+    cpuHistory: [],
+    cpuPercent: null,
+    ramHistory: [],
+    ramPercent: null,
+  };
+}
+
+function normalizeTelemetryPercent(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function sameTelemetry(
+  left: ResourceTelemetry | null,
+  right: ResourceTelemetry | null,
+): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+
+  return (
+    left.cpuPercent === right.cpuPercent &&
+    left.ramPercent === right.ramPercent &&
+    left.cpuHistory.length === right.cpuHistory.length &&
+    left.ramHistory.length === right.ramHistory.length &&
+    left.cpuHistory.every((value, index) => value === right.cpuHistory[index]) &&
+    left.ramHistory.every((value, index) => value === right.ramHistory[index])
+  );
 }
 
 function sameProviderState(left: ProviderState, right: ProviderState): boolean {

@@ -992,6 +992,36 @@ textarea {
   min-height: 7.5rem;
 }
 
+.field-range {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 2.65rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--panel-muted);
+  padding: 0.45rem 0.85rem;
+}
+
+.field-range:focus-within {
+  border-color: rgba(125, 211, 199, 0.36);
+  box-shadow: 0 0 0 3px rgba(125, 211, 199, 0.12);
+}
+
+.field-range__input {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.field-range__value {
+  min-width: 3rem;
+  color: var(--ink);
+  font-size: 0.82rem;
+  text-align: right;
+}
+
 .sidepanel-form--framed {
   border: 1px solid var(--line);
   border-radius: 1rem;
@@ -1458,6 +1488,8 @@ body::before {
   top: 1rem;
   left: 50%;
   z-index: 30;
+  display: grid;
+  gap: 0.55rem;
   width: min(560px, calc(100% - 2rem));
   transform: translateX(-50%);
 }
@@ -1653,6 +1685,18 @@ section.workspace-shell {
   font-size: 0.92rem;
 }
 
+.notice-bar__copy {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.notice-bar__title {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .notice-bar--error {
   border-color: rgba(180, 35, 24, 0.2);
   background: rgba(180, 35, 24, 0.08);
@@ -1793,11 +1837,85 @@ section.workspace-shell {
   letter-spacing: 0.1em;
 }
 
+.telemetry-panel {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 0.95rem;
+  background: var(--panel-muted);
+  padding: 0.45rem 0.6rem;
+}
+
+.telemetry-panel--compact {
+  gap: 0.22rem;
+  padding: 0.35rem 0.45rem;
+}
+
+.telemetry-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.telemetry-panel__label {
+  color: var(--ink-faint);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.telemetry-panel__stats {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.telemetry-panel__chart {
+  display: block;
+  width: 100%;
+  height: 1.3rem;
+}
+
+.telemetry-panel__line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+}
+
+.telemetry-panel__line--cpu {
+  stroke: rgba(53, 122, 231, 0.9);
+}
+
+.telemetry-panel__line--ram {
+  stroke: rgba(16, 158, 128, 0.85);
+}
+
 .workspace-rail__toolbar {
   display: grid;
   grid-template-columns: 1fr;
   gap: 0.45rem;
   padding: 0;
+}
+
+.workspace-rail__create-button {
+  border-color: var(--line);
+  background: var(--panel-muted);
+  color: var(--ink-soft);
+}
+
+.workspace-rail__create-button:hover {
+  border-color: var(--line-strong);
+  background: var(--panel-strong);
+  color: var(--ink);
 }
 
 .workspace-rail__toolbar > .button--full {
@@ -1855,6 +1973,10 @@ section.workspace-shell {
 .workspace-rail--compact .workspace-rail__summary,
 .workspace-rail--compact .workspace-rail__chips {
   gap: 0.32rem;
+}
+
+.workspace-rail--compact .telemetry-panel__label {
+  display: none;
 }
 
 .empty-state {
@@ -2019,6 +2141,14 @@ section.workspace-shell {
   display: grid;
   gap: 0.45rem;
   min-width: 0;
+}
+
+.vm-tile .telemetry-panel {
+  padding: 0.35rem 0.45rem;
+}
+
+.vm-tile .telemetry-panel__label {
+  display: none;
 }
 
 .vm-tile__body-head {

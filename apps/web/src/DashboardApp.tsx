@@ -29,6 +29,7 @@ import type {
   EnvironmentTemplate,
   InjectCommandInput,
   ResizeVmInput,
+  ResourceTelemetry,
   SetVmResolutionInput,
   Snapshot,
   SnapshotLaunchInput,
@@ -57,6 +58,7 @@ interface ResourceDraft {
 
 interface ResolutionDraft {
   mode: DesktopResolutionMode;
+  scale: string;
   width: string;
   height: string;
 }
@@ -142,6 +144,11 @@ const railMinWidth = 248;
 const railMaxWidth = 420;
 const railCompactThreshold = 292;
 const desktopResolutionModeStorageKey = "parallaize.desktop-resolution-mode";
+const desktopViewportScaleStorageKey = "parallaize.desktop-viewport-scale";
+const desktopViewportScaleDefault = 1;
+const desktopViewportScaleMin = 0.5;
+const desktopViewportScaleMax = 3;
+const desktopViewportScaleStep = 0.25;
 const desktopFixedWidthStorageKey = "parallaize.desktop-fixed-width";
 const desktopFixedHeightStorageKey = "parallaize.desktop-fixed-height";
 const desktopFixedWidthDefault = 1280;
@@ -179,6 +186,11 @@ export function DashboardApp(): JSX.Element {
   const [desktopResolutionMode, setDesktopResolutionMode] = useState<DesktopResolutionMode>(() =>
     readDesktopResolutionMode(),
   );
+  const [desktopViewportScale, setDesktopViewportScale] = useState(() =>
+    clampDesktopViewportScale(
+      readStoredNumber(desktopViewportScaleStorageKey) ?? desktopViewportScaleDefault,
+    ),
+  );
   const [desktopFixedWidth, setDesktopFixedWidth] = useState(() =>
     clampDesktopFixedWidth(
       readStoredNumber(desktopFixedWidthStorageKey) ?? desktopFixedWidthDefault,
@@ -192,6 +204,9 @@ export function DashboardApp(): JSX.Element {
   const [resolutionDraft, setResolutionDraft] = useState<ResolutionDraft>(() =>
     buildResolutionDraft(
       readDesktopResolutionMode(),
+      clampDesktopViewportScale(
+        readStoredNumber(desktopViewportScaleStorageKey) ?? desktopViewportScaleDefault,
+      ),
       clampDesktopFixedWidth(
         readStoredNumber(desktopFixedWidthStorageKey) ?? desktopFixedWidthDefault,
       ),
@@ -244,6 +259,7 @@ export function DashboardApp(): JSX.Element {
       : null;
   const providerReady = summary?.provider.available ?? false;
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
+  const appliedDesktopViewportScale = clampDesktopViewportScale(desktopViewportScale);
   const appliedDesktopWidth = clampDesktopFixedWidth(desktopFixedWidth);
   const appliedDesktopHeight = clampDesktopFixedHeight(desktopFixedHeight);
   const wideShellLayout = viewportWidth > sidepanelCompactBreakpoint;
@@ -400,8 +416,6 @@ export function DashboardApp(): JSX.Element {
   useEffect(() => {
     if (!detail) {
       setResourceDraft(emptyResourceDraft);
-      setCaptureDraft(emptyCaptureDraft);
-      setForwardDraft(emptyForwardDraft);
       return;
     }
 
@@ -410,9 +424,35 @@ export function DashboardApp(): JSX.Element {
       ramMb: String(detail.vm.resources.ramMb),
       diskGb: String(detail.vm.resources.diskGb),
     });
+  }, [
+    detail?.vm.id,
+    detail?.vm.resources.cpu,
+    detail?.vm.resources.ramMb,
+    detail?.vm.resources.diskGb,
+  ]);
+
+  useEffect(() => {
+    if (!detail) {
+      setCaptureDraft(emptyCaptureDraft);
+      return;
+    }
+
     setCaptureDraft(buildCaptureDraft(detail.template, detail.vm));
+  }, [
+    detail?.vm.id,
+    detail?.template?.id,
+    detail?.template?.name,
+    detail?.template?.description,
+  ]);
+
+  useEffect(() => {
+    if (!detail) {
+      setForwardDraft(emptyForwardDraft);
+      return;
+    }
+
     setForwardDraft(emptyForwardDraft);
-  }, [detail?.vm.id, detail?.generatedAt]);
+  }, [detail?.vm.id]);
 
   useEffect(() => {
     if (!selectedVmId) {
@@ -466,6 +506,10 @@ export function DashboardApp(): JSX.Element {
   }, [desktopResolutionMode]);
 
   useEffect(() => {
+    writeStoredString(desktopViewportScaleStorageKey, String(desktopViewportScale));
+  }, [desktopViewportScale]);
+
+  useEffect(() => {
     writeStoredString(desktopFixedWidthStorageKey, String(desktopFixedWidth));
   }, [desktopFixedWidth]);
 
@@ -497,9 +541,19 @@ export function DashboardApp(): JSX.Element {
     }
 
     const targetWidth =
-      desktopResolutionMode === "fixed" ? appliedDesktopWidth : desktopResolution.clientWidth;
+      desktopResolutionMode === "fixed"
+        ? appliedDesktopWidth
+        : scaleViewportResolutionValue(
+            desktopResolution.clientWidth,
+            appliedDesktopViewportScale,
+          );
     const targetHeight =
-      desktopResolutionMode === "fixed" ? appliedDesktopHeight : desktopResolution.clientHeight;
+      desktopResolutionMode === "fixed"
+        ? appliedDesktopHeight
+        : scaleViewportResolutionValue(
+            desktopResolution.clientHeight,
+            appliedDesktopViewportScale,
+          );
 
     if (!targetWidth || !targetHeight) {
       return;
@@ -514,6 +568,7 @@ export function DashboardApp(): JSX.Element {
     };
   }, [
     appliedDesktopHeight,
+    appliedDesktopViewportScale,
     appliedDesktopWidth,
     desktopResolution.clientHeight,
     desktopResolution.clientWidth,
@@ -1000,10 +1055,23 @@ export function DashboardApp(): JSX.Element {
     event.preventDefault();
 
     if (resolutionDraft.mode === "viewport") {
+      const requestedScale = Number(resolutionDraft.scale);
+
+      if (!Number.isFinite(requestedScale)) {
+        setNotice({
+          tone: "error",
+          message: "Viewport scale must be numeric.",
+        });
+        return;
+      }
+
+      const nextScale = clampDesktopViewportScale(requestedScale);
       setDesktopResolutionMode("viewport");
+      setDesktopViewportScale(nextScale);
       setResolutionDraft((current) => ({
         ...current,
         mode: "viewport",
+        scale: formatViewportScale(nextScale),
       }));
 
       lastResolutionRequestKeyRef.current = null;
@@ -1011,8 +1079,8 @@ export function DashboardApp(): JSX.Element {
       if (liveResolutionVmId && desktopResolution.clientWidth && desktopResolution.clientHeight) {
         await syncVmResolution(
           liveResolutionVmId,
-          desktopResolution.clientWidth,
-          desktopResolution.clientHeight,
+          scaleViewportResolutionValue(desktopResolution.clientWidth, nextScale) ?? 0,
+          scaleViewportResolutionValue(desktopResolution.clientHeight, nextScale) ?? 0,
           false,
         );
       }
@@ -1037,7 +1105,9 @@ export function DashboardApp(): JSX.Element {
     setDesktopResolutionMode("fixed");
     setDesktopFixedWidth(nextWidth);
     setDesktopFixedHeight(nextHeight);
-    setResolutionDraft(buildResolutionDraft("fixed", nextWidth, nextHeight));
+    setResolutionDraft(
+      buildResolutionDraft("fixed", appliedDesktopViewportScale, nextWidth, nextHeight),
+    );
     lastResolutionRequestKeyRef.current = null;
 
     if (liveResolutionVmId) {
@@ -1250,6 +1320,7 @@ export function DashboardApp(): JSX.Element {
 
   const workspaceFocused = selectedVm !== null;
   const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
+  const prominentJob = findProminentJob(summary, selectedVmId);
 
   return (
     <>
@@ -1260,22 +1331,48 @@ export function DashboardApp(): JSX.Element {
           setShellMenuOpen(false);
         }}
       >
-        {notice || busyLabel ? (
+        {notice || busyLabel || prominentJob ? (
           <div
             className="app-shell__notice-stack"
             onClick={(event) => event.stopPropagation()}
           >
-            <div
-              className={joinClassNames(
-                "notice-bar",
-                notice ? noticeToneClassName(notice.tone) : "notice-bar--info",
-              )}
-            >
-              <span>{notice?.message ?? "Working..."}</span>
-              {busyLabel ? (
-                <span className="surface-pill surface-pill--busy mono-font">{busyLabel}</span>
-              ) : null}
-            </div>
+            {notice || busyLabel ? (
+              <div
+                className={joinClassNames(
+                  "notice-bar",
+                  notice ? noticeToneClassName(notice.tone) : "notice-bar--info",
+                )}
+              >
+                <span>{notice?.message ?? "Working..."}</span>
+                {busyLabel ? (
+                  <span className="surface-pill surface-pill--busy mono-font">{busyLabel}</span>
+                ) : null}
+              </div>
+            ) : null}
+
+            {prominentJob ? (
+              <div className="notice-bar notice-bar--info">
+                <div className="notice-bar__copy">
+                  <strong className="notice-bar__title">
+                    {prominentJob.vmName} · {formatJobKindLabel(prominentJob.job.kind)}
+                  </strong>
+                  <span>{prominentJob.job.message || "Action in progress"}</span>
+                </div>
+
+                <div className="chip-row">
+                  <span className="surface-pill">{prominentJob.job.status}</span>
+                  {prominentJob.job.progressPercent !== null &&
+                  prominentJob.job.progressPercent !== undefined ? (
+                    <span className="surface-pill">{prominentJob.job.progressPercent}%</span>
+                  ) : null}
+                  {prominentJob.activeCount > 1 ? (
+                    <span className="surface-pill">
+                      {prominentJob.activeCount} active
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -1347,6 +1444,12 @@ export function DashboardApp(): JSX.Element {
                     </span>
                   ) : null}
                 </div>
+
+                <TelemetryPanel
+                  compact={compactRail}
+                  label={compactRail ? "Host" : "Host load"}
+                  telemetry={summary.hostTelemetry}
+                />
               </div>
 
               <div className="chip-row workspace-rail__chips">
@@ -1369,7 +1472,7 @@ export function DashboardApp(): JSX.Element {
 
               <div className="workspace-rail__toolbar">
                 <button
-                  className="button button--primary button--full"
+                  className="button button--primary button--full workspace-rail__create-button"
                   type="button"
                   onClick={() => setShowCreateDialog(true)}
                 >
@@ -1532,6 +1635,9 @@ export function DashboardApp(): JSX.Element {
                         className="workspace-stage__viewport"
                         onResolutionChange={setDesktopResolution}
                         surfaceClassName="workspace-stage__canvas"
+                        viewportMode={
+                          desktopResolutionMode === "viewport" ? "scale" : "remote"
+                        }
                         webSocketPath={currentDetail.vm.session.webSocketPath}
                         showHeader={false}
                         statusMode="overlay"
@@ -1824,19 +1930,24 @@ function VmTile({
           )}
         </div>
 
-        <div className="vm-tile__body">
-          <div className="vm-tile__body-head">
-            <div className="vm-tile__identity">
-              <h3 className="vm-tile__title">{vm.name}</h3>
+          <div className="vm-tile__body">
+            <div className="vm-tile__body-head">
+              <div className="vm-tile__identity">
+                <h3 className="vm-tile__title">{vm.name}</h3>
               {!compact ? (
                 <p className="vm-tile__resources">{formatResources(vm.resources)}</p>
               ) : null}
+              </div>
+              <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
             </div>
-            <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
-          </div>
 
-          <div className="vm-tile__meta">
-            {compact ? <span>{formatResources(vm.resources)}</span> : null}
+            <TelemetryPanel
+              compact={compact}
+              telemetry={vm.telemetry}
+            />
+
+            <div className="vm-tile__meta">
+              {compact ? <span>{formatResources(vm.resources)}</span> : null}
             <span>{formatForwardCount(vm.forwardedPorts.length)}</span>
           </div>
         </div>
@@ -1919,6 +2030,47 @@ function VmTile({
         ) : null}
       </div>
     </article>
+  );
+}
+
+function TelemetryPanel({
+  compact = false,
+  label,
+  telemetry,
+}: {
+  compact?: boolean;
+  label?: string;
+  telemetry?: ResourceTelemetry;
+}): JSX.Element {
+  const chartWidth = compact ? 108 : 128;
+  const chartHeight = compact ? 20 : 24;
+  const cpuHistory = telemetry?.cpuHistory.length ? telemetry.cpuHistory : [0];
+  const ramHistory = telemetry?.ramHistory.length ? telemetry.ramHistory : [0];
+
+  return (
+    <div className={joinClassNames("telemetry-panel", compact ? "telemetry-panel--compact" : "")}>
+      <div className="telemetry-panel__head">
+        {label ? <span className="telemetry-panel__label">{label}</span> : <span />}
+        <span className="telemetry-panel__stats">
+          CPU {formatTelemetryPercent(telemetry?.cpuPercent)} · RAM{" "}
+          {formatTelemetryPercent(telemetry?.ramPercent)}
+        </span>
+      </div>
+      <svg
+        aria-hidden="true"
+        className="telemetry-panel__chart"
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+      >
+        <polyline
+          className="telemetry-panel__line telemetry-panel__line--cpu"
+          points={buildSparklinePoints(cpuHistory, chartWidth, chartHeight)}
+        />
+        <polyline
+          className="telemetry-panel__line telemetry-panel__line--ram"
+          points={buildSparklinePoints(ramHistory, chartWidth, chartHeight)}
+        />
+      </svg>
+    </div>
   );
 }
 
@@ -2311,6 +2463,11 @@ function WorkspaceSidepanel({
                     mono
                     value={formatViewportResolution(resolutionState)}
                   />
+                  <FieldPair
+                    label="Target"
+                    mono
+                    value={formatTargetResolution(resolutionDraft, resolutionState)}
+                  />
                 </div>
 
                 <label className="field-shell">
@@ -2353,12 +2510,40 @@ function WorkspaceSidepanel({
                       }
                     />
                   </div>
-                ) : null}
+                ) : (
+                  <label className="field-shell">
+                    <span>Scale</span>
+                    <div className="field-range">
+                      <input
+                        className="field-range__input"
+                        type="range"
+                        min={desktopViewportScaleMin}
+                        max={desktopViewportScaleMax}
+                        step={desktopViewportScaleStep}
+                        value={Number(resolutionDraft.scale) || desktopViewportScaleDefault}
+                        onChange={(event) =>
+                          onResolutionDraftChange({
+                            ...resolutionDraft,
+                            scale: formatViewportScale(
+                              clampDesktopViewportScale(Number(event.target.value)),
+                            ),
+                          })
+                        }
+                      />
+                      <span className="field-range__value mono-font">
+                        {formatViewportScale(
+                          Number(resolutionDraft.scale) || desktopViewportScaleDefault,
+                        )}
+                        x
+                      </span>
+                    </div>
+                  </label>
+                )}
 
                 <p className="empty-copy">
                   {resolutionDraft.mode === "fixed"
                     ? "Fixed mode keeps the desktop at a chosen size and centers it in the stage."
-                    : "Viewport mode resizes the guest desktop to the space the live session currently occupies."}
+                    : "Viewport mode resizes the guest desktop to the viewport size multiplied by the selected scale, then fits the result back into view."}
                 </p>
 
                 <button className="button button--secondary button--full" type="submit">
@@ -3213,6 +3398,50 @@ function compactTransportLabel(transport: DashboardSummary["provider"]["desktopT
   return transport === "novnc" ? "Browser VNC" : "Synthetic";
 }
 
+function findProminentJob(
+  summary: DashboardSummary,
+  selectedVmId: string | null,
+): {
+  activeCount: number;
+  job: DashboardSummary["jobs"][number];
+  vmName: string;
+} | null {
+  const activeJobs = summary.jobs.filter(
+    (job) => job.status === "queued" || job.status === "running",
+  );
+
+  if (activeJobs.length === 0) {
+    return null;
+  }
+
+  const job =
+    activeJobs.find((entry) => entry.targetVmId === selectedVmId) ?? activeJobs[0];
+  const vmName =
+    summary.vms.find((vm) => vm.id === job.targetVmId)?.name ??
+    (job.targetVmId ? job.targetVmId : "System");
+
+  return {
+    activeCount: activeJobs.length,
+    job,
+    vmName,
+  };
+}
+
+function formatJobKindLabel(kind: DashboardSummary["jobs"][number]["kind"]): string {
+  switch (kind) {
+    case "launch-snapshot":
+      return "Launch snapshot";
+    case "restore-snapshot":
+      return "Restore snapshot";
+    case "capture-template":
+      return "Capture template";
+    case "inject-command":
+      return "Run command";
+    default:
+      return `${kind.charAt(0).toUpperCase()}${kind.slice(1)}`;
+  }
+}
+
 interface DesktopBootState {
   label: string;
   message: string;
@@ -3220,9 +3449,25 @@ interface DesktopBootState {
 }
 
 function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
+  const failedBootJob = detail.recentJobs.find(
+    (job) =>
+      (job.kind === "create" ||
+        job.kind === "clone" ||
+        job.kind === "launch-snapshot" ||
+        job.kind === "start") &&
+      job.status === "failed",
+  );
+
+  if (failedBootJob) {
+    return null;
+  }
+
   const activeJob = detail.recentJobs.find(
     (job) =>
-      (job.kind === "create" || job.kind === "clone" || job.kind === "start") &&
+      (job.kind === "create" ||
+        job.kind === "clone" ||
+        job.kind === "launch-snapshot" ||
+        job.kind === "start") &&
       (job.status === "queued" || job.status === "running"),
   );
 
@@ -3246,6 +3491,15 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
     };
   }
 
+  if (activeJob?.kind === "launch-snapshot") {
+    return {
+      label: "Launching snapshot",
+      message:
+        activeJob.message || "Launching the workspace from a snapshot and waiting for the desktop.",
+      progressPercent: activeJob.progressPercent ?? null,
+    };
+  }
+
   return {
     label: "Creating workspace",
     message: activeJob?.message || "Provisioning the VM and waiting for the desktop.",
@@ -3254,6 +3508,19 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
 }
 
 function desktopFallbackBadge(detail: VmDetail): string {
+  const failedBootJob = detail.recentJobs.find(
+    (job) =>
+      (job.kind === "create" ||
+        job.kind === "clone" ||
+        job.kind === "launch-snapshot" ||
+        job.kind === "start") &&
+      job.status === "failed",
+  );
+
+  if (failedBootJob) {
+    return "Launch failed";
+  }
+
   if (detail.provider.desktopTransport === "synthetic" || detail.vm.session?.kind === "synthetic") {
     return "Synthetic preview";
   }
@@ -3266,6 +3533,19 @@ function desktopFallbackBadge(detail: VmDetail): string {
 }
 
 function desktopFallbackMessage(detail: VmDetail): string {
+  const failedBootJob = detail.recentJobs.find(
+    (job) =>
+      (job.kind === "create" ||
+        job.kind === "clone" ||
+        job.kind === "launch-snapshot" ||
+        job.kind === "start") &&
+      job.status === "failed",
+  );
+
+  if (failedBootJob) {
+    return failedBootJob.message;
+  }
+
   if (detail.provider.desktopTransport === "synthetic" || detail.vm.session?.kind === "synthetic") {
     return "This server is running the mock provider, so the dashboard renders generated desktop frames instead of a live browser VNC session.";
   }
@@ -3423,11 +3703,13 @@ function readViewportWidth(): number {
 
 function buildResolutionDraft(
   mode: DesktopResolutionMode,
+  scale: number,
   width: number,
   height: number,
 ): ResolutionDraft {
   return {
     mode,
+    scale: formatViewportScale(scale),
     width: String(width),
     height: String(height),
   };
@@ -3470,11 +3752,39 @@ function clampDesktopFixedWidth(width: number): number {
   );
 }
 
+function clampDesktopViewportScale(scale: number): number {
+  if (!Number.isFinite(scale)) {
+    return desktopViewportScaleDefault;
+  }
+
+  const rounded = Math.round(scale / desktopViewportScaleStep) * desktopViewportScaleStep;
+  return Math.min(
+    desktopViewportScaleMax,
+    Math.max(desktopViewportScaleMin, Number(rounded.toFixed(2))),
+  );
+}
+
 function clampDesktopFixedHeight(height: number): number {
   return Math.min(
     desktopFixedHeightMax,
     Math.max(desktopFixedHeightMin, Math.round(height)),
   );
+}
+
+function scaleViewportResolutionValue(
+  value: number | null,
+  scale: number,
+): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  return Math.max(1, Math.round(value * scale));
+}
+
+function formatViewportScale(scale: number): string {
+  const normalized = clampDesktopViewportScale(scale);
+  return normalized % 1 === 0 ? normalized.toFixed(0) : normalized.toFixed(2).replace(/0$/, "");
 }
 
 function clampSidepanelWidthPreference(width: number): number {
@@ -3519,6 +3829,57 @@ function formatViewportResolution(state: DesktopResolutionState): string {
   }
 
   return "Unavailable";
+}
+
+function formatTargetResolution(
+  draft: ResolutionDraft,
+  state: DesktopResolutionState,
+): string {
+  if (draft.mode === "fixed") {
+    const width = Number(draft.width);
+    const height = Number(draft.height);
+
+    if (!Number.isFinite(width) || !Number.isFinite(height)) {
+      return "Enter width and height";
+    }
+
+    return `${clampDesktopFixedWidth(width)} x ${clampDesktopFixedHeight(height)}`;
+  }
+
+  const scale = clampDesktopViewportScale(Number(draft.scale));
+  const width = scaleViewportResolutionValue(state.clientWidth, scale);
+  const height = scaleViewportResolutionValue(state.clientHeight, scale);
+
+  if (width !== null && height !== null) {
+    return `${width} x ${height}`;
+  }
+
+  return "Waiting for viewport";
+}
+
+function formatTelemetryPercent(value: number | null | undefined): string {
+  return value === null || value === undefined ? "--" : `${Math.round(value)}%`;
+}
+
+function buildSparklinePoints(
+  values: number[],
+  width: number,
+  height: number,
+): string {
+  if (values.length <= 1) {
+    const y = Math.round((1 - values[0] / 100) * (height - 2)) + 1;
+    return `1,${y} ${width - 1},${y}`;
+  }
+
+  const step = (width - 2) / (values.length - 1);
+
+  return values
+    .map((value, index) => {
+      const x = Math.round(1 + (step * index) * 100) / 100;
+      const y = Math.round((1 - value / 100) * (height - 2) + 1);
+      return `${x},${y}`;
+    })
+    .join(" ");
 }
 
 function joinClassNames(...values: Array<string | false | null | undefined>): string {
