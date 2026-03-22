@@ -18,6 +18,7 @@ export interface NoVncViewportResolution {
 
 interface NoVncViewportProps {
   className?: string;
+  hideConnectedOverlayStatus?: boolean;
   onResolutionChange?: (resolution: NoVncViewportResolution) => void;
   showHeader?: boolean;
   statusMode?: "header" | "overlay" | "hidden";
@@ -34,6 +35,7 @@ const reconnectDelayMs = 5_000;
 
 export function NoVncViewport({
   className,
+  hideConnectedOverlayStatus = false,
   onResolutionChange,
   showHeader = true,
   statusMode = showHeader ? "header" : "overlay",
@@ -326,7 +328,9 @@ export function NoVncViewport({
         )}
       />
 
-      {!showHeader && statusMode === "overlay" ? (
+      {!showHeader &&
+      statusMode === "overlay" &&
+      !(hideConnectedOverlayStatus && connectionState === "connected") ? (
         <div className="novnc-shell__overlay">
           <span className={joinClassNames("novnc-shell__status-pill", connectionStateClassName(connectionState))}>
             {connectionState === "connected" ? "Live" : statusMessage}

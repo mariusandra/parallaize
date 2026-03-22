@@ -252,6 +252,7 @@ export function DashboardApp(): JSX.Element {
   >(() => readDesktopResolutionByVm());
   const [openVmMenuId, setOpenVmMenuId] = useState<string | null>(null);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
+  const [fullscreenActive, setFullscreenActive] = useState(() => readFullscreenActive());
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [resolutionDraft, setResolutionDraft] = useState<ResolutionDraft>(() =>
     buildResolutionDraft(
@@ -465,6 +466,17 @@ export function DashboardApp(): JSX.Element {
     window.addEventListener("resize", handleViewportResize);
     return () => {
       window.removeEventListener("resize", handleViewportResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleFullscreenChange(): void {
+      setFullscreenActive(readFullscreenActive());
+    }
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
     };
   }, []);
 
@@ -1437,6 +1449,28 @@ export function DashboardApp(): JSX.Element {
     setShellMenuOpen(false);
   }
 
+  async function toggleFullscreen(): Promise<void> {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        message: errorMessage(error),
+      });
+    }
+  }
+
+  function inspectVm(vmId: string): void {
+    setSelectedVmId(vmId);
+    setVmSidepanelCollapsed(vmId, false);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+  }
+
   function handleRailResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
     if (!wideShellLayout || event.button !== 0) {
       return;
@@ -1499,6 +1533,38 @@ export function DashboardApp(): JSX.Element {
       anchorWidth: displayedSidepanelWidth,
       pendingClosedOpen: displayedSidepanelWidth <= sidepanelClosedWidth,
     };
+    setSidepanelResizeActive(true);
+  }
+
+  function handleSidepanelClosedResizeStart(
+    pointerClientX: number,
+    handleCenterX: number,
+  ): void {
+    if (compactSidepanelLayout) {
+      return;
+    }
+
+    const openingWidth = handleCenterX - pointerClientX;
+
+    if (openingWidth >= sidepanelMinWidth) {
+      const activatedWidth = clampDisplayedSidepanelWidth(openingWidth, viewportWidth);
+      sidepanelResizeRef.current = {
+        anchorClientX: pointerClientX,
+        anchorWidth: activatedWidth,
+        pendingClosedOpen: false,
+      };
+      setCurrentSidepanelCollapsed(false);
+      setSidepanelWidthPreference(activatedWidth);
+      setSidepanelResizeActive(true);
+      return;
+    }
+
+    sidepanelResizeRef.current = {
+      anchorClientX: handleCenterX,
+      anchorWidth: sidepanelClosedWidth,
+      pendingClosedOpen: true,
+    };
+    setCurrentSidepanelCollapsed(true);
     setSidepanelResizeActive(true);
   }
 
@@ -2335,6 +2401,18 @@ export function DashboardApp(): JSX.Element {
                 </span>
               </button>
 
+              <button
+                className="menu-action menu-action--split"
+                type="button"
+                onClick={() => {
+                  setShellMenuOpen(false);
+                  void toggleFullscreen();
+                }}
+              >
+                <span>Fullscreen</span>
+                <span className="menu-action__state">{fullscreenActive ? "On" : "Off"}</span>
+              </button>
+
               {authEnabled ? (
                 <button
                   className="menu-action"
@@ -2377,6 +2455,7 @@ export function DashboardApp(): JSX.Element {
                   onClone={handleClone}
                   onDelete={handleDelete}
                   onOpen={selectVm}
+                  onInspect={inspectVm}
                   onSnapshot={handleSnapshot}
                   onStartStop={handleVmAction}
                   onToggleMenu={(vmId) =>
@@ -2435,6 +2514,7 @@ export function DashboardApp(): JSX.Element {
                     >
                       <NoVncViewport
                         className="workspace-stage__viewport"
+                        hideConnectedOverlayStatus
                         onResolutionChange={setDesktopResolution}
                         surfaceClassName="workspace-stage__canvas"
                         viewportMode={
@@ -2464,19 +2544,6 @@ export function DashboardApp(): JSX.Element {
                 />
               )}
 
-              {selectedVm && effectiveSidePanelCollapsed ? (
-                <div className="workspace-stage__chrome">
-                  <div className="workspace-stage__header-actions">
-                    <button
-                      className="button button--ghost"
-                      type="button"
-                      onClick={() => setVmSidepanelCollapsed(selectedVm.id, false)}
-                    >
-                      Show inspector
-                    </button>
-                  </div>
-                </div>
-              ) : null}
             </div>
           </section>
 
@@ -2513,9 +2580,11 @@ export function DashboardApp(): JSX.Element {
                 onLaunchFromSnapshot={handleLaunchFromSnapshot}
                 onSnapshot={handleSnapshot}
                 onStartStop={handleVmAction}
+                onClosedResizeStart={handleSidepanelClosedResizeStart}
                 onSubmitCapture={handleCaptureTemplate}
                 onSubmitCommand={handleCommand}
                 onRestoreSnapshot={handleRestoreSnapshot}
+                onOpenCollapsed={() => setVmSidepanelCollapsed(selectedVm.id, false)}
                 onToggleCollapsed={() => setVmSidepanelCollapsed(selectedVm.id, true)}
                 panelRef={sidepanelRef}
                 resizing={sidepanelResizeActive}
@@ -2533,6 +2602,8 @@ export function DashboardApp(): JSX.Element {
                 persistence={persistence}
                 summary={summary}
                 onCreate={() => setShowCreateDialog(true)}
+                onClosedResizeStart={handleSidepanelClosedResizeStart}
+                onOpenCollapsed={() => setOverviewSidepanelCollapsed(false)}
                 onToggleCollapsed={() => setOverviewSidepanelCollapsed(true)}
                 panelRef={sidepanelRef}
                 resizing={sidepanelResizeActive}
@@ -2687,6 +2758,7 @@ interface VmTileProps {
   vm: VmInstance;
   onClone: (vm: VmInstance) => Promise<void>;
   onDelete: (vm: VmInstance) => Promise<void>;
+  onInspect: (vmId: string) => void;
   onOpen: (vmId: string) => void;
   onSnapshot: (vm: VmInstance) => Promise<void>;
   onStartStop: (vmId: string, action: "start" | "stop") => Promise<void>;
@@ -2760,6 +2832,7 @@ function VmTile({
   vm,
   onClone,
   onDelete,
+  onInspect,
   onOpen,
   onSnapshot,
   onStartStop,
@@ -2803,6 +2876,17 @@ function VmTile({
           >
             Open
           </button>
+          {selected ? (
+            <button
+              className="menu-action"
+              type="button"
+              onClick={() => {
+                onInspect(vm.id);
+              }}
+            >
+              Inspect
+            </button>
+          ) : null}
           <button
             className="menu-action"
             type="button"
@@ -3141,6 +3225,8 @@ interface WorkspaceSidepanelProps {
   onSubmitCommand: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onLaunchFromSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
   onRestoreSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
+  onClosedResizeStart: (pointerClientX: number, handleCenterX: number) => void;
+  onOpenCollapsed: () => void;
   onToggleCollapsed: () => void;
   panelRef: RefObject<HTMLElement | null>;
   resizable: boolean;
@@ -3152,6 +3238,9 @@ interface WorkspaceSidepanelProps {
 }
 
 interface SidepanelResizeHandleProps {
+  collapsed: boolean;
+  onClosedResizeStart: (pointerClientX: number, handleCenterX: number) => void;
+  onOpenCollapsed: () => void;
   resizable: boolean;
   resizing: boolean;
   width: number;
@@ -3198,6 +3287,9 @@ function RailResizeHandle({
 }
 
 function SidepanelResizeHandle({
+  collapsed,
+  onClosedResizeStart,
+  onOpenCollapsed,
   resizable,
   resizing,
   width,
@@ -3206,6 +3298,72 @@ function SidepanelResizeHandle({
 }: SidepanelResizeHandleProps): JSX.Element | null {
   if (!resizable) {
     return null;
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (!collapsed) {
+      onResizePointerDown(event);
+      return;
+    }
+
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    const handleBounds = event.currentTarget.getBoundingClientRect();
+    const handleCenterX = handleBounds.left + handleBounds.width / 2;
+    let completed = false;
+
+    function cleanup(): void {
+      window.removeEventListener("blur", handleBlur);
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", handlePointerUp);
+      document.removeEventListener("pointercancel", handlePointerCancel);
+    }
+
+    function handleBlur(): void {
+      cleanup();
+    }
+
+    function handlePointerMove(moveEvent: PointerEvent): void {
+      if (completed) {
+        return;
+      }
+
+      if (
+        Math.hypot(moveEvent.clientX - startClientX, moveEvent.clientY - startClientY) < 4
+      ) {
+        return;
+      }
+
+      completed = true;
+      cleanup();
+      onClosedResizeStart(moveEvent.clientX, handleCenterX);
+    }
+
+    function handlePointerUp(): void {
+      if (completed) {
+        cleanup();
+        return;
+      }
+
+      completed = true;
+      cleanup();
+      onOpenCollapsed();
+    }
+
+    function handlePointerCancel(): void {
+      completed = true;
+      cleanup();
+    }
+
+    window.addEventListener("blur", handleBlur);
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", handlePointerUp);
+    document.addEventListener("pointercancel", handlePointerCancel);
   }
 
   return (
@@ -3222,7 +3380,7 @@ function SidepanelResizeHandle({
       role="separator"
       tabIndex={0}
       onKeyDown={onResizeKeyDown}
-      onPointerDown={onResizePointerDown}
+      onPointerDown={handlePointerDown}
     />
   );
 }
@@ -3257,6 +3415,8 @@ function WorkspaceSidepanel({
   onLaunchFromSnapshot,
   onSnapshot,
   onStartStop,
+  onClosedResizeStart,
+  onOpenCollapsed,
   onSubmitCapture,
   onSubmitCommand,
   onRestoreSnapshot,
@@ -3280,6 +3440,9 @@ function WorkspaceSidepanel({
       style={style}
     >
       <SidepanelResizeHandle
+        collapsed={collapsed}
+        onClosedResizeStart={onClosedResizeStart}
+        onOpenCollapsed={onOpenCollapsed}
         resizable={resizable}
         resizing={resizing}
         width={width}
@@ -3953,6 +4116,8 @@ function WorkspaceBootSurface({ state }: WorkspaceBootSurfaceProps): JSX.Element
 function OverviewSidepanel({
   collapsed,
   onCreate,
+  onClosedResizeStart,
+  onOpenCollapsed,
   onToggleCollapsed,
   persistence,
   summary,
@@ -3966,6 +4131,8 @@ function OverviewSidepanel({
 }: {
   collapsed: boolean;
   onCreate: () => void;
+  onClosedResizeStart: (pointerClientX: number, handleCenterX: number) => void;
+  onOpenCollapsed: () => void;
   onToggleCollapsed: () => void;
   persistence: HealthStatus["persistence"] | null;
   summary: DashboardSummary;
@@ -3992,6 +4159,9 @@ function OverviewSidepanel({
       style={style}
     >
       <SidepanelResizeHandle
+        collapsed={collapsed}
+        onClosedResizeStart={onClosedResizeStart}
+        onOpenCollapsed={onOpenCollapsed}
         resizable={resizable}
         resizing={resizing}
         width={width}
@@ -4701,6 +4871,10 @@ function readThemeMode(): ThemeMode {
   }
 
   return "light";
+}
+
+function readFullscreenActive(): boolean {
+  return typeof document !== "undefined" && document.fullscreenElement !== null;
 }
 
 function readStoredBoolean(key: string, fallback: boolean): boolean {
