@@ -13,6 +13,7 @@ import type {
   CloneVmInput,
   CreateVmInput,
   DashboardSummary,
+  HealthStatus,
   InjectCommandInput,
   LoginInput,
   ResizeVmInput,
@@ -82,16 +83,19 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "GET" && url.pathname === "/api/health") {
-      return writeJson(response, 200, {
+      const providerState = manager.getProviderState();
+      const persistence = store.getDiagnostics();
+      const status =
+        providerState.available && persistence.status === "ready"
+          ? "ok"
+          : "degraded";
+
+      return writeJson<HealthStatus>(response, 200, {
         ok: true,
         data: {
-          status: "ok",
-          provider: manager.getProviderState(),
-          persistence: {
-            kind: config.persistenceKind,
-            databaseConfigured: Boolean(config.databaseUrl),
-            dataFile: config.persistenceKind === "json" ? config.dataFile : null,
-          },
+          status,
+          provider: providerState,
+          persistence,
           generatedAt: new Date().toISOString(),
         },
       });

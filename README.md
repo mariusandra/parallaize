@@ -13,12 +13,13 @@ Parallaize is a server-first proof of concept for managing many isolated desktop
 - Configurable guest HTTP/WebSocket forwarding mounted at `/vm/:id/forwards/:forwardId/`
 - Inject commands into a selected workspace and reflect the result in the UI
 - Persist state to JSON or PostgreSQL through one shared store interface
+- Import, export, or copy persisted state between JSON and PostgreSQL without manual editing
 - Server-sent event updates for dashboard refresh
 - `flox` environment with `nodejs_24`, `typescript`, `pnpm_10`, `caddy`, `incus`, `attr`, and `qemu_kvm`
 
 ## Current Gaps
 
-- PostgreSQL persistence still needs more live Incus validation and migration tooling before it should replace the JSON fallback everywhere
+- PostgreSQL persistence still needs more live Incus validation and backup/recovery docs before it should replace the JSON fallback everywhere
 - Guest VNC/bootstrap steps should be codified more tightly into the documented template workflow
 - Single-admin session expiry and rotation are still basic
 
@@ -199,6 +200,42 @@ PARALLAIZE_DATABASE_URL=postgresql://parallaize:parallaize@127.0.0.1:5432/parall
 flox activate -d . -- pnpm start
 ```
 
+## Persistence Import And Export
+
+Use the persistence admin CLI to move the singleton app state between JSON files and PostgreSQL without hand-editing the state blob. The CLI normalizes older persisted shapes on read and writes the canonical state on import.
+
+Copy an existing JSON deployment state into PostgreSQL:
+
+```bash
+docker compose -f infra/docker-compose.postgres.yml up -d
+flox activate -d . -- pnpm persistence:copy -- \
+  --from json \
+  --data-file data/incus-state.json \
+  --to postgres \
+  --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize
+```
+
+Export PostgreSQL state to a backup file:
+
+```bash
+mkdir -p backups
+flox activate -d . -- pnpm persistence:export -- \
+  --from postgres \
+  --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize \
+  --output backups/parallaize-state.json
+```
+
+Import a backup file into a JSON state file:
+
+```bash
+flox activate -d . -- pnpm persistence:import -- \
+  --to json \
+  --to-data-file data/restored-state.json \
+  --input backups/parallaize-state.json
+```
+
+The CLI also accepts `PARALLAIZE_DATA_FILE` for JSON paths and `PARALLAIZE_DATABASE_URL` or `DATABASE_URL` for PostgreSQL URLs when you do not want to pass those flags directly.
+
 4. Open `http://127.0.0.1:3000`.
 
 ## Caddy Front Door
@@ -229,6 +266,8 @@ flox activate -d . -- pnpm build
 flox activate -d . -- pnpm start
 flox activate -d . -- pnpm test
 flox activate -d . -- pnpm smoke:incus
+flox activate -d . -- pnpm persistence:copy -- --from json --data-file data/incus-state.json --to postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize
+flox activate -d . -- pnpm persistence:export -- --from postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize --output backups/parallaize-state.json
 flox activate -d . -- caddy validate --config infra/Caddyfile
 docker compose -f infra/docker-compose.postgres.yml up -d
 ```

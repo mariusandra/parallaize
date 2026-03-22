@@ -3,9 +3,15 @@ import test from "node:test";
 
 import {
   applyViewportBoundsToResolution,
+  buildResolutionControlLeaseStorageKey,
+  canClaimResolutionControlLease,
+  createResolutionControlLease,
   emptyResolutionRequestQueue,
   enqueueResolutionRequest,
+  isResolutionControlLeaseFresh,
+  parseResolutionControlLease,
   resolveResolutionRequest,
+  resolutionControlLeaseTtlMs,
   shouldScheduleResolutionRepair,
   type ResolutionRequest,
 } from "../apps/web/src/desktopResolution.js";
@@ -174,5 +180,53 @@ test("shouldScheduleResolutionRepair returns false while requests are still queu
       targetKey: "vm-0001:1352x1233",
     }),
     false,
+  );
+});
+
+test("resolution control leases round-trip through storage parsing", () => {
+  const lease = createResolutionControlLease("vm-0001", "tab-1", 1_000);
+
+  assert.equal(
+    buildResolutionControlLeaseStorageKey("vm-0001"),
+    "parallaize.desktop-resolution-controller:vm-0001",
+  );
+  assert.deepEqual(parseResolutionControlLease(JSON.stringify(lease)), lease);
+  assert.equal(parseResolutionControlLease("not-json"), null);
+});
+
+test("resolution control leases only allow other tabs to claim after the lease expires", () => {
+  const now = 10_000;
+  const foreignLease = createResolutionControlLease("vm-0001", "tab-a", now);
+
+  assert.equal(
+    isResolutionControlLeaseFresh(foreignLease, now + resolutionControlLeaseTtlMs - 1),
+    true,
+  );
+  assert.equal(
+    canClaimResolutionControlLease({
+      lease: foreignLease,
+      now: now + resolutionControlLeaseTtlMs - 1,
+      tabId: "tab-b",
+      vmId: "vm-0001",
+    }),
+    false,
+  );
+  assert.equal(
+    canClaimResolutionControlLease({
+      lease: foreignLease,
+      now: now + resolutionControlLeaseTtlMs + 1,
+      tabId: "tab-b",
+      vmId: "vm-0001",
+    }),
+    true,
+  );
+  assert.equal(
+    canClaimResolutionControlLease({
+      lease: foreignLease,
+      now,
+      tabId: "tab-a",
+      vmId: "vm-0001",
+    }),
+    true,
   );
 });

@@ -31,8 +31,8 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 ### P0: Persistence Rollout
 
 - [ ] Run a full live `pnpm smoke:incus` pass with `PARALLAIZE_PERSISTENCE=postgres` and capture any host-specific fixes.
-- [ ] Add a supported import/export path so existing JSON state can be migrated into PostgreSQL without manual editing.
-- [ ] Surface persistence backend and persistence-failure status in `/api/health` and the operator UI/provider diagnostics.
+- [x] Add a supported import/export path so existing JSON state can be migrated into PostgreSQL without manual editing.
+- [x] Surface persistence backend and persistence-failure status in `/api/health` and the operator UI/provider diagnostics.
 - [ ] Document PostgreSQL backup/recovery and the expected table shape for deployed hosts.
 
 ### P1: Guest Template And Bootstrap Polish
@@ -63,12 +63,14 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 ## Next Up
 
 1. Validate PostgreSQL-backed persistence against the real Incus smoke path.
-2. Add JSON-to-PostgreSQL migration tooling.
+2. Document PostgreSQL backup/recovery and the expected table shape for deployed hosts.
 3. Codify the guest template/VNC bootstrap workflow so new base images are repeatable.
 
 ## Decision Log
 
 - 2026-03-22: Verified the real `incus` server boots cleanly against both JSON and PostgreSQL persistence; the PostgreSQL backend seeded and served state from the local Docker PostgreSQL stack.
+- 2026-03-22: Added a persistence admin CLI for JSON/PostgreSQL export, import, and direct copy so deployment state can be migrated without manual edits.
+- 2026-03-22: Added persistence diagnostics to the store boundary, exposed them through `/api/health`, and surfaced backend/degraded-state status in the operator UI.
 - 2026-03-22: Replaced the hard-wired JSON store with a pluggable JSON/PostgreSQL state-store boundary. PostgreSQL persists the full app state in a singleton JSONB row; JSON remains available for tests and fallback.
 - 2026-03-21: Chose Incus full VMs, Caddy, and noVNC as the shortest path to the first server-first browser POC.
 - 2026-03-21: Kept guest workload services out of the base image and modeled them as forwarded-port defaults captured on templates.

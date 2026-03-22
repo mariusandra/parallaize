@@ -24,6 +24,12 @@ export interface ResolutionRequestQueue {
   queued: ResolutionRequest | null;
 }
 
+export interface ResolutionControlLease {
+  heartbeatAt: number;
+  tabId: string;
+  vmId: string;
+}
+
 export const emptyViewportBounds: ViewportBounds = {
   height: null,
   width: null,
@@ -33,6 +39,8 @@ export const emptyResolutionRequestQueue: ResolutionRequestQueue = {
   inFlight: null,
   queued: null,
 };
+
+export const resolutionControlLeaseTtlMs = 5_000;
 
 export function applyViewportBoundsToResolution<T extends DesktopResolutionLike>(
   resolution: T,
@@ -146,4 +154,79 @@ export function shouldScheduleResolutionRepair(input: {
   }
 
   return input.attempts < input.maxAttempts;
+}
+
+export function buildResolutionControlLeaseStorageKey(vmId: string): string {
+  return `parallaize.desktop-resolution-controller:${vmId}`;
+}
+
+export function createResolutionControlLease(
+  vmId: string,
+  tabId: string,
+  heartbeatAt: number,
+): ResolutionControlLease {
+  return {
+    heartbeatAt,
+    tabId,
+    vmId,
+  };
+}
+
+export function parseResolutionControlLease(raw: string | null): ResolutionControlLease | null {
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<ResolutionControlLease>;
+
+    if (
+      typeof parsed.vmId !== "string" ||
+      !parsed.vmId ||
+      typeof parsed.tabId !== "string" ||
+      !parsed.tabId ||
+      typeof parsed.heartbeatAt !== "number" ||
+      !Number.isFinite(parsed.heartbeatAt)
+    ) {
+      return null;
+    }
+
+    return {
+      heartbeatAt: parsed.heartbeatAt,
+      tabId: parsed.tabId,
+      vmId: parsed.vmId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function isResolutionControlLeaseFresh(
+  lease: ResolutionControlLease | null,
+  now: number,
+  ttlMs = resolutionControlLeaseTtlMs,
+): boolean {
+  if (!lease) {
+    return false;
+  }
+
+  return now - lease.heartbeatAt <= ttlMs;
+}
+
+export function canClaimResolutionControlLease(input: {
+  lease: ResolutionControlLease | null;
+  now: number;
+  tabId: string;
+  ttlMs?: number;
+  vmId: string;
+}): boolean {
+  if (!input.lease || input.lease.vmId !== input.vmId) {
+    return true;
+  }
+
+  if (input.lease.tabId === input.tabId) {
+    return true;
+  }
+
+  return !isResolutionControlLeaseFresh(input.lease, input.now, input.ttlMs);
 }

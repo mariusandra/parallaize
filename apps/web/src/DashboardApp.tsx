@@ -27,6 +27,7 @@ import type {
   CreateVmInput,
   DashboardSummary,
   EnvironmentTemplate,
+  HealthStatus,
   InjectCommandInput,
   ResizeVmInput,
   ResourceTelemetry,
@@ -42,10 +43,15 @@ import type {
 } from "../../../packages/shared/src/types.js";
 import {
   applyViewportBoundsToResolution,
+  buildResolutionControlLeaseStorageKey,
+  canClaimResolutionControlLease,
+  createResolutionControlLease,
   emptyResolutionRequestQueue,
   emptyViewportBounds,
   enqueueResolutionRequest,
+  parseResolutionControlLease,
   resolveResolutionRequest,
+  resolutionControlLeaseTtlMs,
   shouldScheduleResolutionRepair,
   type ResolutionRequest,
   type ViewportBounds,
@@ -105,6 +111,7 @@ interface LoginDraft {
 
 type ThemeMode = "light" | "dark";
 type DesktopResolutionMode = "viewport" | "fixed";
+type ResolutionControlOwner = "none" | "self" | "other";
 
 interface DesktopResolutionState {
   clientHeight: number | null;
@@ -116,6 +123,11 @@ interface DesktopResolutionState {
 interface PendingManualResolutionSync {
   token: number;
   vmId: string;
+}
+
+interface ResolutionControlStatus {
+  owner: ResolutionControlOwner;
+  vmId: string | null;
 }
 
 interface DesktopResolutionTarget {
@@ -198,6 +210,7 @@ const guestDisplayHeightMax = 8192;
 const desktopResolutionRetryDelayMs = 900;
 const desktopResolutionRetryMaxAttempts = 4;
 const desktopResolutionByVmStorageKey = "parallaize.desktop-resolution-by-vm";
+const resolutionControlHeartbeatMs = 1_500;
 const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
 const sidepanelClosedWidth = 0;
@@ -216,6 +229,7 @@ const defaultDesktopResolutionPreference: DesktopResolutionPreference = {
 
 export function DashboardApp(): JSX.Element {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
   const [detail, setDetail] = useState<VmDetail | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -266,14 +280,25 @@ export function DashboardApp(): JSX.Element {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [desktopResolution, setDesktopResolution] =
     useState<DesktopResolutionState>(emptyResolutionState);
+  const [documentVisible, setDocumentVisible] = useState(() => readDocumentVisible());
+  const [resolutionControlStatus, setResolutionControlStatus] =
+    useState<ResolutionControlStatus>({
+      owner: "none",
+      vmId: null,
+    });
   const [railResizeActive, setRailResizeActive] = useState(false);
   const [sidepanelResizeActive, setSidepanelResizeActive] = useState(false);
   const selectedVmIdRef = useRef<string | null>(null);
+  const tabIdRef = useRef<string>(createTabId());
   const shellMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
   const railResizeRef = useRef<{ panelLeft: number } | null>(null);
   const sidepanelRef = useRef<HTMLElement | null>(null);
-  const sidepanelResizeRef = useRef<{ panelRight: number } | null>(null);
+  const sidepanelResizeRef = useRef<{
+    anchorClientX: number;
+    anchorWidth: number;
+    pendingClosedOpen: boolean;
+  } | null>(null);
   const stageViewportShellRef = useRef<HTMLDivElement | null>(null);
   const stageViewportFrameRef = useRef<HTMLDivElement | null>(null);
   const lastResolutionRequestKeyRef = useRef<string | null>(null);
@@ -281,6 +306,10 @@ export function DashboardApp(): JSX.Element {
   const resolutionRequestQueueRef = useRef(emptyResolutionRequestQueue);
   const currentResolutionTargetRef = useRef<DesktopResolutionTarget | null>(null);
   const currentRemoteResolutionKeyRef = useRef<string | null>(null);
+  const resolutionControlStatusRef = useRef<ResolutionControlStatus>({
+    owner: "none",
+    vmId: null,
+  });
   const resolutionRetryStateRef = useRef<ResolutionRetryState | null>(null);
   const resolutionRetryTimerRef = useRef<number | null>(null);
   const [availableViewportBounds, setAvailableViewportBounds] =
@@ -314,7 +343,19 @@ export function DashboardApp(): JSX.Element {
     currentDetail.vm.session.webSocketPath
       ? currentDetail.vm.id
       : null;
+  const ownsLiveResolutionControl =
+    liveResolutionVmId !== null &&
+    resolutionControlStatus.vmId === liveResolutionVmId &&
+    resolutionControlStatus.owner === "self";
+  const blocksLiveResolutionControl =
+    liveResolutionVmId !== null &&
+    resolutionControlStatus.vmId === liveResolutionVmId &&
+    resolutionControlStatus.owner === "other";
+  const resolutionControlMessage = blocksLiveResolutionControl
+    ? "Another tab is currently controlling live viewport sync for this VM. Close or switch that tab to take over."
+    : null;
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
+  const persistence = health?.persistence ?? null;
   const desktopResolutionMode = selectedDesktopResolutionPreference.mode;
   const appliedDesktopViewportScale = clampDesktopViewportScale(
     selectedDesktopResolutionPreference.scale,
@@ -397,6 +438,26 @@ export function DashboardApp(): JSX.Element {
   }, [selectedVmId]);
 
   useEffect(() => {
+    resolutionControlStatusRef.current = resolutionControlStatus;
+  }, [resolutionControlStatus]);
+
+  useEffect(() => {
+    function handleVisibilityChange(): void {
+      setDocumentVisible(readDocumentVisible());
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleVisibilityChange);
+    window.addEventListener("blur", handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleVisibilityChange);
+      window.removeEventListener("blur", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
     function handleViewportResize(): void {
       setViewportWidth(readViewportWidth());
     }
@@ -406,6 +467,63 @@ export function DashboardApp(): JSX.Element {
       window.removeEventListener("resize", handleViewportResize);
     };
   }, []);
+
+  useEffect(() => {
+    if (!liveResolutionVmId || !documentVisible) {
+      setResolutionControlStatus({
+        owner: "none",
+        vmId: liveResolutionVmId,
+      });
+      clearResolutionRetryTimer();
+      resolutionRequestQueueRef.current = emptyResolutionRequestQueue;
+      return;
+    }
+
+    const vmId = liveResolutionVmId;
+
+    function syncResolutionControlLease(): void {
+      const owner = claimResolutionControlLease(vmId, tabIdRef.current);
+
+      setResolutionControlStatus((current) =>
+        current.vmId === vmId && current.owner === owner
+          ? current
+          : {
+              owner,
+              vmId,
+            },
+      );
+
+      if (owner !== "self") {
+        clearResolutionRetryTimer();
+        resolutionRequestQueueRef.current = emptyResolutionRequestQueue;
+      }
+    }
+
+    syncResolutionControlLease();
+    const heartbeat = window.setInterval(syncResolutionControlLease, resolutionControlHeartbeatMs);
+    const leaseKey = buildResolutionControlLeaseStorageKey(vmId);
+    const releaseLease = () => {
+      releaseResolutionControlLease(vmId, tabIdRef.current);
+    };
+
+    function handleStorage(event: StorageEvent): void {
+      if (event.key === null || event.key === leaseKey) {
+        syncResolutionControlLease();
+      }
+    }
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("beforeunload", releaseLease);
+    window.addEventListener("pagehide", releaseLease);
+
+    return () => {
+      window.clearInterval(heartbeat);
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("beforeunload", releaseLease);
+      window.removeEventListener("pagehide", releaseLease);
+      releaseLease();
+    };
+  }, [documentVisible, liveResolutionVmId]);
 
   useEffect(() => {
     const vmId = new URL(window.location.href).searchParams.get("vm");
@@ -430,6 +548,7 @@ export function DashboardApp(): JSX.Element {
         }
 
         await refreshSummary();
+        await refreshHealth(true);
       } catch (error: unknown) {
         setNotice({
           tone: "error",
@@ -470,6 +589,22 @@ export function DashboardApp(): JSX.Element {
 
     return () => {
       eventSource.close();
+    };
+  }, [authState]);
+
+  useEffect(() => {
+    if (authState !== "ready") {
+      setHealth(null);
+      return;
+    }
+
+    void refreshHealth(true);
+    const interval = window.setInterval(() => {
+      void refreshHealth(true);
+    }, 10_000);
+
+    return () => {
+      window.clearInterval(interval);
     };
   }, [authState]);
 
@@ -722,6 +857,12 @@ export function DashboardApp(): JSX.Element {
     currentResolutionTargetRef.current = desiredDesktopResolutionTarget;
     currentRemoteResolutionKeyRef.current = currentRemoteResolutionKey;
 
+    if (!ownsLiveResolutionControl) {
+      clearResolutionRetryTimer();
+      resolutionRetryStateRef.current = null;
+      return;
+    }
+
     if (!desiredDesktopResolutionTarget) {
       clearResolutionRetryTimer();
       resolutionRetryStateRef.current = null;
@@ -744,9 +885,13 @@ export function DashboardApp(): JSX.Element {
         key: desiredDesktopResolutionTarget.key,
       };
     }
-  }, [currentRemoteResolutionKey, desiredDesktopResolutionTarget?.key]);
+  }, [currentRemoteResolutionKey, desiredDesktopResolutionTarget?.key, ownsLiveResolutionControl]);
 
   useEffect(() => {
+    if (!ownsLiveResolutionControl) {
+      return;
+    }
+
     if (!desiredDesktopResolutionTarget) {
       return;
     }
@@ -819,6 +964,7 @@ export function DashboardApp(): JSX.Element {
     currentRemoteResolutionKey,
     desiredDesktopResolutionTarget?.key,
     desktopResolutionMode,
+    ownsLiveResolutionControl,
     railResizeActive,
     sidepanelResizeActive,
   ]);
@@ -847,6 +993,10 @@ export function DashboardApp(): JSX.Element {
   ]);
 
   useEffect(() => {
+    if (!ownsLiveResolutionControl) {
+      return;
+    }
+
     if (!desiredDesktopResolutionTarget) {
       return;
     }
@@ -883,6 +1033,7 @@ export function DashboardApp(): JSX.Element {
   }, [
     desktopResolutionMode,
     desiredDesktopResolutionTarget?.key,
+    ownsLiveResolutionControl,
     pendingManualResolutionSync?.token,
     pendingManualResolutionSync?.vmId,
     railResizeActive,
@@ -950,18 +1101,45 @@ export function DashboardApp(): JSX.Element {
     }
 
     function handlePointerMove(event: PointerEvent): void {
-      const panelRight = sidepanelResizeRef.current?.panelRight;
+      const resizeState = sidepanelResizeRef.current;
 
-      if (panelRight === undefined) {
+      if (resizeState === null) {
         return;
       }
 
-      const nextWidth = clampSidepanelWidthPreference(panelRight - event.clientX);
-      setCurrentSidepanelCollapsed(nextWidth === sidepanelClosedWidth);
+      if (resizeState.pendingClosedOpen) {
+        const openingWidth = resizeState.anchorClientX - event.clientX;
 
-      if (nextWidth > sidepanelClosedWidth) {
-        setSidepanelWidthPreference(nextWidth);
+        if (openingWidth < sidepanelMinWidth) {
+          setCurrentSidepanelCollapsed(true);
+          return;
+        }
+
+        const activatedWidth = clampDisplayedSidepanelWidth(openingWidth, viewportWidth);
+        resizeState.anchorClientX = event.clientX;
+        resizeState.anchorWidth = activatedWidth;
+        resizeState.pendingClosedOpen = false;
+        setCurrentSidepanelCollapsed(false);
+        setSidepanelWidthPreference(activatedWidth);
+        return;
       }
+
+      const rawWidth =
+        resizeState.anchorWidth + (resizeState.anchorClientX - event.clientX);
+
+      const nextWidth = clampDisplayedSidepanelWidth(rawWidth, viewportWidth);
+
+      if (nextWidth === sidepanelClosedWidth) {
+        resizeState.anchorClientX =
+          sidepanelRef.current?.getBoundingClientRect().right ?? event.clientX;
+        resizeState.anchorWidth = sidepanelClosedWidth;
+        resizeState.pendingClosedOpen = true;
+        setCurrentSidepanelCollapsed(true);
+        return;
+      }
+
+      setCurrentSidepanelCollapsed(false);
+      setSidepanelWidthPreference(nextWidth);
     }
 
     function handleKeyDown(event: KeyboardEvent): void {
@@ -990,7 +1168,7 @@ export function DashboardApp(): JSX.Element {
       document.removeEventListener("pointercancel", stopResize);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [sidepanelResizeActive]);
+  }, [sidepanelResizeActive, viewportWidth]);
 
   async function refreshSummary(): Promise<DashboardSummary> {
     const nextSummary = await fetchJson<DashboardSummary>("/api/summary");
@@ -1001,12 +1179,35 @@ export function DashboardApp(): JSX.Element {
     return nextSummary;
   }
 
+  async function refreshHealth(silent: boolean): Promise<HealthStatus | null> {
+    try {
+      const nextHealth = await fetchJson<HealthStatus>("/api/health");
+      setHealth(nextHealth);
+      return nextHealth;
+    } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        requireLogin();
+        return null;
+      }
+
+      if (!silent) {
+        setNotice({
+          tone: "error",
+          message: errorMessage(error),
+        });
+      }
+
+      return null;
+    }
+  }
+
   async function refreshDetail(vmId: string): Promise<void> {
     setDetail(await fetchJson<VmDetail>(`/api/vms/${vmId}`));
   }
 
   function requireLogin(): void {
     setAuthState("required");
+    setHealth(null);
     setSummary(null);
     setDetail(null);
     setNotice(null);
@@ -1288,14 +1489,16 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
-    const panelRight = sidepanelRef.current?.getBoundingClientRect().right;
-
-    if (panelRight === undefined) {
-      return;
-    }
+    const handleBounds = event.currentTarget.getBoundingClientRect();
+    const handleCenterX = handleBounds.left + handleBounds.width / 2;
 
     event.preventDefault();
-    sidepanelResizeRef.current = { panelRight };
+    sidepanelResizeRef.current = {
+      anchorClientX:
+        displayedSidepanelWidth <= sidepanelClosedWidth ? handleCenterX : event.clientX,
+      anchorWidth: displayedSidepanelWidth,
+      pendingClosedOpen: displayedSidepanelWidth <= sidepanelClosedWidth,
+    };
     setSidepanelResizeActive(true);
   }
 
@@ -1427,6 +1630,13 @@ export function DashboardApp(): JSX.Element {
     );
   }
 
+  function canDriveResolutionForVm(vmId: string): boolean {
+    return (
+      resolutionControlStatusRef.current.owner === "self" &&
+      resolutionControlStatusRef.current.vmId === vmId
+    );
+  }
+
   function clearResolutionRetryTimer(): void {
     if (resolutionRetryTimerRef.current !== null) {
       window.clearTimeout(resolutionRetryTimerRef.current);
@@ -1435,6 +1645,10 @@ export function DashboardApp(): JSX.Element {
   }
 
   function scheduleResolutionRetry(request: ResolutionRequest): void {
+    if (!canDriveResolutionForVm(request.vmId)) {
+      return;
+    }
+
     const currentTarget = currentResolutionTargetRef.current;
 
     if (!currentTarget || currentTarget.key !== request.key) {
@@ -1477,6 +1691,11 @@ export function DashboardApp(): JSX.Element {
 
   function startResolutionRequest(request: ResolutionRequest): void {
     void (async () => {
+      if (!canDriveResolutionForVm(request.vmId)) {
+        resolutionRequestQueueRef.current = emptyResolutionRequestQueue;
+        return;
+      }
+
       try {
         await postJson(`/api/vms/${request.vmId}/resolution`, {
           height: request.height,
@@ -1495,6 +1714,11 @@ export function DashboardApp(): JSX.Element {
           message: errorMessage(error),
         });
       } finally {
+        if (!canDriveResolutionForVm(request.vmId)) {
+          resolutionRequestQueueRef.current = emptyResolutionRequestQueue;
+          return;
+        }
+
         const { nextQueue, requestToStart } = resolveResolutionRequest(
           resolutionRequestQueueRef.current,
           request.requestId,
@@ -1517,6 +1741,10 @@ export function DashboardApp(): JSX.Element {
     height: number,
     silent: boolean,
   ): void {
+    if (!canDriveResolutionForVm(vmId)) {
+      return;
+    }
+
     clearResolutionRetryTimer();
 
     const payload = normalizeGuestDisplayResolution(width, height);
@@ -1562,6 +1790,10 @@ export function DashboardApp(): JSX.Element {
   }
 
   function queueManualResolutionSync(vmId: string): void {
+    if (!canDriveResolutionForVm(vmId)) {
+      return;
+    }
+
     clearResolutionRetryTimer();
     resolutionRetryStateRef.current = null;
     setPendingManualResolutionSync((current) => ({
@@ -2060,6 +2292,7 @@ export function DashboardApp(): JSX.Element {
             </div>
 
             <PortalPopover
+              anchorPlacement={compactRail ? "bottom-start" : "bottom-end"}
               anchorRef={shellMenuButtonRef}
               className="workspace-rail__popover"
               open={shellMenuOpen}
@@ -2256,6 +2489,8 @@ export function DashboardApp(): JSX.Element {
                 commandDraft={commandDraft}
                 detail={currentDetail}
                 forwardDraft={forwardDraft}
+                resolutionControlBlocked={blocksLiveResolutionControl}
+                resolutionControlMessage={resolutionControlMessage}
                 resolutionDraft={resolutionDraft}
                 resolutionState={effectiveDesktopResolution}
                 resourceDraft={resourceDraft}
@@ -2295,6 +2530,7 @@ export function DashboardApp(): JSX.Element {
             wideShellLayout || !effectiveSidePanelCollapsed ? (
               <OverviewSidepanel
                 collapsed={effectiveSidePanelCollapsed}
+                persistence={persistence}
                 summary={summary}
                 onCreate={() => setShowCreateDialog(true)}
                 onToggleCollapsed={() => setOverviewSidepanelCollapsed(true)}
@@ -2536,6 +2772,85 @@ function VmTile({
     vm.session?.kind === "vnc" &&
     Boolean(vm.session.webSocketPath);
   const previewLabel = vmTilePreviewLabel(vm, showLivePreview);
+  const menu = (
+    <div className="vm-tile__menu" onClick={(event) => event.stopPropagation()}>
+      <button
+        ref={menuButtonRef}
+        className={joinClassNames("menu-button", menuOpen ? "menu-button--open" : "")}
+        type="button"
+        aria-expanded={menuOpen}
+        aria-label={`Actions for ${vm.name}`}
+        onClick={() => onToggleMenu(vm.id)}
+      >
+        ...
+      </button>
+
+      {menuOpen ? (
+        <PortalPopover
+          anchorPlacement={compact ? "right-start" : "bottom-end"}
+          anchorRef={menuButtonRef}
+          className="vm-tile__popover"
+          open={menuOpen}
+          onClose={() => onToggleMenu(vm.id)}
+        >
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              onOpen(vm.id);
+            }}
+          >
+            Open
+          </button>
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              void onStartStop(vm.id, vm.status === "running" ? "stop" : "start");
+            }}
+            disabled={busy}
+          >
+            {vm.status === "running" ? "Stop" : "Start"}
+          </button>
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              void onClone(vm);
+            }}
+            disabled={busy}
+          >
+            Clone
+          </button>
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              void onSnapshot(vm);
+            }}
+            disabled={busy}
+          >
+            Snapshot
+          </button>
+          <button
+            className="menu-action menu-action--danger"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              void onDelete(vm);
+            }}
+            disabled={busy}
+          >
+            Delete
+          </button>
+        </PortalPopover>
+      ) : null}
+    </div>
+  );
 
   if (compact) {
     return (
@@ -2562,7 +2877,7 @@ function VmTile({
                 viewportMode="scale"
                 viewOnly
                 showHeader={false}
-                statusMode="overlay"
+                statusMode="hidden"
               />
             ) : (
               <StaticPatternPreview vm={vm} variant="tile" />
@@ -2576,6 +2891,7 @@ function VmTile({
             aria-hidden="true"
           />
         </button>
+        {menu}
       </article>
     );
   }
@@ -2623,83 +2939,7 @@ function VmTile({
           </div>
         </div>
       </button>
-
-      <div className="vm-tile__menu" onClick={(event) => event.stopPropagation()}>
-        <button
-          ref={menuButtonRef}
-          className={joinClassNames("menu-button", menuOpen ? "menu-button--open" : "")}
-          type="button"
-          aria-expanded={menuOpen}
-          aria-label={`Actions for ${vm.name}`}
-          onClick={() => onToggleMenu(vm.id)}
-        >
-          ...
-        </button>
-
-        {menuOpen ? (
-          <PortalPopover
-            anchorRef={menuButtonRef}
-            className="vm-tile__popover"
-            open={menuOpen}
-            onClose={() => onToggleMenu(vm.id)}
-          >
-            <button
-              className="menu-action"
-              type="button"
-              onClick={() => {
-                onToggleMenu(vm.id);
-                onOpen(vm.id);
-              }}
-            >
-              Open
-            </button>
-            <button
-              className="menu-action"
-              type="button"
-              onClick={() => {
-                onToggleMenu(vm.id);
-                void onStartStop(vm.id, vm.status === "running" ? "stop" : "start");
-              }}
-              disabled={busy}
-            >
-              {vm.status === "running" ? "Stop" : "Start"}
-            </button>
-            <button
-              className="menu-action"
-              type="button"
-              onClick={() => {
-                onToggleMenu(vm.id);
-                void onClone(vm);
-              }}
-              disabled={busy}
-            >
-              Clone
-            </button>
-            <button
-              className="menu-action"
-              type="button"
-              onClick={() => {
-                onToggleMenu(vm.id);
-                void onSnapshot(vm);
-              }}
-              disabled={busy}
-            >
-              Snapshot
-            </button>
-            <button
-              className="menu-action menu-action--danger"
-              type="button"
-              onClick={() => {
-                onToggleMenu(vm.id);
-                void onDelete(vm);
-              }}
-              disabled={busy}
-            >
-              Delete
-            </button>
-          </PortalPopover>
-        ) : null}
-      </div>
+      {menu}
     </article>
   );
 }
@@ -2752,6 +2992,7 @@ function TelemetryPanel({
 }
 
 interface PortalPopoverProps {
+  anchorPlacement?: "bottom-start" | "bottom-end" | "right-start";
   anchorRef: { current: HTMLElement | null };
   children: ReactNode;
   className?: string;
@@ -2760,6 +3001,7 @@ interface PortalPopoverProps {
 }
 
 function PortalPopover({
+  anchorPlacement = "bottom-end",
   anchorRef,
   children,
   className,
@@ -2784,12 +3026,25 @@ function PortalPopover({
       }
 
       const bounds = anchor.getBoundingClientRect();
-      setStyle({
+      const nextStyle: CSSProperties = {
         position: "fixed",
-        top: bounds.bottom + 8,
-        right: Math.max(12, window.innerWidth - bounds.right),
         zIndex: 80,
-      });
+      };
+
+      if (anchorPlacement === "right-start") {
+        nextStyle.top = Math.max(12, bounds.top);
+        nextStyle.left = Math.max(12, bounds.right + 6);
+      } else {
+        nextStyle.top = bounds.bottom + 8;
+
+        if (anchorPlacement === "bottom-start") {
+          nextStyle.left = Math.max(12, bounds.left);
+        } else {
+          nextStyle.right = Math.max(12, window.innerWidth - bounds.right);
+        }
+      }
+
+      setStyle(nextStyle);
     }
 
     updatePosition();
@@ -2800,7 +3055,7 @@ function PortalPopover({
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", updatePosition, true);
     };
-  }, [anchorRef, open]);
+  }, [anchorPlacement, anchorRef, open]);
 
   useEffect(() => {
     if (!open) {
@@ -2860,6 +3115,8 @@ interface WorkspaceSidepanelProps {
   commandDraft: string;
   detail: VmDetail | null;
   forwardDraft: ForwardDraft;
+  resolutionControlBlocked: boolean;
+  resolutionControlMessage: string | null;
   resolutionDraft: ResolutionDraft;
   resolutionState: DesktopResolutionState;
   resourceDraft: ResourceDraft;
@@ -2977,6 +3234,8 @@ function WorkspaceSidepanel({
   commandDraft,
   detail,
   forwardDraft,
+  resolutionControlBlocked,
+  resolutionControlMessage,
   resolutionDraft,
   resolutionState,
   resourceDraft,
@@ -3059,8 +3318,6 @@ function WorkspaceSidepanel({
 
               <div className="chip-row">
                 <span className="surface-pill">{detail.template?.name ?? "Unlinked template"}</span>
-                <span className="surface-pill">{providerTransportLabel(detail.provider.desktopTransport)}</span>
-                <span className="surface-pill">{summary.provider.kind}</span>
               </div>
             </section>
 
@@ -3142,6 +3399,7 @@ function WorkspaceSidepanel({
                   <span>Mode</span>
                   <select
                     className="field-input"
+                    disabled={resolutionControlBlocked}
                     value={resolutionDraft.mode}
                     onChange={(event) =>
                       onResolutionModeChange(
@@ -3157,6 +3415,7 @@ function WorkspaceSidepanel({
                 {resolutionDraft.mode === "fixed" ? (
                   <div className="compact-grid compact-grid--double">
                     <NumberField
+                      disabled={resolutionControlBlocked}
                       label="Width"
                       value={resolutionDraft.width}
                       onChange={(value) =>
@@ -3167,6 +3426,7 @@ function WorkspaceSidepanel({
                       }
                     />
                     <NumberField
+                      disabled={resolutionControlBlocked}
                       label="Height"
                       value={resolutionDraft.height}
                       onChange={(value) =>
@@ -3183,6 +3443,7 @@ function WorkspaceSidepanel({
                     <div className="field-range">
                       <input
                         className="field-range__input"
+                        disabled={resolutionControlBlocked}
                         type="range"
                         min={desktopViewportScaleMin}
                         max={desktopViewportScaleMax}
@@ -3224,9 +3485,17 @@ function WorkspaceSidepanel({
                 </div>
 
                 {resolutionDraft.mode === "fixed" ? (
-                  <button className="button button--secondary button--full" type="submit">
+                  <button
+                    className="button button--secondary button--full"
+                    disabled={resolutionControlBlocked}
+                    type="submit"
+                  >
                     Apply fixed size
                   </button>
+                ) : null}
+
+                {resolutionControlMessage ? (
+                  <p className="empty-copy">{resolutionControlMessage}</p>
                 ) : null}
               </form>
             </SidepanelSection>
@@ -3685,6 +3954,7 @@ function OverviewSidepanel({
   collapsed,
   onCreate,
   onToggleCollapsed,
+  persistence,
   summary,
   panelRef,
   resizable,
@@ -3697,6 +3967,7 @@ function OverviewSidepanel({
   collapsed: boolean;
   onCreate: () => void;
   onToggleCollapsed: () => void;
+  persistence: HealthStatus["persistence"] | null;
   summary: DashboardSummary;
   panelRef: RefObject<HTMLElement | null>;
   resizable: boolean;
@@ -3761,16 +4032,46 @@ function OverviewSidepanel({
               </div>
 
               <p className="empty-copy">{summary.provider.detail}</p>
+              {persistence ? (
+                <p className="empty-copy">{persistenceSummaryCopy(persistence)}</p>
+              ) : null}
 
               <div className="chip-row">
-                <span className="surface-pill">{summary.provider.kind}</span>
-                <span className="surface-pill">
-                  {providerTransportLabel(summary.provider.desktopTransport)}
-                </span>
+                {persistence ? (
+                  <span
+                    className={joinClassNames(
+                      "surface-pill",
+                      persistence.status === "ready"
+                        ? "surface-pill--success"
+                        : "surface-pill--warning",
+                    )}
+                  >
+                    {persistenceChipLabel(persistence)}
+                  </span>
+                ) : null}
                 <span className="surface-pill">
                   {summary.snapshots.length} snapshot{summary.snapshots.length === 1 ? "" : "s"}
                 </span>
               </div>
+
+              {persistence ? (
+                <div className="compact-grid">
+                  <FieldPair label="Backend" value={persistenceBackendLabel(persistence.kind)} />
+                  <FieldPair label="Status" value={persistenceStatusLabel(persistence)} />
+                  <FieldPair
+                    label="Last write"
+                    value={persistence.lastPersistedAt ? formatTimestamp(persistence.lastPersistedAt) : "Pending"}
+                  />
+                  <FieldPair
+                    label="Last attempt"
+                    value={
+                      persistence.lastPersistAttemptAt
+                        ? formatTimestamp(persistence.lastPersistAttemptAt)
+                        : "Pending"
+                    }
+                  />
+                </div>
+              ) : null}
             </section>
 
             <SidepanelSection title="Fleet" defaultOpen>
@@ -4110,8 +4411,32 @@ function toTemplatePortForward(forward: VmPortForward): TemplatePortForward {
   };
 }
 
-function providerTransportLabel(transport: DashboardSummary["provider"]["desktopTransport"]): string {
-  return transport === "novnc" ? "Embedded noVNC bridge" : "Synthetic preview";
+function persistenceBackendLabel(kind: HealthStatus["persistence"]["kind"]): string {
+  return kind === "postgres" ? "PostgreSQL" : "JSON file";
+}
+
+function persistenceStatusLabel(persistence: HealthStatus["persistence"]): string {
+  return persistence.status === "ready" ? "Ready" : "Degraded";
+}
+
+function persistenceChipLabel(persistence: HealthStatus["persistence"]): string {
+  return `${persistenceBackendLabel(persistence.kind)} ${persistenceStatusLabel(persistence)}`;
+}
+
+function persistenceSummaryCopy(persistence: HealthStatus["persistence"]): string {
+  const backend = persistenceBackendLabel(persistence.kind);
+
+  if (persistence.status === "degraded") {
+    return persistence.lastPersistError
+      ? `${backend} persistence is degraded. ${persistence.lastPersistError}`
+      : `${backend} persistence is degraded.`;
+  }
+
+  if (!persistence.lastPersistedAt) {
+    return `${backend} persistence is ready and waiting for the next write.`;
+  }
+
+  return `${backend} persistence last wrote at ${formatTimestamp(persistence.lastPersistedAt)}.`;
 }
 
 function providerStatusTitle(provider: DashboardSummary["provider"]): string {
@@ -4414,6 +4739,71 @@ function readStoredString(key: string): string | null {
   } catch {
     return null;
   }
+}
+
+function clearStoredString(key: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Ignore persistence failures and keep the session usable.
+  }
+}
+
+function readDocumentVisible(): boolean {
+  return typeof document === "undefined" ? true : document.visibilityState === "visible";
+}
+
+function createTabId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function claimResolutionControlLease(
+  vmId: string,
+  tabId: string,
+): ResolutionControlOwner {
+  if (typeof window === "undefined") {
+    return "self";
+  }
+
+  const key = buildResolutionControlLeaseStorageKey(vmId);
+  const now = Date.now();
+  const existingLease = parseResolutionControlLease(readStoredString(key));
+
+  if (
+    !canClaimResolutionControlLease({
+      lease: existingLease,
+      now,
+      tabId,
+      ttlMs: resolutionControlLeaseTtlMs,
+      vmId,
+    })
+  ) {
+    return "other";
+  }
+
+  writeStoredString(key, JSON.stringify(createResolutionControlLease(vmId, tabId, now)));
+  const confirmedLease = parseResolutionControlLease(readStoredString(key));
+
+  return confirmedLease?.tabId === tabId ? "self" : "other";
+}
+
+function releaseResolutionControlLease(vmId: string, tabId: string): void {
+  const key = buildResolutionControlLeaseStorageKey(vmId);
+  const existingLease = parseResolutionControlLease(readStoredString(key));
+
+  if (!existingLease || existingLease.tabId !== tabId) {
+    return;
+  }
+
+  clearStoredString(key);
 }
 
 function readSidepanelCollapsedByVm(): Record<string, true> {

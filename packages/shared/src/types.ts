@@ -1,10 +1,12 @@
 export type ProviderKind = "mock" | "incus";
+export type PersistenceKind = "json" | "postgres";
 export type ProviderHostStatus =
   | "ready"
   | "missing-cli"
   | "daemon-unreachable"
   | "error";
 export type ProviderDesktopTransport = "synthetic" | "novnc";
+export type PersistenceStatus = "ready" | "degraded";
 
 export type VmStatus =
   | "creating"
@@ -156,6 +158,16 @@ export interface AppState {
   lastUpdated: string;
 }
 
+export interface PersistenceDiagnostics {
+  kind: PersistenceKind;
+  status: PersistenceStatus;
+  databaseConfigured: boolean;
+  dataFile: string | null;
+  lastPersistAttemptAt: string | null;
+  lastPersistedAt: string | null;
+  lastPersistError: string | null;
+}
+
 export interface DashboardMetrics {
   totalVmCount: number;
   runningVmCount: number;
@@ -250,6 +262,13 @@ export interface ApiEnvelope<T> {
 export interface ApiErrorEnvelope {
   ok: false;
   error: string;
+}
+
+export interface HealthStatus {
+  status: "ok" | "degraded";
+  provider: ProviderState;
+  persistence: PersistenceDiagnostics;
+  generatedAt: string;
 }
 
 export type ApiResponse<T> = ApiEnvelope<T> | ApiErrorEnvelope;

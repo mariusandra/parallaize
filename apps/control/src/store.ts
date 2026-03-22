@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { Pool } from "pg";
@@ -8,6 +8,7 @@ import type {
   ActionJob,
   AppState,
   EnvironmentTemplate,
+  PersistenceDiagnostics,
   ProviderState,
   ProviderKind,
   Snapshot,
@@ -19,7 +20,7 @@ import type {
 } from "../../../packages/shared/src/types.js";
 
 const DEFAULT_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
-const POSTGRES_STORE_KEY = "singleton";
+export const POSTGRES_STORE_KEY = "singleton";
 
 type StateMutator = (state: AppState) => boolean | void;
 type StateMutationResult = {
@@ -47,6 +48,7 @@ type LegacyAppState = Partial<Omit<AppState, "provider" | "templates" | "vms">> 
 export interface StateStore {
   load(): AppState;
   update(mutator: StateMutator): StateMutationResult;
+  getDiagnostics(): PersistenceDiagnostics;
   flush(): Promise<void>;
   close(): Promise<void>;
 }
@@ -73,6 +75,9 @@ export async function createStateStore(
 }
 
 export class JsonStateStore implements StateStore {
+  private lastPersistAttemptAt: string | null = null;
+  private lastPersistedAt: string | null = null;
+
   constructor(
     private readonly filePath: string,
     private readonly createSeed: () => AppState,
@@ -86,6 +91,9 @@ export class JsonStateStore implements StateStore {
     }
 
     const raw = readFileSync(this.filePath, "utf8");
+    const filePersistedAt = statSync(this.filePath).mtime.toISOString();
+    this.lastPersistAttemptAt = filePersistedAt;
+    this.lastPersistedAt = filePersistedAt;
     const parsed = JSON.parse(raw) as LegacyAppState;
     const normalized = normalizeState(parsed);
 
@@ -97,8 +105,11 @@ export class JsonStateStore implements StateStore {
   }
 
   save(state: AppState): void {
+    const attemptedAt = nowIso();
     mkdirSync(dirname(this.filePath), { recursive: true });
     writeFileSync(this.filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    this.lastPersistAttemptAt = attemptedAt;
+    this.lastPersistedAt = attemptedAt;
   }
 
   update(mutator: StateMutator): StateMutationResult {
@@ -119,6 +130,18 @@ export class JsonStateStore implements StateStore {
   async flush(): Promise<void> {}
 
   async close(): Promise<void> {}
+
+  getDiagnostics(): PersistenceDiagnostics {
+    return {
+      kind: "json",
+      status: "ready",
+      databaseConfigured: false,
+      dataFile: this.filePath,
+      lastPersistAttemptAt: this.lastPersistAttemptAt,
+      lastPersistedAt: this.lastPersistedAt,
+      lastPersistError: null,
+    };
+  }
 }
 
 export class PostgresStateStore implements StateStore {
@@ -126,13 +149,18 @@ export class PostgresStateStore implements StateStore {
   private currentState: AppState;
   private pendingPersist: Promise<void> = Promise.resolve();
   private lastPersistError: Error | null = null;
+  private lastPersistAttemptAt: string | null;
+  private lastPersistedAt: string | null;
 
   private constructor(
     pool: Pool,
     initialState: AppState,
+    initialPersistedAt: string | null,
   ) {
     this.pool = pool;
     this.currentState = cloneState(initialState);
+    this.lastPersistAttemptAt = initialPersistedAt;
+    this.lastPersistedAt = initialPersistedAt;
   }
 
   static async create(
@@ -152,17 +180,14 @@ export class PostgresStateStore implements StateStore {
     `);
 
     const initialState = await readOrInsertSeedState(pool, createSeed);
-    return new PostgresStateStore(pool, initialState);
+    return new PostgresStateStore(pool, initialState, nowIso());
   }
 
   load(): AppState {
-    this.assertHealthy();
     return cloneState(this.currentState);
   }
 
   update(mutator: StateMutator): StateMutationResult {
-    this.assertHealthy();
-
     const nextState = cloneState(this.currentState);
     const changed = mutator(nextState) !== false;
 
@@ -194,6 +219,8 @@ export class PostgresStateStore implements StateStore {
   private queuePersist(state: AppState): void {
     const snapshot = cloneState(state);
     const persistPromise = this.pendingPersist.then(async () => {
+      const attemptedAt = nowIso();
+      this.lastPersistAttemptAt = attemptedAt;
       await this.pool.query(
         `
           INSERT INTO app_state (store_key, state, updated_at)
@@ -203,6 +230,8 @@ export class PostgresStateStore implements StateStore {
         `,
         [POSTGRES_STORE_KEY, JSON.stringify(snapshot)],
       );
+      this.lastPersistError = null;
+      this.lastPersistedAt = attemptedAt;
     });
 
     this.pendingPersist = persistPromise.catch((error: unknown) => {
@@ -214,6 +243,18 @@ export class PostgresStateStore implements StateStore {
       this.lastPersistError = normalizedError;
       console.error(normalizedError);
     });
+  }
+
+  getDiagnostics(): PersistenceDiagnostics {
+    return {
+      kind: "postgres",
+      status: this.lastPersistError ? "degraded" : "ready",
+      databaseConfigured: true,
+      dataFile: null,
+      lastPersistAttemptAt: this.lastPersistAttemptAt,
+      lastPersistedAt: this.lastPersistedAt,
+      lastPersistError: this.lastPersistError?.message ?? null,
+    };
   }
 
   private assertHealthy(): void {
@@ -261,6 +302,10 @@ async function readOrInsertSeedState(
 
 function cloneState<T>(value: T): T {
   return structuredClone(value);
+}
+
+export function normalizePersistedState(rawState: unknown): AppState {
+  return normalizeState((rawState ?? {}) as LegacyAppState);
 }
 
 function normalizeState(rawState: LegacyAppState): AppState {
