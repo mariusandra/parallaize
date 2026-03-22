@@ -28,6 +28,8 @@ import type { JsonStateStore } from "./store.js";
 const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 const MAX_ACTIVITY_LINES = 8;
 const MAX_JOBS = 20;
+const QUEUED_PROGRESS_PERCENT = 6;
+const RUNNING_PROGRESS_PERCENT = 14;
 
 export class DesktopManager {
   private readonly listeners = new Set<(summary: DashboardSummary) => void>();
@@ -200,10 +202,13 @@ export class DesktopManager {
     const vmRecord = createdVm as VmInstance;
     const jobRecord = createdJob as ActionJob;
 
-    void this.runJob(jobRecord.id, async () => {
+    void this.runJob(jobRecord.id, async (report) => {
+      report("Allocating workspace", 18);
       await sleep(550);
+      report("Provisioning VM", 42);
       const template = requireTemplate(state, vmRecord.templateId);
       const mutation = await this.provider.createVm(vmRecord, template);
+      report("Booting desktop", 86);
 
       this.store.update((draft) => {
         const vm = this.requireVm(draft, vmRecord.id);
@@ -264,8 +269,10 @@ export class DesktopManager {
     const vmRecord = createdVm as VmInstance;
     const jobRecord = createdJob as ActionJob;
 
-    void this.runJob(jobRecord.id, async () => {
+    void this.runJob(jobRecord.id, async (report) => {
+      report("Preparing clone", 18);
       await sleep(500);
+      report("Cloning disks", 46);
       const target = this.getVmDetail(vmRecord.id).vm;
       const source = this.getVmDetail(input.sourceVmId).vm;
       const template = this.getVmDetail(vmRecord.id).template;
@@ -277,6 +284,7 @@ export class DesktopManager {
       }
 
       const mutation = await this.provider.cloneVm(source, target, template);
+      report("Booting desktop", 86);
 
       this.store.update((draft) => {
         const vm = this.requireVm(draft, vmRecord.id);
@@ -294,13 +302,16 @@ export class DesktopManager {
   }
 
   startVm(vmId: string): void {
-    this.queueVmAction(vmId, "start", async (vm) => {
+    this.queueVmAction(vmId, "start", async (vm, report) => {
       if (vm.status === "running") {
         return `${vm.name} is already running`;
       }
 
+      report("Preparing boot", 24);
       await sleep(350);
+      report("Starting VM", 58);
       const mutation = await this.provider.startVm(vm);
+      report("Waiting for desktop", 88);
 
       this.store.update((draft) => {
         const current = this.requireVm(draft, vmId);
@@ -593,7 +604,7 @@ export class DesktopManager {
   private queueVmAction(
     vmId: string,
     kind: JobKind,
-    runner: (vm: VmInstance) => Promise<string>,
+    runner: (vm: VmInstance, report: JobProgressReporter) => Promise<string>,
   ): void {
     let jobId = "";
 
@@ -608,24 +619,27 @@ export class DesktopManager {
 
     this.publish();
 
-    void this.runJob(jobId, async () => {
+    void this.runJob(jobId, async (report) => {
       const vm = this.getVmDetail(vmId).vm;
       this.ensureActiveProvider(vm);
-      return runner(vm);
+      return runner(vm, report);
     });
   }
 
   private async runJob(
     jobId: string,
-    runner: () => Promise<string>,
+    runner: (report: JobProgressReporter) => Promise<string>,
   ): Promise<void> {
-    this.updateJob(jobId, "running", "Action in progress");
+    this.updateJob(jobId, "running", "Action in progress", RUNNING_PROGRESS_PERCENT);
 
     try {
-      const message = await runner();
-      this.updateJob(jobId, "succeeded", message);
+      const report: JobProgressReporter = (message, progressPercent) => {
+        this.updateJob(jobId, "running", message, progressPercent);
+      };
+      const message = await runner(report);
+      this.updateJob(jobId, "succeeded", message, 100);
     } catch (error) {
-      this.updateJob(jobId, "failed", errorMessage(error));
+      this.updateJob(jobId, "failed", errorMessage(error), null);
     }
   }
 
@@ -633,6 +647,7 @@ export class DesktopManager {
     jobId: string,
     status: ActionJob["status"],
     message: string,
+    progressPercent?: number | null,
   ): void {
     this.store.update((draft) => {
       const job = draft.jobs.find((entry) => entry.id === jobId);
@@ -643,6 +658,9 @@ export class DesktopManager {
 
       job.status = status;
       job.message = message;
+      if (progressPercent !== undefined) {
+        job.progressPercent = normalizeProgressPercent(progressPercent);
+      }
       job.updatedAt = nowIso();
       return true;
     });
@@ -744,10 +762,13 @@ function buildJob(
     targetTemplateId: templateId,
     status: "queued",
     message,
+    progressPercent: QUEUED_PROGRESS_PERCENT,
     createdAt: now,
     updatedAt: now,
   };
 }
+
+type JobProgressReporter = (message: string, progressPercent: number | null) => void;
 
 function buildSnapshot(
   state: AppState,
@@ -767,6 +788,15 @@ function buildSnapshot(
     resources: { ...vm.resources },
     createdAt: nowIso(),
   };
+}
+
+function normalizeProgressPercent(value: number | null): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  const rounded = Math.round(value);
+  return Math.max(0, Math.min(100, rounded));
 }
 
 function nextId(state: AppState, prefix: string): string {

@@ -60,6 +60,38 @@ test("mock provider supports create, snapshot, and template capture flows", asyn
   assert.ok(summary.jobs.some((job) => job.kind === "capture-template" && job.status === "succeeded"));
 });
 
+test("create jobs expose staged progress while the desktop boots", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-job-progress-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "progress-lab",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  await wait(50);
+
+  const job = manager.getVmDetail(vm.id).recentJobs[0];
+  assert.ok(job);
+  assert.equal(job?.kind, "create");
+  assert.equal(job?.status, "running");
+  assert.ok((job?.progressPercent ?? 0) > 0);
+  assert.ok((job?.progressPercent ?? 100) < 100);
+});
+
 test("captured templates become reusable launch sources for subsequent VMs", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-captured-template-"));
   context.after(() => {

@@ -123,6 +123,7 @@ export interface ActionJob {
   targetTemplateId: string | null;
   status: JobStatus;
   message: string;
+  progressPercent?: number | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -8,7 +8,9 @@ import {
   type ChangeEvent,
   type FormEvent,
   type JSX,
+  type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   formatRam,
@@ -121,6 +123,7 @@ export function DashboardApp(): JSX.Element {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
   const [openVmMenuId, setOpenVmMenuId] = useState<string | null>(null);
+  const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [showLivePreviews, setShowLivePreviews] = useState(() =>
     readStoredBoolean("parallaize.live-previews", true),
@@ -131,6 +134,7 @@ export function DashboardApp(): JSX.Element {
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const selectedVmIdRef = useRef<string | null>(null);
+  const shellMenuButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const deferredVms = useDeferredValue(summary?.vms ?? []);
   const deferredTemplates = useDeferredValue(summary?.templates ?? []);
@@ -330,6 +334,16 @@ export function DashboardApp(): JSX.Element {
     setDetail(null);
     setNotice(null);
     setBusyLabel(null);
+    setShellMenuOpen(false);
+    setOpenVmMenuId(null);
+  }
+
+  async function handleLogout(): Promise<void> {
+    try {
+      await postJson<AuthStatus>("/api/auth/logout", {});
+    } finally {
+      requireLogin();
+    }
   }
 
   async function runMutation(
@@ -421,6 +435,14 @@ export function DashboardApp(): JSX.Element {
     setSelectedVmId(vmId);
     setSidePanelCollapsed(false);
     setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+  }
+
+  function openHomepage(): void {
+    setSelectedVmId(null);
+    setSidePanelCollapsed(false);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
   }
 
   async function handleVmAction(
@@ -688,7 +710,13 @@ export function DashboardApp(): JSX.Element {
 
   return (
     <>
-      <main className="app-shell" onClick={() => setOpenVmMenuId(null)}>
+      <main
+        className="app-shell"
+        onClick={() => {
+          setOpenVmMenuId(null);
+          setShellMenuOpen(false);
+        }}
+      >
         {notice || busyLabel ? (
           <div
             className="app-shell__notice-stack"
@@ -716,96 +744,131 @@ export function DashboardApp(): JSX.Element {
           <aside className="workspace-rail">
             <div className="workspace-rail__header">
               <div className="workspace-rail__brand">
-                <p className="workspace-shell__eyebrow">Parallaize</p>
-                <div className="workspace-rail__headline">
-                  <h1 className="workspace-rail__title">
-                    {workspaceFocused ? "Workspace switcher" : "Workspaces"}
-                  </h1>
+                <div className="workspace-rail__topbar">
+                  <button
+                    className="workspace-shell__eyebrow workspace-rail__home-link"
+                    type="button"
+                    onClick={openHomepage}
+                  >
+                    Parallaize
+                  </button>
+                  <button
+                    ref={shellMenuButtonRef}
+                    className={joinClassNames(
+                      "menu-button",
+                      "workspace-rail__menu-button",
+                      shellMenuOpen ? "menu-button--open" : "",
+                    )}
+                    type="button"
+                    aria-expanded={shellMenuOpen}
+                    aria-label="Display and theme options"
+                    onClick={() => {
+                      setOpenVmMenuId(null);
+                      setShellMenuOpen((current) => !current);
+                    }}
+                  >
+                    ...
+                  </button>
+                </div>
+
+                <div className="chip-row workspace-rail__summary">
                   <span
                     className={joinClassNames(
                       "surface-pill",
                       providerReady ? "surface-pill--success" : "surface-pill--warning",
                     )}
                   >
-                    {providerReady ? "Provider ready" : "Provider blocked"}
+                    {providerReady
+                      ? `${capitalizeWord(summary.provider.kind)} ready`
+                      : `${capitalizeWord(summary.provider.kind)} blocked`}
+                  </span>
+                  <span className="surface-pill">
+                    {compactTransportLabel(summary.provider.desktopTransport)}
                   </span>
                 </div>
-                <p className="workspace-rail__copy">{summary.provider.detail}</p>
-              </div>
-
-              <div className="workspace-rail__meta">
-                <MiniStat
-                  label="Running"
-                  value={`${summary.metrics.runningVmCount}/${summary.metrics.totalVmCount}`}
-                />
-                <MiniStat label="CPU" value={String(summary.metrics.totalCpu)} />
-                <MiniStat label="RAM" value={formatRam(summary.metrics.totalRamMb)} />
               </div>
 
               <div className="chip-row workspace-rail__chips">
-                <span className="surface-pill">{summary.provider.kind}</span>
                 <span className="surface-pill">
-                  {summary.templates.length} template{summary.templates.length === 1 ? "" : "s"}
+                  {summary.metrics.runningVmCount}/{summary.metrics.totalVmCount} up
                 </span>
-                <span className="surface-pill">
-                  {runningJobCount} active job{runningJobCount === 1 ? "" : "s"}
-                </span>
+                <span className="surface-pill">{summary.metrics.totalCpu} CPU</span>
+                <span className="surface-pill">{formatRam(summary.metrics.totalRamMb)} RAM</span>
+                <span className="surface-pill">{summary.templates.length} tmpl</span>
+                {runningJobCount > 0 ? (
+                  <span className="surface-pill">
+                    {runningJobCount} job{runningJobCount === 1 ? "" : "s"}
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="workspace-rail__toolbar">
+                <button
+                  className="button button--primary button--full"
+                  type="button"
+                  onClick={() => setShowCreateDialog(true)}
+                >
+                  New VM
+                </button>
               </div>
             </div>
 
-            <div className="workspace-rail__toolbar">
-              <button
-                className="button button--primary button--full"
-                type="button"
-                onClick={() => setShowCreateDialog(true)}
-              >
-                New VM
-              </button>
-
+            <PortalPopover
+              anchorRef={shellMenuButtonRef}
+              className="workspace-rail__popover"
+              open={shellMenuOpen}
+              onClose={() => setShellMenuOpen(false)}
+            >
               {supportsLiveDesktop ? (
                 <button
                   className={joinClassNames(
-                    "button button--ghost",
-                    showLivePreviews ? "button--selected" : "",
+                    "menu-action",
+                    "menu-action--split",
+                    showLivePreviews ? "menu-action--selected" : "",
                   )}
                   type="button"
-                  onClick={() => setShowLivePreviews((current) => !current)}
-                  aria-pressed={showLivePreviews}
+                  onClick={() => {
+                    setShowLivePreviews((current) => !current);
+                    setShellMenuOpen(false);
+                  }}
                 >
-                  {showLivePreviews ? "Live previews on" : "Live previews off"}
+                  <span>Live previews</span>
+                  <span className="menu-action__state">{showLivePreviews ? "On" : "Off"}</span>
                 </button>
               ) : (
-                <span className="surface-pill">Synthetic previews</span>
+                <button className="menu-action menu-action--split" type="button" disabled>
+                  <span>Live previews</span>
+                  <span className="menu-action__state">Unavailable</span>
+                </button>
               )}
 
               <button
-                className="button button--ghost"
+                className="menu-action menu-action--split"
                 type="button"
-                onClick={() =>
-                  setThemeMode((current) => (current === "dark" ? "light" : "dark"))
-                }
+                onClick={() => {
+                  setThemeMode((current) => (current === "dark" ? "light" : "dark"));
+                  setShellMenuOpen(false);
+                }}
               >
-                {themeMode === "dark" ? "Light mode" : "Dark mode"}
+                <span>Theme</span>
+                <span className="menu-action__state">
+                  {themeMode === "dark" ? "Dark" : "Light"}
+                </span>
               </button>
 
               {authEnabled ? (
                 <button
-                  className="button button--ghost"
+                  className="menu-action"
                   type="button"
-                  onClick={() =>
-                    void (async () => {
-                      try {
-                        await postJson<AuthStatus>("/api/auth/logout", {});
-                      } finally {
-                        requireLogin();
-                      }
-                    })()
-                  }
+                  onClick={() => {
+                    setShellMenuOpen(false);
+                    void handleLogout();
+                  }}
                 >
                   Log out
                 </button>
               ) : null}
-            </div>
+            </PortalPopover>
 
             <div className="workspace-rail__list-head">
               <p className="workspace-shell__eyebrow">Workspace rail</p>
@@ -860,6 +923,8 @@ export function DashboardApp(): JSX.Element {
                   <div className="workspace-stage__placeholder">
                     <div className="workspace-stage__placeholder-block skeleton-shell" />
                   </div>
+                ) : getVmDesktopBootState(currentDetail) ? (
+                  <WorkspaceBootSurface state={getVmDesktopBootState(currentDetail)!} />
                 ) : currentDetail.vm.session?.kind === "vnc" &&
                   currentDetail.vm.session.webSocketPath ? (
                   <NoVncViewport
@@ -887,44 +952,16 @@ export function DashboardApp(): JSX.Element {
                 />
               )}
 
-              {selectedVm ? (
+              {selectedVm && sidePanelCollapsed ? (
                 <div className="workspace-stage__chrome">
-                  <div className="workspace-stage__chrome-top">
-                    <div className="workspace-stage__identity">
-                      <p className="workspace-stage__eyebrow">
-                        {currentDetail?.template?.name ?? "Loading template"}
-                      </p>
-                      <div className="workspace-stage__title-row">
-                        <h3 className="workspace-stage__title">{selectedVm.name}</h3>
-                        <StatusBadge status={selectedVm.status}>{selectedVm.status}</StatusBadge>
-                      </div>
-                      <p className="workspace-stage__copy">
-                        {formatResources(selectedVm.resources)}
-                        {currentDetail?.vm.session?.display
-                          ? ` · ${currentDetail.vm.session.display}`
-                          : ""}
-                      </p>
-                    </div>
-
-                    <div className="workspace-stage__header-actions">
-                      <button
-                        className="button button--ghost"
-                        type="button"
-                        onClick={() => {
-                          setSelectedVmId(null);
-                          setSidePanelCollapsed(false);
-                        }}
-                      >
-                        Overview
-                      </button>
-                      <button
-                        className="button button--ghost"
-                        type="button"
-                        onClick={() => setSidePanelCollapsed((current) => !current)}
-                      >
-                        {sidePanelCollapsed ? "Show inspector" : "Hide inspector"}
-                      </button>
-                    </div>
+                  <div className="workspace-stage__header-actions">
+                    <button
+                      className="button button--ghost"
+                      type="button"
+                      onClick={() => setSidePanelCollapsed(false)}
+                    >
+                      Show inspector
+                    </button>
                   </div>
                 </div>
               ) : null}
@@ -932,31 +969,32 @@ export function DashboardApp(): JSX.Element {
           </section>
 
           {selectedVm ? (
-            <WorkspaceSidepanel
-              busy={isBusy}
-              captureDraft={captureDraft}
-              collapsed={sidePanelCollapsed}
-              commandDraft={commandDraft}
-              detail={currentDetail}
-              forwardDraft={forwardDraft}
-              resourceDraft={resourceDraft}
-              summary={summary}
-              vm={selectedVm}
-              onCaptureDraftChange={setCaptureDraft}
-              onClone={handleClone}
-              onCommandDraftChange={setCommandDraft}
-              onDelete={handleDelete}
-              onForwardDraftChange={setForwardDraft}
-              onRemoveForward={handleRemoveForward}
-              onResourceDraftChange={setResourceDraft}
-              onResize={handleResize}
-              onSaveForward={handleAddForward}
-              onSnapshot={handleSnapshot}
-              onStartStop={handleVmAction}
-              onSubmitCapture={handleCaptureTemplate}
-              onSubmitCommand={handleCommand}
-              onToggleCollapsed={() => setSidePanelCollapsed((current) => !current)}
-            />
+            !sidePanelCollapsed ? (
+              <WorkspaceSidepanel
+                busy={isBusy}
+                captureDraft={captureDraft}
+                commandDraft={commandDraft}
+                detail={currentDetail}
+                forwardDraft={forwardDraft}
+                resourceDraft={resourceDraft}
+                summary={summary}
+                vm={selectedVm}
+                onCaptureDraftChange={setCaptureDraft}
+                onClone={handleClone}
+                onCommandDraftChange={setCommandDraft}
+                onDelete={handleDelete}
+                onForwardDraftChange={setForwardDraft}
+                onRemoveForward={handleRemoveForward}
+                onResourceDraftChange={setResourceDraft}
+                onResize={handleResize}
+                onSaveForward={handleAddForward}
+                onSnapshot={handleSnapshot}
+                onStartStop={handleVmAction}
+                onSubmitCapture={handleCaptureTemplate}
+                onSubmitCommand={handleCommand}
+                onToggleCollapsed={() => setSidePanelCollapsed(true)}
+              />
+            ) : null
           ) : (
             <OverviewSidepanel summary={summary} onCreate={() => setShowCreateDialog(true)} />
           )}
@@ -1121,6 +1159,7 @@ function VmTile({
   onStartStop,
   onToggleMenu,
 }: VmTileProps): JSX.Element {
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const canShowLivePreview =
     showLivePreview &&
     vm.status === "running" &&
@@ -1159,15 +1198,15 @@ function VmTile({
             <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
           </div>
 
-          <div className="vm-tile__meta">
-            <span className="mono-font">{vm.session?.display ?? "Waiting for guest VNC"}</span>
-            <span>{formatForwardCount(vm.forwardedPorts.length)}</span>
-          </div>
+        <div className="vm-tile__meta">
+          <span>{formatForwardCount(vm.forwardedPorts.length)}</span>
+        </div>
         </div>
       </button>
 
       <div className="vm-tile__menu" onClick={(event) => event.stopPropagation()}>
         <button
+          ref={menuButtonRef}
           className={joinClassNames("menu-button", menuOpen ? "menu-button--open" : "")}
           type="button"
           aria-expanded={menuOpen}
@@ -1178,7 +1217,12 @@ function VmTile({
         </button>
 
         {menuOpen ? (
-          <div className="vm-tile__popover">
+          <PortalPopover
+            anchorRef={menuButtonRef}
+            className="vm-tile__popover"
+            open={menuOpen}
+            onClose={() => onToggleMenu(vm.id)}
+          >
             <button
               className="menu-action"
               type="button"
@@ -1233,17 +1277,118 @@ function VmTile({
             >
               Delete
             </button>
-          </div>
+          </PortalPopover>
         ) : null}
       </div>
     </article>
   );
 }
 
+interface PortalPopoverProps {
+  anchorRef: { current: HTMLElement | null };
+  children: ReactNode;
+  className?: string;
+  open: boolean;
+  onClose: () => void;
+}
+
+function PortalPopover({
+  anchorRef,
+  children,
+  className,
+  open,
+  onClose,
+}: PortalPopoverProps): JSX.Element | null {
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [style, setStyle] = useState<CSSProperties | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setStyle(null);
+      return;
+    }
+
+    function updatePosition(): void {
+      const anchor = anchorRef.current;
+
+      if (!anchor) {
+        setStyle(null);
+        return;
+      }
+
+      const bounds = anchor.getBoundingClientRect();
+      setStyle({
+        position: "fixed",
+        top: bounds.bottom + 8,
+        right: Math.max(12, window.innerWidth - bounds.right),
+        zIndex: 80,
+      });
+    }
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [anchorRef, open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent): void {
+      const target = event.target;
+
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (anchorRef.current?.contains(target) || popoverRef.current?.contains(target)) {
+        return;
+      }
+
+      onClose();
+    }
+
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [anchorRef, onClose, open]);
+
+  if (!open || !style || typeof document === "undefined") {
+    return null;
+  }
+
+  return createPortal(
+    <div
+      ref={popoverRef}
+      className={joinClassNames("portal-popover", className)}
+      style={style}
+      onClick={(event) => event.stopPropagation()}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
 interface WorkspaceSidepanelProps {
   busy: boolean;
   captureDraft: CaptureDraft;
-  collapsed: boolean;
   commandDraft: string;
   detail: VmDetail | null;
   forwardDraft: ForwardDraft;
@@ -1269,7 +1414,6 @@ interface WorkspaceSidepanelProps {
 function WorkspaceSidepanel({
   busy,
   captureDraft,
-  collapsed,
   commandDraft,
   detail,
   forwardDraft,
@@ -1292,110 +1436,112 @@ function WorkspaceSidepanel({
   onToggleCollapsed,
 }: WorkspaceSidepanelProps): JSX.Element {
   return (
-    <aside
-      className={joinClassNames("workspace-sidepanel", collapsed ? "workspace-sidepanel--collapsed" : "")}
-    >
-      <button className="workspace-sidepanel__handle" type="button" onClick={onToggleCollapsed}>
-        {collapsed ? "Inspector" : "Hide inspector"}
+    <aside className="workspace-sidepanel">
+      <button
+        aria-label="Hide inspector"
+        className="workspace-sidepanel__close"
+        type="button"
+        onClick={onToggleCollapsed}
+      >
+        x
       </button>
 
-      {!collapsed ? (
-        <div className="workspace-sidepanel__scroll">
-          {!detail ? (
-            <div className="workspace-sidepanel__loading">
-              <div className="skeleton-shell workspace-sidepanel__loading-block" />
-              <div className="skeleton-shell workspace-sidepanel__loading-block" />
-              <div className="skeleton-shell workspace-sidepanel__loading-block" />
-            </div>
-          ) : (
-            <>
-              <section className="sidepanel-summary">
-                <div className="sidepanel-summary__head">
-                  <div>
-                    <p className="workspace-shell__eyebrow">Inspector</p>
-                    <h4 className="sidepanel-summary__title">{vm.name}</h4>
-                  </div>
-                  <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
+      <div className="workspace-sidepanel__scroll">
+        {!detail ? (
+          <div className="workspace-sidepanel__loading">
+            <div className="skeleton-shell workspace-sidepanel__loading-block" />
+            <div className="skeleton-shell workspace-sidepanel__loading-block" />
+            <div className="skeleton-shell workspace-sidepanel__loading-block" />
+          </div>
+        ) : (
+          <>
+            <section className="sidepanel-summary">
+              <div className="sidepanel-summary__head">
+                <div>
+                  <p className="workspace-shell__eyebrow">Inspector</p>
+                  <h4 className="sidepanel-summary__title">{vm.name}</h4>
                 </div>
+                <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
+              </div>
 
-                <div className="chip-row">
-                  <span className="surface-pill">{detail.template?.name ?? "Unlinked template"}</span>
-                  <span className="surface-pill">{providerTransportLabel(detail.provider.desktopTransport)}</span>
-                  <span className="surface-pill">{summary.provider.kind}</span>
-                </div>
-              </section>
+              <div className="chip-row">
+                <span className="surface-pill">{detail.template?.name ?? "Unlinked template"}</span>
+                <span className="surface-pill">{providerTransportLabel(detail.provider.desktopTransport)}</span>
+                <span className="surface-pill">{summary.provider.kind}</span>
+              </div>
+            </section>
 
-              <SidepanelSection title="Actions" defaultOpen>
-                <div className="action-grid">
-                  <button
-                    className="button button--secondary"
-                    type="button"
-                    onClick={() =>
-                      onStartStop(vm.id, vm.status === "running" ? "stop" : "start")
-                    }
-                    disabled={busy}
-                  >
-                    {vm.status === "running" ? "Stop" : "Start"}
-                  </button>
-                  <button
-                    className="button button--ghost"
-                    type="button"
-                    onClick={() => void onClone(vm)}
-                    disabled={busy}
-                  >
-                    Clone
-                  </button>
-                  <button
-                    className="button button--ghost"
-                    type="button"
-                    onClick={() => void onSnapshot(vm)}
-                    disabled={busy}
-                  >
-                    Snapshot
-                  </button>
-                  <button
-                    className="button button--danger"
-                    type="button"
-                    onClick={() => void onDelete(vm)}
-                    disabled={busy}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </SidepanelSection>
+            <SidepanelSection title="Actions" defaultOpen>
+              <div className="action-grid">
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={() =>
+                    onStartStop(vm.id, vm.status === "running" ? "stop" : "start")
+                  }
+                  disabled={busy}
+                >
+                  {vm.status === "running" ? "Stop" : "Start"}
+                </button>
+                <button
+                  className="button button--ghost"
+                  type="button"
+                  onClick={() => void onClone(vm)}
+                  disabled={busy}
+                >
+                  Clone
+                </button>
+                <button
+                  className="button button--ghost"
+                  type="button"
+                  onClick={() => void onSnapshot(vm)}
+                  disabled={busy}
+                >
+                  Snapshot
+                </button>
+                <button
+                  className="button button--danger"
+                  type="button"
+                  onClick={() => void onDelete(vm)}
+                  disabled={busy}
+                >
+                  Delete
+                </button>
+              </div>
+            </SidepanelSection>
 
-              <SidepanelSection title="Session" defaultOpen>
-                <div className="compact-grid">
-                  <FieldPair label="Resources" value={formatResources(vm.resources)} />
-                  <FieldPair
-                    label="Updated"
-                    value={formatTimestamp(vm.updatedAt)}
-                  />
-                  <FieldPair
-                    label="Workspace path"
-                    mono
-                    value={vm.workspacePath}
-                  />
-                  <FieldPair
-                    label="Last action"
-                    value={vm.lastAction}
-                  />
-                  <FieldPair
-                    label="Browser socket"
-                    mono
-                    value={detail.vm.session?.webSocketPath ?? "Waiting for VNC bridge"}
-                  />
-                  <FieldPair
-                    label="Guest endpoint"
-                    mono
-                    value={
-                      detail.vm.session?.host && detail.vm.session?.port
-                        ? `${detail.vm.session.host}:${detail.vm.session.port}`
-                        : "Guest endpoint pending"
-                    }
-                  />
-                </div>
-              </SidepanelSection>
+            <SidepanelSection title="Session" defaultOpen>
+              <div className="compact-grid">
+                <FieldPair label="Resources" value={formatResources(vm.resources)} />
+                <FieldPair
+                  label="Updated"
+                  value={formatTimestamp(vm.updatedAt)}
+                />
+                <FieldPair
+                  label="Workspace path"
+                  mono
+                  value={vm.workspacePath}
+                />
+                <FieldPair
+                  label="Last action"
+                  value={vm.lastAction}
+                />
+                <FieldPair
+                  label="Browser socket"
+                  mono
+                  value={detail.vm.session?.webSocketPath ?? "Waiting for VNC bridge"}
+                />
+                <FieldPair
+                  label="Guest endpoint"
+                  mono
+                  value={
+                    detail.vm.session?.host && detail.vm.session?.port
+                      ? `${detail.vm.session.host}:${detail.vm.session.port}`
+                      : "Guest endpoint pending"
+                  }
+                />
+              </div>
+            </SidepanelSection>
 
               <SidepanelSection title="Resize">
                 <form className="sidepanel-form" onSubmit={onResize}>
@@ -1673,7 +1819,12 @@ function WorkspaceSidepanel({
                       <div key={job.id} className="list-card">
                         <div className="list-card__head">
                           <strong className="mono-font">{job.kind}</strong>
-                          <span className="surface-pill">{job.status}</span>
+                          <div className="chip-row">
+                            <span className="surface-pill">{job.status}</span>
+                            {job.progressPercent !== null && job.progressPercent !== undefined ? (
+                              <span className="surface-pill">{job.progressPercent}%</span>
+                            ) : null}
+                          </div>
                         </div>
                         <p>{job.message}</p>
                         <span className="list-card__timestamp">
@@ -1717,10 +1868,9 @@ function WorkspaceSidepanel({
                   )}
                 </div>
               </SidepanelSection>
-            </>
-          )}
-        </div>
-      ) : null}
+          </>
+        )}
+      </div>
     </aside>
   );
 }
@@ -1763,6 +1913,25 @@ function EmptyWorkspaceStage({
         />
         <StageStat label="Templates" value={String(summary.templates.length)} />
         <StageStat label="Active jobs" value={String(runningJobCount)} />
+      </div>
+    </div>
+  );
+}
+
+interface WorkspaceBootSurfaceProps {
+  state: DesktopBootState;
+}
+
+function WorkspaceBootSurface({ state }: WorkspaceBootSurfaceProps): JSX.Element {
+  return (
+    <div className="workspace-boot">
+      <div className="workspace-boot__spinner" aria-hidden="true" />
+      <div className="workspace-boot__copy">
+        <span className="surface-pill surface-pill--busy">{state.label}</span>
+        <h2 className="workspace-boot__title">
+          {state.progressPercent !== null ? `${state.progressPercent}%` : state.label}
+        </h2>
+        <p className="workspace-boot__message">{state.message}</p>
       </div>
     </div>
   );
@@ -2138,6 +2307,50 @@ function toTemplatePortForward(forward: VmPortForward): TemplatePortForward {
 
 function providerTransportLabel(transport: DashboardSummary["provider"]["desktopTransport"]): string {
   return transport === "novnc" ? "Embedded noVNC bridge" : "Synthetic preview";
+}
+
+function compactTransportLabel(transport: DashboardSummary["provider"]["desktopTransport"]): string {
+  return transport === "novnc" ? "Browser VNC" : "Synthetic";
+}
+
+interface DesktopBootState {
+  label: string;
+  message: string;
+  progressPercent: number | null;
+}
+
+function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
+  const activeJob = detail.recentJobs.find(
+    (job) =>
+      (job.kind === "create" || job.kind === "clone" || job.kind === "start") &&
+      (job.status === "queued" || job.status === "running"),
+  );
+
+  if (!activeJob && detail.vm.status !== "creating") {
+    return null;
+  }
+
+  if (activeJob?.kind === "start") {
+    return {
+      label: "Booting workspace",
+      message: activeJob.message || "Starting the VM and waiting for the desktop.",
+      progressPercent: activeJob.progressPercent ?? null,
+    };
+  }
+
+  if (activeJob?.kind === "clone") {
+    return {
+      label: "Cloning workspace",
+      message: activeJob.message || "Cloning the workspace and preparing the desktop.",
+      progressPercent: activeJob.progressPercent ?? null,
+    };
+  }
+
+  return {
+    label: "Creating workspace",
+    message: activeJob?.message || "Provisioning the VM and waiting for the desktop.",
+    progressPercent: activeJob?.progressPercent ?? null,
+  };
 }
 
 function desktopFallbackBadge(detail: VmDetail): string {
