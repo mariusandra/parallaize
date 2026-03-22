@@ -40,6 +40,15 @@ import type {
   VmPortForward,
   VmStatus,
 } from "../../../packages/shared/src/types.js";
+import {
+  applyViewportBoundsToResolution,
+  emptyResolutionRequestQueue,
+  emptyViewportBounds,
+  enqueueResolutionRequest,
+  resolveResolutionRequest,
+  type ResolutionRequest,
+  type ViewportBounds,
+} from "./desktopResolution.js";
 import { NoVncViewport } from "./NoVncViewport.js";
 
 interface CreateDraft {
@@ -103,6 +112,23 @@ interface DesktopResolutionState {
   remoteWidth: number | null;
 }
 
+interface PendingManualResolutionSync {
+  token: number;
+  vmId: string;
+}
+
+interface DesktopResolutionTarget {
+  height: number;
+  key: string;
+  vmId: string;
+  width: number;
+}
+
+interface ResolutionRetryState {
+  attempts: number;
+  key: string;
+}
+
 const emptyCreateDraft: CreateDraft = {
   templateId: "",
   name: "",
@@ -157,6 +183,13 @@ const desktopFixedWidthMin = 640;
 const desktopFixedWidthMax = 3840;
 const desktopFixedHeightMin = 480;
 const desktopFixedHeightMax = 2160;
+const guestDisplayWidthMin = 320;
+const guestDisplayWidthMax = 8192;
+const guestDisplayWidthStep = 8;
+const guestDisplayHeightMin = 200;
+const guestDisplayHeightMax = 8192;
+const desktopResolutionRetryDelayMs = 900;
+const desktopResolutionRetryMaxAttempts = 2;
 const desktopResolutionByVmStorageKey = "parallaize.desktop-resolution-by-vm";
 const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
@@ -229,8 +262,21 @@ export function DashboardApp(): JSX.Element {
   const railResizeRef = useRef<{ panelLeft: number } | null>(null);
   const sidepanelRef = useRef<HTMLElement | null>(null);
   const sidepanelResizeRef = useRef<{ panelRight: number } | null>(null);
+  const stageViewportShellRef = useRef<HTMLDivElement | null>(null);
+  const stageViewportFrameRef = useRef<HTMLDivElement | null>(null);
   const lastResolutionRequestKeyRef = useRef<string | null>(null);
   const resolutionRequestSequenceRef = useRef(0);
+  const resolutionRequestQueueRef = useRef(emptyResolutionRequestQueue);
+  const currentResolutionTargetRef = useRef<DesktopResolutionTarget | null>(null);
+  const currentRemoteResolutionKeyRef = useRef<string | null>(null);
+  const resolutionRetryStateRef = useRef<ResolutionRetryState | null>(null);
+  const resolutionRetryTimerRef = useRef<number | null>(null);
+  const [availableViewportBounds, setAvailableViewportBounds] =
+    useState<ViewportBounds>(emptyViewportBounds);
+  const [observedViewportBounds, setObservedViewportBounds] =
+    useState<ViewportBounds>(emptyViewportBounds);
+  const [pendingManualResolutionSync, setPendingManualResolutionSync] =
+    useState<PendingManualResolutionSync | null>(null);
 
   const deferredVms = useDeferredValue(summary?.vms ?? []);
   const deferredTemplates = useDeferredValue(summary?.templates ?? []);
@@ -274,13 +320,61 @@ export function DashboardApp(): JSX.Element {
     viewportWidth,
   );
   const sidepanelStyle = compactSidepanelLayout ? undefined : { width: sidepanelWidth };
+  const viewportFrameBounds =
+    desktopResolutionMode === "viewport" &&
+    availableViewportBounds.width &&
+    availableViewportBounds.height
+      ? normalizeGuestDisplayResolution(
+          availableViewportBounds.width,
+          availableViewportBounds.height,
+        )
+      : null;
   const stageViewportFrameStyle =
     desktopResolutionMode === "fixed"
       ? ({
           width: `${appliedDesktopWidth}px`,
           height: `${appliedDesktopHeight}px`,
         } satisfies CSSProperties)
+      : viewportFrameBounds
+        ? ({
+            width: `${viewportFrameBounds.width}px`,
+            height: `${viewportFrameBounds.height}px`,
+          } satisfies CSSProperties)
       : undefined;
+  const effectiveDesktopResolution = applyViewportBoundsToResolution(
+    desktopResolution,
+    observedViewportBounds,
+  );
+  const desiredDesktopResolutionTarget =
+    liveResolutionVmId &&
+    (desktopResolutionMode === "fixed" ||
+      (effectiveDesktopResolution.clientWidth && effectiveDesktopResolution.clientHeight))
+      ? buildDesktopResolutionTarget(
+          liveResolutionVmId,
+          desktopResolutionMode === "fixed"
+            ? appliedDesktopWidth
+            : scaleViewportResolutionValue(
+                effectiveDesktopResolution.clientWidth,
+                appliedDesktopViewportScale,
+              ) ?? 0,
+          desktopResolutionMode === "fixed"
+            ? appliedDesktopHeight
+            : scaleViewportResolutionValue(
+                effectiveDesktopResolution.clientHeight,
+                appliedDesktopViewportScale,
+              ) ?? 0,
+        )
+      : null;
+  const currentRemoteResolutionKey =
+    liveResolutionVmId &&
+    effectiveDesktopResolution.remoteWidth &&
+    effectiveDesktopResolution.remoteHeight
+      ? buildDesktopResolutionRequestKey(
+          liveResolutionVmId,
+          effectiveDesktopResolution.remoteWidth,
+          effectiveDesktopResolution.remoteHeight,
+        )
+      : null;
   const workspaceShellStyle = wideShellLayout
     ? ({
         gridTemplateColumns: `${railWidth}px minmax(0, 1fr) auto`,
@@ -520,12 +614,125 @@ export function DashboardApp(): JSX.Element {
       !currentDetail.vm.session.webSocketPath
     ) {
       setDesktopResolution(emptyResolutionState);
+      setAvailableViewportBounds(emptyViewportBounds);
+      setObservedViewportBounds(emptyViewportBounds);
     }
   }, [currentDetail?.vm.id, currentDetail?.vm.session?.kind, currentDetail?.vm.session?.webSocketPath]);
 
   useEffect(() => {
+    clearResolutionRetryTimer();
     lastResolutionRequestKeyRef.current = null;
+    resolutionRequestQueueRef.current = emptyResolutionRequestQueue;
+    currentResolutionTargetRef.current = null;
+    currentRemoteResolutionKeyRef.current = null;
+    resolutionRetryStateRef.current = null;
+    setPendingManualResolutionSync(null);
   }, [currentDetail?.vm.id]);
+
+  useEffect(() => {
+    const shellNode = stageViewportShellRef.current;
+
+    if (!shellNode) {
+      setAvailableViewportBounds(emptyViewportBounds);
+      return;
+    }
+
+    const observedShellNode: HTMLDivElement = shellNode;
+
+    function reportAvailableBounds(): void {
+      const bounds = observedShellNode.getBoundingClientRect();
+      setAvailableViewportBounds({
+        height: bounds.height > 0 ? Math.round(bounds.height) : null,
+        width: bounds.width > 0 ? Math.round(bounds.width) : null,
+      });
+    }
+
+    reportAvailableBounds();
+
+    const observer = new ResizeObserver(() => {
+      reportAvailableBounds();
+    });
+    observer.observe(observedShellNode);
+
+    return () => {
+      observer.disconnect();
+      setAvailableViewportBounds(emptyViewportBounds);
+    };
+  }, [
+    currentDetail?.vm.id,
+    currentDetail?.vm.session?.kind,
+    currentDetail?.vm.session?.webSocketPath,
+  ]);
+
+  useEffect(() => {
+    const frameNode = stageViewportFrameRef.current;
+
+    if (!frameNode) {
+      setObservedViewportBounds(emptyViewportBounds);
+      return;
+    }
+
+    const observedFrameNode: HTMLDivElement = frameNode;
+
+    function reportBounds(): void {
+      const bounds = observedFrameNode.getBoundingClientRect();
+      setObservedViewportBounds({
+        height: bounds.height > 0 ? Math.round(bounds.height) : null,
+        width: bounds.width > 0 ? Math.round(bounds.width) : null,
+      });
+    }
+
+    reportBounds();
+
+    const observer = new ResizeObserver(() => {
+      reportBounds();
+    });
+    observer.observe(observedFrameNode);
+
+    return () => {
+      observer.disconnect();
+      setObservedViewportBounds(emptyViewportBounds);
+    };
+  }, [
+    currentDetail?.vm.id,
+    currentDetail?.vm.session?.kind,
+    currentDetail?.vm.session?.webSocketPath,
+    desktopResolutionMode,
+  ]);
+
+  useEffect(() => {
+    currentResolutionTargetRef.current = desiredDesktopResolutionTarget;
+    currentRemoteResolutionKeyRef.current = currentRemoteResolutionKey;
+
+    if (!desiredDesktopResolutionTarget) {
+      clearResolutionRetryTimer();
+      resolutionRetryStateRef.current = null;
+      return;
+    }
+
+    if (currentRemoteResolutionKey === desiredDesktopResolutionTarget.key) {
+      clearResolutionRetryTimer();
+      resolutionRetryStateRef.current = {
+        attempts: 0,
+        key: desiredDesktopResolutionTarget.key,
+      };
+      return;
+    }
+
+    if (resolutionRetryStateRef.current?.key !== desiredDesktopResolutionTarget.key) {
+      clearResolutionRetryTimer();
+      resolutionRetryStateRef.current = {
+        attempts: 0,
+        key: desiredDesktopResolutionTarget.key,
+      };
+    }
+  }, [currentRemoteResolutionKey, desiredDesktopResolutionTarget?.key]);
+
+  useEffect(() => {
+    return () => {
+      clearResolutionRetryTimer();
+    };
+  }, []);
 
   useEffect(() => {
     setResolutionDraft(
@@ -545,7 +752,7 @@ export function DashboardApp(): JSX.Element {
   ]);
 
   useEffect(() => {
-    if (!liveResolutionVmId) {
+    if (!desiredDesktopResolutionTarget) {
       return;
     }
 
@@ -556,40 +763,33 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
-    const targetWidth =
-      desktopResolutionMode === "fixed"
-        ? appliedDesktopWidth
-        : scaleViewportResolutionValue(
-            desktopResolution.clientWidth,
-            appliedDesktopViewportScale,
-          );
-    const targetHeight =
-      desktopResolutionMode === "fixed"
-        ? appliedDesktopHeight
-        : scaleViewportResolutionValue(
-            desktopResolution.clientHeight,
-            appliedDesktopViewportScale,
-          );
-
-    if (!targetWidth || !targetHeight) {
-      return;
-    }
-
+    const manualResolutionSyncForVm =
+      pendingManualResolutionSync?.vmId === desiredDesktopResolutionTarget.vmId
+        ? pendingManualResolutionSync
+        : null;
     const timeout = window.setTimeout(() => {
-      void syncVmResolution(liveResolutionVmId, targetWidth, targetHeight, true);
-    }, desktopResolutionMode === "viewport" ? 220 : 0);
+      syncVmResolution(
+        desiredDesktopResolutionTarget.vmId,
+        desiredDesktopResolutionTarget.width,
+        desiredDesktopResolutionTarget.height,
+        manualResolutionSyncForVm === null,
+      );
+
+      if (manualResolutionSyncForVm) {
+        setPendingManualResolutionSync((current) =>
+          current?.token === manualResolutionSyncForVm.token ? null : current,
+        );
+      }
+    }, manualResolutionSyncForVm ? 0 : desktopResolutionMode === "viewport" ? 220 : 0);
 
     return () => {
       window.clearTimeout(timeout);
     };
   }, [
-    appliedDesktopHeight,
-    appliedDesktopViewportScale,
-    appliedDesktopWidth,
-    desktopResolution.clientHeight,
-    desktopResolution.clientWidth,
     desktopResolutionMode,
-    liveResolutionVmId,
+    desiredDesktopResolutionTarget?.key,
+    pendingManualResolutionSync?.token,
+    pendingManualResolutionSync?.vmId,
     railResizeActive,
     sidepanelResizeActive,
   ]);
@@ -1051,42 +1251,147 @@ export function DashboardApp(): JSX.Element {
     );
   }
 
-  async function syncVmResolution(
+  function clearResolutionRetryTimer(): void {
+    if (resolutionRetryTimerRef.current !== null) {
+      window.clearTimeout(resolutionRetryTimerRef.current);
+      resolutionRetryTimerRef.current = null;
+    }
+  }
+
+  function scheduleResolutionRetry(request: ResolutionRequest): void {
+    const currentTarget = currentResolutionTargetRef.current;
+
+    if (!currentTarget || currentTarget.key !== request.key) {
+      return;
+    }
+
+    if (currentRemoteResolutionKeyRef.current === request.key) {
+      return;
+    }
+
+    const attempts =
+      resolutionRetryStateRef.current?.key === request.key
+        ? resolutionRetryStateRef.current.attempts
+        : 0;
+
+    if (attempts >= desktopResolutionRetryMaxAttempts) {
+      return;
+    }
+
+    clearResolutionRetryTimer();
+    resolutionRetryStateRef.current = {
+      attempts: attempts + 1,
+      key: request.key,
+    };
+    resolutionRetryTimerRef.current = window.setTimeout(() => {
+      resolutionRetryTimerRef.current = null;
+
+      if (currentResolutionTargetRef.current?.key !== request.key) {
+        return;
+      }
+
+      if (currentRemoteResolutionKeyRef.current === request.key) {
+        return;
+      }
+
+      lastResolutionRequestKeyRef.current = null;
+      syncVmResolution(request.vmId, request.width, request.height, request.silent);
+    }, desktopResolutionRetryDelayMs);
+  }
+
+  function startResolutionRequest(request: ResolutionRequest): void {
+    void (async () => {
+      try {
+        await postJson(`/api/vms/${request.vmId}/resolution`, {
+          height: request.height,
+          width: request.width,
+        } satisfies SetVmResolutionInput);
+      } catch (error) {
+        if (
+          resolutionRequestQueueRef.current.inFlight?.requestId !== request.requestId ||
+          request.silent
+        ) {
+          return;
+        }
+
+        setNotice({
+          tone: "error",
+          message: errorMessage(error),
+        });
+      } finally {
+        const { nextQueue, requestToStart } = resolveResolutionRequest(
+          resolutionRequestQueueRef.current,
+          request.requestId,
+        );
+        resolutionRequestQueueRef.current = nextQueue;
+
+        if (requestToStart) {
+          void startResolutionRequest(requestToStart);
+          return;
+        }
+
+        scheduleResolutionRetry(request);
+      }
+    })();
+  }
+
+  function syncVmResolution(
     vmId: string,
     width: number,
     height: number,
     silent: boolean,
-  ): Promise<void> {
-    const payload: SetVmResolutionInput = {
-      width: Math.max(1, Math.round(width)),
-      height: Math.max(1, Math.round(height)),
-    };
+  ): void {
+    clearResolutionRetryTimer();
+
+    const payload = normalizeGuestDisplayResolution(width, height);
     const requestKey = buildDesktopResolutionRequestKey(
       vmId,
       payload.width,
       payload.height,
     );
 
-    if (lastResolutionRequestKeyRef.current === requestKey) {
+    if (
+      lastResolutionRequestKeyRef.current === requestKey &&
+      resolutionRequestQueueRef.current.inFlight === null &&
+      resolutionRequestQueueRef.current.queued === null
+    ) {
+      return;
+    }
+
+    const requestId = resolutionRequestSequenceRef.current + 1;
+    resolutionRequestSequenceRef.current = requestId;
+    const request: ResolutionRequest = {
+      height: payload.height,
+      key: requestKey,
+      requestId,
+      silent,
+      vmId,
+      width: payload.width,
+    };
+    const { nextQueue, requestToStart } = enqueueResolutionRequest(
+      resolutionRequestQueueRef.current,
+      request,
+    );
+    resolutionRequestQueueRef.current = nextQueue;
+
+    if (!requestToStart && nextQueue.queued?.key !== requestKey) {
       return;
     }
 
     lastResolutionRequestKeyRef.current = requestKey;
-    const requestId = resolutionRequestSequenceRef.current + 1;
-    resolutionRequestSequenceRef.current = requestId;
 
-    try {
-      await postJson(`/api/vms/${vmId}/resolution`, payload);
-    } catch (error) {
-      if (requestId !== resolutionRequestSequenceRef.current || silent) {
-        return;
-      }
-
-      setNotice({
-        tone: "error",
-        message: errorMessage(error),
-      });
+    if (requestToStart) {
+      void startResolutionRequest(requestToStart);
     }
+  }
+
+  function queueManualResolutionSync(vmId: string): void {
+    clearResolutionRetryTimer();
+    resolutionRetryStateRef.current = null;
+    setPendingManualResolutionSync((current) => ({
+      token: (current?.token ?? 0) + 1,
+      vmId,
+    }));
   }
 
   async function handleResize(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1147,14 +1452,8 @@ export function DashboardApp(): JSX.Element {
       }));
 
       lastResolutionRequestKeyRef.current = null;
-
-      if (liveResolutionVmId && desktopResolution.clientWidth && desktopResolution.clientHeight) {
-        await syncVmResolution(
-          liveResolutionVmId,
-          scaleViewportResolutionValue(desktopResolution.clientWidth, nextScale) ?? 0,
-          scaleViewportResolutionValue(desktopResolution.clientHeight, nextScale) ?? 0,
-          false,
-        );
+      if (liveResolutionVmId) {
+        queueManualResolutionSync(liveResolutionVmId);
       }
 
       return;
@@ -1173,20 +1472,26 @@ export function DashboardApp(): JSX.Element {
 
     const nextWidth = clampDesktopFixedWidth(requestedWidth);
     const nextHeight = clampDesktopFixedHeight(requestedHeight);
+    const normalizedFixedResolution = normalizeGuestDisplayResolution(nextWidth, nextHeight);
 
     setVmDesktopResolutionPreference(selectedVmId, {
       mode: "fixed",
       scale: appliedDesktopViewportScale,
-      width: nextWidth,
-      height: nextHeight,
+      width: normalizedFixedResolution.width,
+      height: normalizedFixedResolution.height,
     });
     setResolutionDraft(
-      buildResolutionDraft("fixed", appliedDesktopViewportScale, nextWidth, nextHeight),
+      buildResolutionDraft(
+        "fixed",
+        appliedDesktopViewportScale,
+        normalizedFixedResolution.width,
+        normalizedFixedResolution.height,
+      ),
     );
     lastResolutionRequestKeyRef.current = null;
 
     if (liveResolutionVmId) {
-      await syncVmResolution(liveResolutionVmId, nextWidth, nextHeight, false);
+      queueManualResolutionSync(liveResolutionVmId);
     }
   }
 
@@ -1647,14 +1952,16 @@ export function DashboardApp(): JSX.Element {
                 ) : currentDetail.vm.session?.kind === "vnc" &&
                   currentDetail.vm.session.webSocketPath ? (
                   <div
+                    ref={stageViewportShellRef}
                     className={joinClassNames(
                       "workspace-stage__viewport-shell",
                       desktopResolutionMode === "fixed"
                         ? "workspace-stage__viewport-shell--fixed"
-                        : "",
+                        : "workspace-stage__viewport-shell--viewport",
                     )}
                   >
                     <div
+                      ref={stageViewportFrameRef}
                       className={joinClassNames(
                         "workspace-stage__viewport-frame",
                         desktopResolutionMode === "fixed"
@@ -1719,7 +2026,7 @@ export function DashboardApp(): JSX.Element {
                 detail={currentDetail}
                 forwardDraft={forwardDraft}
                 resolutionDraft={resolutionDraft}
-                resolutionState={desktopResolution}
+                resolutionState={effectiveDesktopResolution}
                 resourceDraft={resourceDraft}
                 summary={summary}
                 vm={selectedVm}
@@ -3792,15 +4099,55 @@ function buildResolutionDraft(
   };
 }
 
+function normalizeGuestDisplayResolution(
+  width: number,
+  height: number,
+): SetVmResolutionInput {
+  const roundedWidth = Math.round(width);
+  const roundedHeight = Math.round(height);
+  const alignedWidth =
+    Math.round(roundedWidth / guestDisplayWidthStep) * guestDisplayWidthStep;
+
+  return {
+    width: Math.min(
+      guestDisplayWidthMax,
+      Math.max(guestDisplayWidthMin, alignedWidth),
+    ),
+    height: Math.min(
+      guestDisplayHeightMax,
+      Math.max(guestDisplayHeightMin, roundedHeight),
+    ),
+  };
+}
+
+function buildDesktopResolutionTarget(
+  vmId: string,
+  width: number,
+  height: number,
+): DesktopResolutionTarget {
+  const normalized = normalizeGuestDisplayResolution(width, height);
+
+  return {
+    height: normalized.height,
+    key: buildDesktopResolutionRequestKey(vmId, normalized.width, normalized.height),
+    vmId,
+    width: normalized.width,
+  };
+}
+
 function normalizeDesktopResolutionPreference(
   preference: Partial<DesktopResolutionPreference>,
 ): DesktopResolutionPreference {
   const mode = preference.mode === "fixed" ? "fixed" : "viewport";
+  const normalizedFixedResolution = normalizeGuestDisplayResolution(
+    clampDesktopFixedWidth(preference.width ?? desktopFixedWidthDefault),
+    clampDesktopFixedHeight(preference.height ?? desktopFixedHeightDefault),
+  );
   return {
     mode,
     scale: clampDesktopViewportScale(preference.scale ?? desktopViewportScaleDefault),
-    width: clampDesktopFixedWidth(preference.width ?? desktopFixedWidthDefault),
-    height: clampDesktopFixedHeight(preference.height ?? desktopFixedHeightDefault),
+    width: normalizedFixedResolution.width,
+    height: normalizedFixedResolution.height,
   };
 }
 
@@ -3932,15 +4279,21 @@ function formatTargetResolution(
       return "Enter width and height";
     }
 
-    return `${clampDesktopFixedWidth(width)} x ${clampDesktopFixedHeight(height)}`;
+    const normalized = normalizeGuestDisplayResolution(
+      clampDesktopFixedWidth(width),
+      clampDesktopFixedHeight(height),
+    );
+
+    return `${normalized.width} x ${normalized.height}`;
   }
 
   const scale = clampDesktopViewportScale(Number(draft.scale));
-  const width = scaleViewportResolutionValue(state.clientWidth, scale);
-  const height = scaleViewportResolutionValue(state.clientHeight, scale);
+  const rawWidth = scaleViewportResolutionValue(state.clientWidth, scale);
+  const rawHeight = scaleViewportResolutionValue(state.clientHeight, scale);
 
-  if (width !== null && height !== null) {
-    return `${width} x ${height}`;
+  if (rawWidth !== null && rawHeight !== null) {
+    const normalized = normalizeGuestDisplayResolution(rawWidth, rawHeight);
+    return `${normalized.width} x ${normalized.height}`;
   }
 
   return "Waiting for viewport";

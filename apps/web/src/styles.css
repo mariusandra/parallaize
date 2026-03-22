@@ -2350,6 +2350,12 @@ section.workspace-shell {
   min-width: 0;
 }
 
+.workspace-stage__viewport-shell--viewport {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
 .workspace-stage__viewport-shell--fixed {
   display: grid;
   place-items: center;
