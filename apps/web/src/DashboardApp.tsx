@@ -171,8 +171,12 @@ const defaultLoginDraft: LoginDraft = {
 
 const quickCommands = ["pwd", "ls -la", "pnpm build", "pnpm test", "incus list"];
 const railWidthStorageKey = "parallaize.rail-width";
+const overviewSidepanelCollapsedStorageKey = "parallaize.overview-sidepanel-collapsed";
+const railCompactWidth = 48;
+const railExpandedMinWidth = 248;
+const railCompactSnapWidth = Math.round((railCompactWidth + railExpandedMinWidth) / 2);
 const railDefaultWidth = 320;
-const railMinWidth = 248;
+const railMinWidth = railCompactWidth;
 const railMaxWidth = 420;
 const desktopViewportScaleDefault = 1;
 const desktopViewportScaleMin = 0.5;
@@ -196,9 +200,11 @@ const desktopResolutionRetryMaxAttempts = 4;
 const desktopResolutionByVmStorageKey = "parallaize.desktop-resolution-by-vm";
 const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
+const sidepanelClosedWidth = 0;
 const sidepanelDefaultWidth = 380;
 const sidepanelMinWidth = 320;
 const sidepanelMaxWidth = 560;
+const sidepanelCollapseSnapWidth = Math.round(sidepanelMinWidth / 2);
 const sidepanelCompactBreakpoint = 1120;
 
 const defaultDesktopResolutionPreference: DesktopResolutionPreference = {
@@ -224,6 +230,9 @@ export function DashboardApp(): JSX.Element {
   const [sidepanelCollapsedByVm, setSidepanelCollapsedByVm] = useState<
     Record<string, true>
   >(() => readSidepanelCollapsedByVm());
+  const [overviewSidepanelCollapsed, setOverviewSidepanelCollapsed] = useState(() =>
+    readStoredBoolean(overviewSidepanelCollapsedStorageKey, false),
+  );
   const [desktopResolutionByVm, setDesktopResolutionByVm] = useState<
     Record<string, DesktopResolutionPreference>
   >(() => readDesktopResolutionByVm());
@@ -289,8 +298,14 @@ export function DashboardApp(): JSX.Element {
     selectedVmId !== null
       ? desktopResolutionByVm[selectedVmId] ?? defaultDesktopResolutionPreference
       : defaultDesktopResolutionPreference;
+  const wideShellLayout = viewportWidth > sidepanelCompactBreakpoint;
+  const compactSidepanelLayout = viewportWidth <= sidepanelCompactBreakpoint;
   const sidePanelCollapsed =
-    selectedVmId !== null ? sidepanelCollapsedByVm[selectedVmId] === true : false;
+    selectedVmId !== null
+      ? sidepanelCollapsedByVm[selectedVmId] === true
+      : overviewSidepanelCollapsed;
+  const effectiveSidePanelCollapsed =
+    selectedVmId !== null ? sidePanelCollapsed : wideShellLayout && sidePanelCollapsed;
   const isBusy = busyLabel !== null;
   const currentDetail = selectedVm && detail?.vm.id === selectedVm.id ? detail : null;
   const liveResolutionVmId =
@@ -310,19 +325,18 @@ export function DashboardApp(): JSX.Element {
   const appliedDesktopHeight = clampDesktopFixedHeight(
     selectedDesktopResolutionPreference.height,
   );
-  const wideShellLayout = viewportWidth > sidepanelCompactBreakpoint;
-  const railWidth = clampDisplayedRailWidth(
-    railWidthPreference,
-    viewportWidth,
-    sidepanelWidthPreference,
-  );
-  const compactRail = true;
-  const compactSidepanelLayout = viewportWidth <= sidepanelCompactBreakpoint;
   const sidepanelWidth = clampDisplayedSidepanelWidth(
     sidepanelWidthPreference,
     viewportWidth,
   );
-  const sidepanelStyle = compactSidepanelLayout ? undefined : { width: sidepanelWidth };
+  const displayedSidepanelWidth = effectiveSidePanelCollapsed ? sidepanelClosedWidth : sidepanelWidth;
+  const railWidth = clampDisplayedRailWidth(
+    railWidthPreference,
+    viewportWidth,
+    displayedSidepanelWidth,
+  );
+  const compactRail = wideShellLayout && railWidth <= railCompactWidth;
+  const sidepanelStyle = compactSidepanelLayout ? undefined : { width: displayedSidepanelWidth };
   const viewportFrameBounds =
     desktopResolutionMode === "viewport" &&
     availableViewportBounds.width &&
@@ -374,7 +388,7 @@ export function DashboardApp(): JSX.Element {
       : null;
   const workspaceShellStyle = wideShellLayout
     ? ({
-        gridTemplateColumns: `${railWidth}px minmax(0, 1fr) auto`,
+        gridTemplateColumns: `${railWidth}px minmax(0, 1fr) ${displayedSidepanelWidth}px`,
       } satisfies CSSProperties)
     : undefined;
 
@@ -589,6 +603,13 @@ export function DashboardApp(): JSX.Element {
   useEffect(() => {
     writeStoredString(sidepanelWidthStorageKey, String(sidepanelWidthPreference));
   }, [sidepanelWidthPreference]);
+
+  useEffect(() => {
+    writeStoredString(
+      overviewSidepanelCollapsedStorageKey,
+      overviewSidepanelCollapsed ? "true" : "false",
+    );
+  }, [overviewSidepanelCollapsed]);
 
   useEffect(() => {
     writeStoredString(
@@ -935,9 +956,12 @@ export function DashboardApp(): JSX.Element {
         return;
       }
 
-      setSidepanelWidthPreference(
-        clampSidepanelWidthPreference(panelRight - event.clientX),
-      );
+      const nextWidth = clampSidepanelWidthPreference(panelRight - event.clientX);
+      setCurrentSidepanelCollapsed(nextWidth === sidepanelClosedWidth);
+
+      if (nextWidth > sidepanelClosedWidth) {
+        setSidepanelWidthPreference(nextWidth);
+      }
     }
 
     function handleKeyDown(event: KeyboardEvent): void {
@@ -1107,6 +1131,17 @@ export function DashboardApp(): JSX.Element {
     });
   }
 
+  function setCurrentSidepanelCollapsed(collapsed: boolean): void {
+    const activeVmId = selectedVmIdRef.current;
+
+    if (activeVmId) {
+      setVmSidepanelCollapsed(activeVmId, collapsed);
+      return;
+    }
+
+    setOverviewSidepanelCollapsed(collapsed);
+  }
+
   function setVmDesktopResolutionPreference(
     vmId: string,
     preference: DesktopResolutionPreference,
@@ -1227,13 +1262,15 @@ export function DashboardApp(): JSX.Element {
 
     switch (event.key) {
       case "ArrowLeft":
-        nextWidth = currentWidth - 16;
+        nextWidth =
+          currentWidth <= railExpandedMinWidth ? railCompactWidth : currentWidth - 16;
         break;
       case "ArrowRight":
-        nextWidth = currentWidth + 16;
+        nextWidth =
+          currentWidth <= railCompactWidth ? railExpandedMinWidth : currentWidth + 16;
         break;
       case "Home":
-        nextWidth = railMinWidth;
+        nextWidth = railCompactWidth;
         break;
       case "End":
         nextWidth = railMaxWidth;
@@ -1267,18 +1304,20 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
-    const currentWidth = sidepanelWidth;
+    const currentWidth = displayedSidepanelWidth;
     let nextWidth: number | null = null;
 
     switch (event.key) {
       case "ArrowLeft":
-        nextWidth = currentWidth + 24;
+        nextWidth =
+          currentWidth <= sidepanelClosedWidth ? sidepanelMinWidth : currentWidth + 24;
         break;
       case "ArrowRight":
-        nextWidth = currentWidth - 24;
+        nextWidth =
+          currentWidth <= sidepanelMinWidth ? sidepanelClosedWidth : currentWidth - 24;
         break;
       case "Home":
-        nextWidth = sidepanelMinWidth;
+        nextWidth = sidepanelClosedWidth;
         break;
       case "End":
         nextWidth = sidepanelMaxWidth;
@@ -1292,7 +1331,12 @@ export function DashboardApp(): JSX.Element {
     }
 
     event.preventDefault();
-    setSidepanelWidthPreference(clampSidepanelWidthPreference(nextWidth));
+    const normalizedWidth = clampSidepanelWidthPreference(nextWidth);
+    setCurrentSidepanelCollapsed(normalizedWidth === sidepanelClosedWidth);
+
+    if (normalizedWidth > sidepanelClosedWidth) {
+      setSidepanelWidthPreference(normalizedWidth);
+    }
   }
 
   async function handleVmAction(
@@ -1911,55 +1955,107 @@ export function DashboardApp(): JSX.Element {
 
             <div className="workspace-rail__header">
               <div className="workspace-rail__brand">
-                <div className="workspace-rail__topbar">
-                  <button
-                    className="workspace-shell__eyebrow workspace-rail__home-link"
-                    type="button"
-                    title={providerStatusTitle(summary.provider)}
-                    onClick={openHomepage}
-                  >
-                    <span
+                {compactRail ? (
+                  <div className="workspace-rail__compact-actions">
+                    <button
+                      className="workspace-rail__icon-button"
+                      type="button"
+                      aria-label="Home"
+                      title={`Home · ${providerStatusTitle(summary.provider)}`}
+                      onClick={openHomepage}
+                    >
+                      <span className="workspace-rail__icon-shell">
+                        <RailHomeIcon />
+                        <span
+                          className={joinClassNames(
+                            "workspace-rail__status-dot",
+                            "workspace-rail__status-dot--compact",
+                            providerStatusDotClassName(summary.provider),
+                          )}
+                          aria-hidden="true"
+                        />
+                      </span>
+                    </button>
+                    <button
+                      className="workspace-rail__icon-button"
+                      type="button"
+                      aria-label="New VM"
+                      title="New VM"
+                      onClick={() => setShowCreateDialog(true)}
+                    >
+                      <RailCreateIcon />
+                    </button>
+                    <button
+                      ref={shellMenuButtonRef}
                       className={joinClassNames(
-                        "workspace-rail__status-dot",
-                        providerStatusDotClassName(summary.provider),
+                        "workspace-rail__icon-button",
+                        "workspace-rail__menu-button",
+                        shellMenuOpen ? "workspace-rail__icon-button--open" : "",
                       )}
-                      aria-hidden="true"
+                      type="button"
+                      aria-expanded={shellMenuOpen}
+                      aria-label="Display and theme options"
+                      title="Display and theme options"
+                      onClick={() => {
+                        setOpenVmMenuId(null);
+                        setShellMenuOpen((current) => !current);
+                      }}
+                    >
+                      <RailSettingsIcon />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="workspace-rail__topbar">
+                      <button
+                        className="workspace-shell__eyebrow workspace-rail__home-link"
+                        type="button"
+                        title={providerStatusTitle(summary.provider)}
+                        onClick={openHomepage}
+                      >
+                        <span
+                          className={joinClassNames(
+                            "workspace-rail__status-dot",
+                            providerStatusDotClassName(summary.provider),
+                          )}
+                          aria-hidden="true"
+                        />
+                        <span>Parallaize</span>
+                      </button>
+                      <button
+                        ref={shellMenuButtonRef}
+                        className={joinClassNames(
+                          "menu-button",
+                          "workspace-rail__menu-button",
+                          shellMenuOpen ? "menu-button--open" : "",
+                        )}
+                        type="button"
+                        aria-expanded={shellMenuOpen}
+                        aria-label="Display and theme options"
+                        onClick={() => {
+                          setOpenVmMenuId(null);
+                          setShellMenuOpen((current) => !current);
+                        }}
+                      >
+                        ...
+                      </button>
+                    </div>
+
+                    <div className="chip-row workspace-rail__chips">
+                      <span className="surface-pill">
+                        {summary.metrics.totalCpu}/{summary.metrics.hostCpuCount} CPU
+                      </span>
+                      <span className="surface-pill">
+                        {formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
+                      </span>
+                    </div>
+
+                    <TelemetryPanel
+                      label="Host"
+                      telemetry={summary.hostTelemetry}
                     />
-                    <span>Parallaize</span>
-                  </button>
-                  <button
-                    ref={shellMenuButtonRef}
-                    className={joinClassNames(
-                      "menu-button",
-                      "workspace-rail__menu-button",
-                      shellMenuOpen ? "menu-button--open" : "",
-                    )}
-                    type="button"
-                    aria-expanded={shellMenuOpen}
-                    aria-label="Display and theme options"
-                    onClick={() => {
-                      setOpenVmMenuId(null);
-                      setShellMenuOpen((current) => !current);
-                    }}
-                  >
-                    ...
-                  </button>
-                </div>
-
-                <div className="chip-row workspace-rail__chips">
-                  <span className="surface-pill">
-                    {summary.metrics.totalCpu}/{summary.metrics.hostCpuCount} CPU
-                  </span>
-                  <span className="surface-pill">
-                    {formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
-                  </span>
-                </div>
-
-                <TelemetryPanel
-                  compact={compactRail}
-                  label="Host"
-                  telemetry={summary.hostTelemetry}
-                />
+                  </>
+                )}
               </div>
             </div>
 
@@ -2020,18 +2116,20 @@ export function DashboardApp(): JSX.Element {
               ) : null}
             </PortalPopover>
 
-            <div className="workspace-rail__list-head">
-              <p className="workspace-shell__eyebrow">
-                VMs ({summary.metrics.runningVmCount}/{summary.metrics.totalVmCount})
-              </p>
-              <button
-                className="button button--secondary workspace-rail__create-button"
-                type="button"
-                onClick={() => setShowCreateDialog(true)}
-              >
-                New VM
-              </button>
-            </div>
+            {!compactRail ? (
+              <div className="workspace-rail__list-head">
+                <p className="workspace-shell__eyebrow">
+                  VMs ({summary.metrics.runningVmCount}/{summary.metrics.totalVmCount})
+                </p>
+                <button
+                  className="button button--secondary workspace-rail__create-button"
+                  type="button"
+                  onClick={() => setShowCreateDialog(true)}
+                >
+                  New VM
+                </button>
+              </div>
+            ) : null}
 
             <div className="vm-strip">
               {deferredVms.map((vm) => (
@@ -2054,7 +2152,7 @@ export function DashboardApp(): JSX.Element {
                 />
               ))}
 
-              {deferredVms.length === 0 ? (
+              {deferredVms.length === 0 && !compactRail ? (
                 <div className="empty-state">
                   <p className="empty-state__eyebrow">No VMs yet</p>
                   <h3 className="empty-state__title">Launch a workspace to populate the rail.</h3>
@@ -2133,7 +2231,7 @@ export function DashboardApp(): JSX.Element {
                 />
               )}
 
-              {selectedVm && sidePanelCollapsed ? (
+              {selectedVm && effectiveSidePanelCollapsed ? (
                 <div className="workspace-stage__chrome">
                   <div className="workspace-stage__header-actions">
                     <button
@@ -2150,10 +2248,11 @@ export function DashboardApp(): JSX.Element {
           </section>
 
           {selectedVm ? (
-            !sidePanelCollapsed ? (
+            wideShellLayout || !effectiveSidePanelCollapsed ? (
               <WorkspaceSidepanel
                 busy={isBusy}
                 captureDraft={captureDraft}
+                collapsed={effectiveSidePanelCollapsed}
                 commandDraft={commandDraft}
                 detail={currentDetail}
                 forwardDraft={forwardDraft}
@@ -2187,23 +2286,27 @@ export function DashboardApp(): JSX.Element {
                 resizing={sidepanelResizeActive}
                 resizable={!compactSidepanelLayout}
                 style={sidepanelStyle}
-                width={sidepanelWidth}
+                width={displayedSidepanelWidth}
                 onResizeKeyDown={handleSidepanelResizeKeyDown}
                 onResizePointerDown={handleSidepanelResizeStart}
               />
             ) : null
           ) : (
-            <OverviewSidepanel
-              summary={summary}
-              onCreate={() => setShowCreateDialog(true)}
-              panelRef={sidepanelRef}
-              resizing={sidepanelResizeActive}
-              resizable={!compactSidepanelLayout}
-              style={sidepanelStyle}
-              width={sidepanelWidth}
-              onResizeKeyDown={handleSidepanelResizeKeyDown}
-              onResizePointerDown={handleSidepanelResizeStart}
-            />
+            wideShellLayout || !effectiveSidePanelCollapsed ? (
+              <OverviewSidepanel
+                collapsed={effectiveSidePanelCollapsed}
+                summary={summary}
+                onCreate={() => setShowCreateDialog(true)}
+                onToggleCollapsed={() => setOverviewSidepanelCollapsed(true)}
+                panelRef={sidepanelRef}
+                resizing={sidepanelResizeActive}
+                resizable={!compactSidepanelLayout}
+                style={sidepanelStyle}
+                width={displayedSidepanelWidth}
+                onResizeKeyDown={handleSidepanelResizeKeyDown}
+                onResizePointerDown={handleSidepanelResizeStart}
+              />
+            ) : null
           )}
         </section>
       </main>
@@ -2354,6 +2457,64 @@ interface VmTileProps {
   onToggleMenu: (vmId: string) => void;
 }
 
+function RailHomeIcon(): JSX.Element {
+  return (
+    <svg
+      aria-hidden="true"
+      className="workspace-rail__glyph"
+      fill="none"
+      viewBox="0 0 16 16"
+    >
+      <path
+        d="M3 7.25 8 3l5 4.25V13H9.75V9.75h-3.5V13H3z"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+    </svg>
+  );
+}
+
+function RailCreateIcon(): JSX.Element {
+  return (
+    <svg
+      aria-hidden="true"
+      className="workspace-rail__glyph"
+      fill="none"
+      viewBox="0 0 16 16"
+    >
+      <path
+        d="M8 3.25v9.5M3.25 8h9.5"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+function RailSettingsIcon(): JSX.Element {
+  return (
+    <svg
+      aria-hidden="true"
+      className="workspace-rail__glyph"
+      fill="none"
+      viewBox="0 0 16 16"
+    >
+      <path
+        d="M3 4.5h10M5 8h8M3 11.5h10"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.5"
+      />
+      <circle cx="6.25" cy="4.5" fill="currentColor" r="1.15" />
+      <circle cx="9.75" cy="8" fill="currentColor" r="1.15" />
+      <circle cx="5" cy="11.5" fill="currentColor" r="1.15" />
+    </svg>
+  );
+}
+
 function VmTile({
   busy,
   compact,
@@ -2376,12 +2537,54 @@ function VmTile({
     Boolean(vm.session.webSocketPath);
   const previewLabel = vmTilePreviewLabel(vm, showLivePreview);
 
+  if (compact) {
+    return (
+      <article
+        className={joinClassNames(
+          "vm-tile",
+          selected ? "vm-tile--active" : "",
+          "vm-tile--compact",
+        )}
+      >
+        <button
+          className="vm-tile__compact-trigger"
+          type="button"
+          aria-label={`Open ${vm.name}`}
+          title={`${vm.name} · ${vm.status}`}
+          onClick={() => onOpen(vm.id)}
+        >
+          <div className="vm-tile__compact-preview">
+            {canShowLivePreview && vm.session?.webSocketPath ? (
+              <NoVncViewport
+                className="vm-tile__viewport"
+                surfaceClassName="vm-tile__canvas"
+                webSocketPath={vm.session.webSocketPath}
+                viewportMode="scale"
+                viewOnly
+                showHeader={false}
+                statusMode="overlay"
+              />
+            ) : (
+              <StaticPatternPreview vm={vm} variant="tile" />
+            )}
+          </div>
+          <span
+            className={joinClassNames(
+              "vm-tile__compact-status",
+              statusClassName(vm.status),
+            )}
+            aria-hidden="true"
+          />
+        </button>
+      </article>
+    );
+  }
+
   return (
     <article
       className={joinClassNames(
         "vm-tile",
         selected ? "vm-tile--active" : "",
-        compact ? "vm-tile--compact" : "",
       )}
     >
       <button className="vm-tile__open" type="button" onClick={() => onOpen(vm.id)}>
@@ -2404,24 +2607,18 @@ function VmTile({
           )}
         </div>
 
-          <div className="vm-tile__body">
-            <div className="vm-tile__body-head">
-              <div className="vm-tile__identity">
-                <h3 className="vm-tile__title">{vm.name}</h3>
-              {!compact ? (
-                <p className="vm-tile__resources">{formatResources(vm.resources)}</p>
-              ) : null}
-              </div>
-              <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
+        <div className="vm-tile__body">
+          <div className="vm-tile__body-head">
+            <div className="vm-tile__identity">
+              <h3 className="vm-tile__title">{vm.name}</h3>
+              <p className="vm-tile__resources">{formatResources(vm.resources)}</p>
             </div>
+            <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
+          </div>
 
-            <TelemetryPanel
-              compact={compact}
-              telemetry={vm.telemetry}
-            />
+          <TelemetryPanel telemetry={vm.telemetry} />
 
-            <div className="vm-tile__meta">
-              {compact ? <span>{formatResources(vm.resources)}</span> : null}
+          <div className="vm-tile__meta">
             <span>{formatForwardCount(vm.forwardedPorts.length)}</span>
           </div>
         </div>
@@ -2659,6 +2856,7 @@ function PortalPopover({
 interface WorkspaceSidepanelProps {
   busy: boolean;
   captureDraft: CaptureDraft;
+  collapsed: boolean;
   commandDraft: string;
   detail: VmDetail | null;
   forwardDraft: ForwardDraft;
@@ -2758,7 +2956,7 @@ function SidepanelResizeHandle({
       aria-label="Resize inspector"
       aria-orientation="vertical"
       aria-valuemax={sidepanelMaxWidth}
-      aria-valuemin={sidepanelMinWidth}
+      aria-valuemin={sidepanelClosedWidth}
       aria-valuenow={width}
       className={joinClassNames(
         "workspace-sidepanel__resize-handle",
@@ -2775,6 +2973,7 @@ function SidepanelResizeHandle({
 function WorkspaceSidepanel({
   busy,
   captureDraft,
+  collapsed,
   commandDraft,
   detail,
   forwardDraft,
@@ -2816,6 +3015,7 @@ function WorkspaceSidepanel({
       ref={panelRef}
       className={joinClassNames(
         "workspace-sidepanel",
+        collapsed ? "workspace-sidepanel--collapsed" : "",
         resizing ? "workspace-sidepanel--resizing" : "",
       )}
       style={style}
@@ -2828,24 +3028,26 @@ function WorkspaceSidepanel({
         onResizePointerDown={onResizePointerDown}
       />
 
-      <button
-        aria-label="Hide inspector"
-        className="workspace-sidepanel__close"
-        type="button"
-        onClick={onToggleCollapsed}
-      >
-        x
-      </button>
+      {!collapsed ? (
+        <>
+          <button
+            aria-label="Hide inspector"
+            className="workspace-sidepanel__close"
+            type="button"
+            onClick={onToggleCollapsed}
+          >
+            x
+          </button>
 
-      <div className="workspace-sidepanel__scroll">
-        {!detail ? (
-          <div className="workspace-sidepanel__loading">
-            <div className="skeleton-shell workspace-sidepanel__loading-block" />
-            <div className="skeleton-shell workspace-sidepanel__loading-block" />
-            <div className="skeleton-shell workspace-sidepanel__loading-block" />
-          </div>
-        ) : (
-          <>
+          <div className="workspace-sidepanel__scroll">
+            {!detail ? (
+              <div className="workspace-sidepanel__loading">
+                <div className="skeleton-shell workspace-sidepanel__loading-block" />
+                <div className="skeleton-shell workspace-sidepanel__loading-block" />
+                <div className="skeleton-shell workspace-sidepanel__loading-block" />
+              </div>
+            ) : (
+              <>
             <section className="sidepanel-summary">
               <div className="sidepanel-summary__head">
                 <div>
@@ -3408,9 +3610,11 @@ function WorkspaceSidepanel({
                   )}
                 </div>
               </SidepanelSection>
-          </>
-        )}
-      </div>
+              </>
+            )}
+          </div>
+        </>
+      ) : null}
     </aside>
   );
 }
@@ -3478,7 +3682,9 @@ function WorkspaceBootSurface({ state }: WorkspaceBootSurfaceProps): JSX.Element
 }
 
 function OverviewSidepanel({
+  collapsed,
   onCreate,
+  onToggleCollapsed,
   summary,
   panelRef,
   resizable,
@@ -3488,7 +3694,9 @@ function OverviewSidepanel({
   onResizeKeyDown,
   onResizePointerDown,
 }: {
+  collapsed: boolean;
   onCreate: () => void;
+  onToggleCollapsed: () => void;
   summary: DashboardSummary;
   panelRef: RefObject<HTMLElement | null>;
   resizable: boolean;
@@ -3507,6 +3715,7 @@ function OverviewSidepanel({
       className={joinClassNames(
         "workspace-sidepanel",
         "workspace-sidepanel--overview",
+        collapsed ? "workspace-sidepanel--collapsed" : "",
         resizing ? "workspace-sidepanel--resizing" : "",
       )}
       style={style}
@@ -3519,101 +3728,116 @@ function OverviewSidepanel({
         onResizePointerDown={onResizePointerDown}
       />
 
-      <div className="workspace-sidepanel__scroll">
-        <section className="sidepanel-summary">
-          <div className="sidepanel-summary__head">
-            <div>
-              <p className="workspace-shell__eyebrow">Inspector</p>
-              <h4 className="sidepanel-summary__title">
-                {summary.vms.length > 0 ? "Fleet overview" : "No workspace selected"}
-              </h4>
-            </div>
-            <span
-              className={joinClassNames(
-                "surface-pill",
-                summary.provider.available ? "surface-pill--success" : "surface-pill--warning",
-              )}
+      {!collapsed ? (
+        <>
+          {resizable ? (
+            <button
+              aria-label="Hide inspector"
+              className="workspace-sidepanel__close"
+              type="button"
+              onClick={onToggleCollapsed}
             >
-              {summary.provider.available ? "Ready" : "Blocked"}
-            </span>
-          </div>
+              x
+            </button>
+          ) : null}
 
-          <p className="empty-copy">{summary.provider.detail}</p>
-
-          <div className="chip-row">
-            <span className="surface-pill">{summary.provider.kind}</span>
-            <span className="surface-pill">
-              {providerTransportLabel(summary.provider.desktopTransport)}
-            </span>
-            <span className="surface-pill">
-              {summary.snapshots.length} snapshot{summary.snapshots.length === 1 ? "" : "s"}
-            </span>
-          </div>
-        </section>
-
-        <SidepanelSection title="Fleet" defaultOpen>
-          <div className="compact-grid">
-            <FieldPair label="VMs" value={String(summary.metrics.totalVmCount)} />
-            <FieldPair
-              label="Running"
-              value={`${summary.metrics.runningVmCount}/${summary.metrics.totalVmCount}`}
-            />
-            <FieldPair
-              label="CPU"
-              value={formatUsageCount(summary.metrics.totalCpu, summary.metrics.hostCpuCount)}
-            />
-            <FieldPair
-              label="RAM"
-              value={formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
-            />
-            <FieldPair
-              label="Disk"
-              value={formatDiskUsage(summary.metrics.totalDiskGb, summary.metrics.hostDiskGb)}
-            />
-            <FieldPair label="Active jobs" value={String(runningJobCount)} />
-          </div>
-          <button className="button button--secondary button--full" type="button" onClick={onCreate}>
-            Launch workspace
-          </button>
-        </SidepanelSection>
-
-        <SidepanelSection title="Templates">
-          <div className="stack">
-            {summary.templates.length > 0 ? (
-              summary.templates.map((template) => (
-                <div key={template.id} className="list-card">
-                  <div className="list-card__head">
-                    <strong>{template.name}</strong>
-                    <span className="surface-pill">{formatResources(template.defaultResources)}</span>
-                  </div>
-                  <p>{template.description}</p>
+          <div className="workspace-sidepanel__scroll">
+            <section className="sidepanel-summary">
+              <div className="sidepanel-summary__head">
+                <div>
+                  <p className="workspace-shell__eyebrow">Inspector</p>
+                  <h4 className="sidepanel-summary__title">
+                    {summary.vms.length > 0 ? "Fleet overview" : "No workspace selected"}
+                  </h4>
                 </div>
-              ))
-            ) : (
-              <p className="empty-copy">No templates available yet.</p>
-            )}
-          </div>
-        </SidepanelSection>
+                <span
+                  className={joinClassNames(
+                    "surface-pill",
+                    summary.provider.available ? "surface-pill--success" : "surface-pill--warning",
+                  )}
+                >
+                  {summary.provider.available ? "Ready" : "Blocked"}
+                </span>
+              </div>
 
-        <SidepanelSection title="Recent jobs">
-          <div className="stack">
-            {recentJobs.length > 0 ? (
-              recentJobs.map((job) => (
-                <div key={job.id} className="list-card">
-                  <div className="list-card__head">
-                    <strong className="mono-font">{job.kind}</strong>
-                    <span className="surface-pill">{job.status}</span>
-                  </div>
-                  <p>{job.message}</p>
-                  <span className="list-card__timestamp">{formatTimestamp(job.updatedAt)}</span>
-                </div>
-              ))
-            ) : (
-              <p className="empty-copy">No jobs have been queued yet.</p>
-            )}
+              <p className="empty-copy">{summary.provider.detail}</p>
+
+              <div className="chip-row">
+                <span className="surface-pill">{summary.provider.kind}</span>
+                <span className="surface-pill">
+                  {providerTransportLabel(summary.provider.desktopTransport)}
+                </span>
+                <span className="surface-pill">
+                  {summary.snapshots.length} snapshot{summary.snapshots.length === 1 ? "" : "s"}
+                </span>
+              </div>
+            </section>
+
+            <SidepanelSection title="Fleet" defaultOpen>
+              <div className="compact-grid">
+                <FieldPair label="VMs" value={String(summary.metrics.totalVmCount)} />
+                <FieldPair
+                  label="Running"
+                  value={`${summary.metrics.runningVmCount}/${summary.metrics.totalVmCount}`}
+                />
+                <FieldPair
+                  label="CPU"
+                  value={formatUsageCount(summary.metrics.totalCpu, summary.metrics.hostCpuCount)}
+                />
+                <FieldPair
+                  label="RAM"
+                  value={formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
+                />
+                <FieldPair
+                  label="Disk"
+                  value={formatDiskUsage(summary.metrics.totalDiskGb, summary.metrics.hostDiskGb)}
+                />
+                <FieldPair label="Active jobs" value={String(runningJobCount)} />
+              </div>
+              <button className="button button--secondary button--full" type="button" onClick={onCreate}>
+                Launch workspace
+              </button>
+            </SidepanelSection>
+
+            <SidepanelSection title="Templates">
+              <div className="stack">
+                {summary.templates.length > 0 ? (
+                  summary.templates.map((template) => (
+                    <div key={template.id} className="list-card">
+                      <div className="list-card__head">
+                        <strong>{template.name}</strong>
+                        <span className="surface-pill">{formatResources(template.defaultResources)}</span>
+                      </div>
+                      <p>{template.description}</p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="empty-copy">No templates available yet.</p>
+                )}
+              </div>
+            </SidepanelSection>
+
+            <SidepanelSection title="Recent jobs">
+              <div className="stack">
+                {recentJobs.length > 0 ? (
+                  recentJobs.map((job) => (
+                    <div key={job.id} className="list-card">
+                      <div className="list-card__head">
+                        <strong className="mono-font">{job.kind}</strong>
+                        <span className="surface-pill">{job.status}</span>
+                      </div>
+                      <p>{job.message}</p>
+                      <span className="list-card__timestamp">{formatTimestamp(job.updatedAt)}</span>
+                    </div>
+                  ))
+                ) : (
+                  <p className="empty-copy">No jobs have been queued yet.</p>
+                )}
+              </div>
+            </SidepanelSection>
           </div>
-        </SidepanelSection>
-      </div>
+        </>
+      ) : null}
     </aside>
   );
 }
@@ -4323,7 +4547,13 @@ function buildDesktopResolutionRequestKey(
 }
 
 function clampRailWidthPreference(width: number): number {
-  return Math.min(railMaxWidth, Math.max(railMinWidth, Math.round(width)));
+  const roundedWidth = Math.round(width);
+
+  if (roundedWidth <= railCompactSnapWidth) {
+    return railCompactWidth;
+  }
+
+  return Math.min(railMaxWidth, Math.max(railExpandedMinWidth, roundedWidth));
 }
 
 function clampDisplayedRailWidth(
@@ -4331,15 +4561,19 @@ function clampDisplayedRailWidth(
   viewportWidth: number,
   sidepanelWidth: number,
 ): number {
-  return Math.min(
-    clampRailWidthPreference(width),
-    maxDisplayedRailWidth(viewportWidth, sidepanelWidth),
-  );
+  const maxWidth = maxDisplayedRailWidth(viewportWidth, sidepanelWidth);
+  const preferredWidth = clampRailWidthPreference(width);
+
+  if (preferredWidth <= railCompactWidth || maxWidth < railExpandedMinWidth) {
+    return railCompactWidth;
+  }
+
+  return Math.min(preferredWidth, maxWidth);
 }
 
 function maxDisplayedRailWidth(viewportWidth: number, sidepanelWidth: number): number {
   return Math.max(
-    railMinWidth,
+    railCompactWidth,
     Math.min(railMaxWidth, viewportWidth - Math.min(sidepanelWidth, sidepanelDefaultWidth) - 560),
   );
 }
@@ -4387,7 +4621,13 @@ function formatViewportScale(scale: number): string {
 }
 
 function clampSidepanelWidthPreference(width: number): number {
-  return Math.min(sidepanelMaxWidth, Math.max(sidepanelMinWidth, Math.round(width)));
+  const roundedWidth = Math.round(width);
+
+  if (roundedWidth <= sidepanelCollapseSnapWidth) {
+    return sidepanelClosedWidth;
+  }
+
+  return Math.min(sidepanelMaxWidth, Math.max(sidepanelMinWidth, roundedWidth));
 }
 
 function clampDisplayedSidepanelWidth(width: number, viewportWidth: number): number {
