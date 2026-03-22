@@ -29,7 +29,7 @@ import type {
   ProviderTelemetrySample,
   ProviderMutation,
 } from "./providers.js";
-import type { JsonStateStore } from "./store.js";
+import type { StateStore } from "./store.js";
 
 const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 const MAX_ACTIVITY_LINES = 8;
@@ -49,7 +49,7 @@ export class DesktopManager {
   private readonly hostDiskGb = detectHostDiskGb();
 
   constructor(
-    private readonly store: JsonStateStore,
+    private readonly store: StateStore,
     private readonly provider: DesktopProvider,
   ) {
     this.syncProviderState();

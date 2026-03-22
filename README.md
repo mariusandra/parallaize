@@ -1,6 +1,6 @@
 # Parallaize
 
-Parallaize is a server-first proof of concept for managing many isolated desktop workspaces from one browser UI. This repository now starts the control plane in real Incus VM mode by default, while still keeping a mock provider path available for fallback and tests.
+Parallaize is a server-first proof of concept for managing many isolated desktop workspaces from one browser UI. This repository now starts the control plane in real Incus VM mode by default, while still keeping a mock provider path available for fallback and tests. State can persist either to a local JSON file or to PostgreSQL, with PostgreSQL intended for deployed runs.
 
 ## What Works
 
@@ -12,15 +12,17 @@ Parallaize is a server-first proof of concept for managing many isolated desktop
 - Browser-side VNC WebSocket bridge mounted at `/api/vms/:id/vnc`
 - Configurable guest HTTP/WebSocket forwarding mounted at `/vm/:id/forwards/:forwardId/`
 - Inject commands into a selected workspace and reflect the result in the UI
-- Persist state to `data/state.json`
+- Persist state to JSON or PostgreSQL through one shared store interface
 - Server-sent event updates for dashboard refresh
 - `flox` environment with `nodejs_24`, `typescript`, `pnpm_10`, `caddy`, `incus`, `attr`, and `qemu_kvm`
 
-## What Is Still Mocked
+## Current Gaps
 
-- PostgreSQL-backed persistence
+- PostgreSQL persistence still needs more live Incus validation and migration tooling before it should replace the JSON fallback everywhere
+- Guest VNC/bootstrap steps should be codified more tightly into the documented template workflow
+- Single-admin session expiry and rotation are still basic
 
-The main remaining gaps are persistence hardening and template polish. Real Incus-backed browser VNC sessions and Caddy guest-service forwarding have now been validated against live Ubuntu desktop VMs on this host.
+Real Incus-backed browser VNC sessions and Caddy guest-service forwarding have now been validated against live Ubuntu desktop VMs on this host.
 
 ## Live Incus Smoke Test
 
@@ -188,6 +190,15 @@ flox activate -d . -- pnpm build
 flox activate -d . -- pnpm start
 ```
 
+If you want PostgreSQL persistence instead of the JSON fallback, start the bundled database first and set a database URL:
+
+```bash
+docker compose -f infra/docker-compose.postgres.yml up -d
+PARALLAIZE_PERSISTENCE=postgres \
+PARALLAIZE_DATABASE_URL=postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize \
+flox activate -d . -- pnpm start
+```
+
 4. Open `http://127.0.0.1:3000`.
 
 ## Caddy Front Door
@@ -226,7 +237,9 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 
 - `HOST`: HTTP bind host, default `0.0.0.0`
 - `PORT`: HTTP bind port, default `3000`
-- `PARALLAIZE_DATA_FILE`: JSON state path, default `data/state.json`
+- `PARALLAIZE_PERSISTENCE`: persistence backend, `json` or `postgres`; defaults to `postgres` when a database URL is set, otherwise `json`
+- `PARALLAIZE_DATABASE_URL`: PostgreSQL connection string; `DATABASE_URL` is also accepted
+- `PARALLAIZE_DATA_FILE`: JSON state path for the file-backed store, default `data/state.json`
 - `PARALLAIZE_PROVIDER`: `mock` or `incus`, default `incus` for `pnpm start`
 - `PARALLAIZE_INCUS_BIN`: Incus binary path, default `incus`
 - `PARALLAIZE_INCUS_PROJECT`: optional Incus project name
@@ -242,7 +255,7 @@ An example production env file is included at `infra/parallaize.env.example`.
 
 - `infra/systemd/parallaize.service`: control-plane unit that runs the built Node server through Flox
 - `infra/systemd/parallaize-caddy.service`: companion Caddy unit for the front door
-- `infra/docker-compose.postgres.yml`: local PostgreSQL stack for the future persistence migration
+- `infra/docker-compose.postgres.yml`: local PostgreSQL stack for the PostgreSQL-backed control-plane store
 
 ## Repo Layout
 

@@ -27,7 +27,7 @@ import { DesktopManager } from "./manager.js";
 import { VmNetworkBridge } from "./network.js";
 import { createProvider } from "./providers.js";
 import { createSeedState } from "./seed.js";
-import { JsonStateStore } from "./store.js";
+import { createStateStore } from "./store.js";
 
 const config = loadConfig();
 const provider = createProvider(config.providerKind, config.incusBinary, {
@@ -36,7 +36,14 @@ const provider = createProvider(config.providerKind, config.incusBinary, {
   guestVncPort: config.guestVncPort,
   templateCompression: config.templateCompression,
 });
-const store = new JsonStateStore(config.dataFile, () => createSeedState(provider.state));
+const store = await createStateStore(
+  {
+    kind: config.persistenceKind,
+    dataFile: config.dataFile,
+    databaseUrl: config.databaseUrl,
+  },
+  () => createSeedState(provider.state),
+);
 const manager = new DesktopManager(store, provider);
 const networkBridge = new VmNetworkBridge(manager);
 manager.start();
@@ -80,6 +87,11 @@ const server = createServer(async (request, response) => {
         data: {
           status: "ok",
           provider: manager.getProviderState(),
+          persistence: {
+            kind: config.persistenceKind,
+            databaseConfigured: Boolean(config.databaseUrl),
+            dataFile: config.persistenceKind === "json" ? config.dataFile : null,
+          },
           generatedAt: new Date().toISOString(),
         },
       });
@@ -282,7 +294,7 @@ server.on("upgrade", (request, socket, head) => {
 
 server.listen(config.port, config.host, () => {
   process.stdout.write(
-    `parallaize listening on http://${config.host}:${config.port} using ${provider.state.kind} provider\n`,
+    `parallaize listening on http://${config.host}:${config.port} using ${provider.state.kind} provider with ${config.persistenceKind} persistence\n`,
   );
   if (config.adminPassword) {
     process.stdout.write(
@@ -290,6 +302,8 @@ server.listen(config.port, config.host, () => {
     );
   }
 });
+
+registerShutdownHandlers();
 
 function handleEvents(response: ServerResponse): void {
   response.writeHead(200, {
@@ -648,4 +662,33 @@ function isBenignConnectionError(error: unknown): boolean {
     nodeError.code === "ECONNRESET" ||
     nodeError.cause?.code === "ECONNRESET"
   );
+}
+
+function registerShutdownHandlers(): void {
+  let shuttingDown = false;
+
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+
+    shuttingDown = true;
+    process.stdout.write(`received ${signal}, shutting down parallaize\n`);
+    manager.stop();
+
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+
+    await store.close();
+    process.exit(0);
+  };
+
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      void shutdown(signal);
+    });
+  }
 }

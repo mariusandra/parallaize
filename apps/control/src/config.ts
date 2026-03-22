@@ -4,10 +4,14 @@ import process from "node:process";
 import type { ProviderKind } from "../../../packages/shared/src/types.js";
 import type { IncusImageCompression } from "./providers.js";
 
+export type PersistenceKind = "json" | "postgres";
+
 export interface AppConfig {
   host: string;
   port: number;
+  persistenceKind: PersistenceKind;
   dataFile: string;
+  databaseUrl: string | null;
   providerKind: ProviderKind;
   incusBinary: string;
   incusProject: string | null;
@@ -20,13 +24,28 @@ export interface AppConfig {
 
 export function loadConfig(): AppConfig {
   const adminPassword = parseOptionalString(process.env.PARALLAIZE_ADMIN_PASSWORD);
+  const databaseUrl = parseOptionalString(
+    process.env.PARALLAIZE_DATABASE_URL ?? process.env.DATABASE_URL,
+  );
+  const persistenceKind = parsePersistenceKind(
+    process.env.PARALLAIZE_PERSISTENCE,
+    databaseUrl,
+  );
+
+  if (persistenceKind === "postgres" && !databaseUrl) {
+    throw new Error(
+      "PARALLAIZE_DATABASE_URL or DATABASE_URL is required when PostgreSQL persistence is enabled.",
+    );
+  }
 
   return {
     host: process.env.HOST ?? "0.0.0.0",
     port: parseInteger(process.env.PORT, 3000),
+    persistenceKind,
     dataFile:
       process.env.PARALLAIZE_DATA_FILE ??
       join(process.cwd(), "data", "state.json"),
+    databaseUrl,
     providerKind: parseProviderKind(process.env.PARALLAIZE_PROVIDER),
     incusBinary: process.env.PARALLAIZE_INCUS_BIN ?? "incus",
     incusProject: parseOptionalString(process.env.PARALLAIZE_INCUS_PROJECT),
@@ -40,6 +59,28 @@ export function loadConfig(): AppConfig {
 
 function parseProviderKind(value: string | undefined): ProviderKind {
   return value === "incus" ? "incus" : "mock";
+}
+
+function parsePersistenceKind(
+  value: string | undefined,
+  databaseUrl: string | null,
+): PersistenceKind {
+  const normalized = value?.trim().toLowerCase();
+
+  switch (normalized) {
+    case "json":
+      return "json";
+    case "postgres":
+    case "postgresql":
+      return "postgres";
+    case undefined:
+    case "":
+      return databaseUrl ? "postgres" : "json";
+    default:
+      throw new Error(
+        `Unsupported persistence backend "${value}". Use "json" or "postgres".`,
+      );
+  }
 }
 
 function parseOptionalString(value: string | undefined): string | null {
