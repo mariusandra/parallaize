@@ -15,6 +15,7 @@ import type {
   TemplatePortForward,
   UpdateVmForwardedPortsInput,
   VmDetail,
+  VmCommandResult,
   VmInstance,
   VmPortForward,
 } from "../../../packages/shared/src/types.js";
@@ -27,6 +28,7 @@ import type { JsonStateStore } from "./store.js";
 
 const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 const MAX_ACTIVITY_LINES = 8;
+const MAX_COMMAND_RESULTS = 6;
 const MAX_JOBS = 20;
 const QUEUED_PROGRESS_PERCENT = 6;
 const RUNNING_PROGRESS_PERCENT = 14;
@@ -423,6 +425,110 @@ export class DesktopManager {
     });
   }
 
+  launchVmFromSnapshot(vmId: string, snapshotId: string, input: CloneVmInput): VmInstance {
+    let createdVm: VmInstance | null = null;
+    let createdJob: ActionJob | null = null;
+
+    this.store.update((draft) => {
+      const source = this.requireVm(draft, vmId);
+      this.ensureActiveProvider(source);
+      const snapshot = requireVmSnapshot(draft, vmId, snapshotId);
+      const template = requireTemplate(draft, snapshot.templateId);
+      const name =
+        input.name?.trim() ||
+        `${source.name}-${slugify(snapshot.label) || "snapshot"}-${String(draft.sequence).padStart(2, "0")}`;
+
+      const vm = buildVmRecord(
+        draft,
+        template,
+        name,
+        snapshot.resources,
+        source.forwardedPorts.map(copyForwardAsTemplatePort),
+        draft.provider.kind,
+        "creating",
+      );
+      vm.activeWindow = source.activeWindow;
+      appendActivity(vm, `snapshot: ${snapshot.label}`);
+
+      const job = buildJob(
+        draft,
+        "launch-snapshot",
+        vm.id,
+        template.id,
+        `Queued snapshot launch from ${snapshot.label}`,
+      );
+
+      draft.vms.unshift(vm);
+      draft.jobs.unshift(job);
+      trimJobs(draft);
+
+      createdVm = vm;
+      createdJob = job;
+    });
+
+    this.publish();
+
+    if (!createdVm || !createdJob) {
+      throw new Error("Failed to queue snapshot launch.");
+    }
+
+    const vmRecord = createdVm as VmInstance;
+    const jobRecord = createdJob as ActionJob;
+
+    void this.runJob(jobRecord.id, async (report) => {
+      report("Preparing snapshot launch", 18);
+      await sleep(350);
+      report("Cloning snapshot", 48);
+      const detail = this.getVmDetail(vmId);
+      const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
+      const template = requireTemplate(this.store.load(), snapshot.templateId);
+
+      this.ensureActiveProvider(detail.vm);
+
+      const mutation = await this.provider.launchVmFromSnapshot(
+        snapshot,
+        vmRecord,
+        template,
+      );
+      report("Booting desktop", 86);
+
+      this.store.update((draft) => {
+        const current = this.requireVm(draft, vmRecord.id);
+        current.status = "running";
+        current.liveSince = nowIso();
+        applyProviderMutation(current, mutation);
+      });
+
+      this.publish();
+
+      return `${vmRecord.name} launched from ${snapshot.label}`;
+    });
+
+    return vmRecord;
+  }
+
+  restoreVmSnapshot(vmId: string, snapshotId: string): void {
+    this.queueVmAction(vmId, "restore-snapshot", async (vm, report) => {
+      const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
+
+      report("Preparing snapshot restore", 22);
+      await sleep(250);
+      report("Restoring VM state", 56);
+      const mutation = await this.provider.restoreVmToSnapshot(vm, snapshot);
+
+      this.store.update((draft) => {
+        const current = this.requireVm(draft, vmId);
+        current.status = vm.status === "running" ? "running" : "stopped";
+        current.liveSince = current.status === "running" ? nowIso() : null;
+        applyProviderMutation(current, mutation);
+      });
+
+      this.publish();
+
+      return `${vm.name} restored to ${snapshot.label}`;
+    });
+  }
+
   captureTemplate(vmId: string, input: CaptureTemplateInput): void {
     const captureName = input.name.trim();
     const captureDescription = input.description.trim();
@@ -743,6 +849,7 @@ function buildVmRecord(
       `template: ${template.name}`,
       `status: ${status}`,
     ],
+    commandHistory: [],
   };
 }
 
@@ -823,6 +930,15 @@ function applyProviderMutation(vm: VmInstance, mutation: ProviderMutation): void
   }
 
   appendManyActivity(vm, mutation.activity);
+
+  if (mutation.commandResult) {
+    appendCommandResult(vm, {
+      command: mutation.commandResult.command,
+      output: mutation.commandResult.output,
+      workspacePath: mutation.commandResult.workspacePath,
+      createdAt: nowIso(),
+    });
+  }
 }
 
 function appendActivity(vm: VmInstance, line: string): void {
@@ -834,6 +950,11 @@ function appendManyActivity(vm: VmInstance, lines: string[]): void {
   for (const line of lines) {
     appendActivity(vm, line);
   }
+}
+
+function appendCommandResult(vm: VmInstance, entry: VmCommandResult): void {
+  const history = [...(vm.commandHistory ?? []), entry];
+  vm.commandHistory = history.slice(-MAX_COMMAND_RESULTS);
 }
 
 function trimJobs(state: AppState): void {
@@ -878,6 +999,30 @@ function requireVm(state: AppState, vmId: string): VmInstance {
   }
 
   return vm;
+}
+
+function requireSnapshot(state: AppState, snapshotId: string): Snapshot {
+  const snapshot = state.snapshots.find((entry) => entry.id === snapshotId);
+
+  if (!snapshot) {
+    throw new Error(`Snapshot ${snapshotId} was not found.`);
+  }
+
+  return snapshot;
+}
+
+function requireVmSnapshot(
+  state: AppState,
+  vmId: string,
+  snapshotId: string,
+): Snapshot {
+  const snapshot = requireSnapshot(state, snapshotId);
+
+  if (snapshot.vmId !== vmId) {
+    throw new Error(`Snapshot ${snapshotId} does not belong to VM ${vmId}.`);
+  }
+
+  return snapshot;
 }
 
 function validateResources(resources: CreateVmInput["resources"]): void {

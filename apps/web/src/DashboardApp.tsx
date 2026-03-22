@@ -8,7 +8,10 @@ import {
   type ChangeEvent,
   type FormEvent,
   type JSX,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
 
@@ -26,6 +29,8 @@ import type {
   EnvironmentTemplate,
   InjectCommandInput,
   ResizeVmInput,
+  Snapshot,
+  SnapshotLaunchInput,
   SnapshotInput,
   TemplatePortForward,
   VmDetail,
@@ -73,6 +78,7 @@ interface LoginDraft {
 }
 
 type ThemeMode = "light" | "dark";
+type RailDensityMode = "default" | "compact";
 
 const emptyCreateDraft: CreateDraft = {
   templateId: "",
@@ -107,6 +113,17 @@ const defaultLoginDraft: LoginDraft = {
 };
 
 const quickCommands = ["pwd", "ls -la", "pnpm build", "pnpm test", "incus list"];
+const railWidthStorageKey = "parallaize.rail-width";
+const railDensityStorageKey = "parallaize.rail-density";
+const railDefaultWidth = 320;
+const railMinWidth = 248;
+const railMaxWidth = 420;
+const railCompactThreshold = 292;
+const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
+const sidepanelDefaultWidth = 380;
+const sidepanelMinWidth = 320;
+const sidepanelMaxWidth = 560;
+const sidepanelCompactBreakpoint = 1120;
 
 export function DashboardApp(): JSX.Element {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -125,16 +142,34 @@ export function DashboardApp(): JSX.Element {
   const [openVmMenuId, setOpenVmMenuId] = useState<string | null>(null);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
+  const [railDensityMode, setRailDensityMode] = useState<RailDensityMode>(() =>
+    readRailDensityMode(),
+  );
   const [showLivePreviews, setShowLivePreviews] = useState(() =>
     readStoredBoolean("parallaize.live-previews", true),
+  );
+  const [viewportWidth, setViewportWidth] = useState(() => readViewportWidth());
+  const [railWidthPreference, setRailWidthPreference] = useState(() =>
+    clampRailWidthPreference(readStoredNumber(railWidthStorageKey) ?? railDefaultWidth),
+  );
+  const [sidepanelWidthPreference, setSidepanelWidthPreference] = useState(() =>
+    clampSidepanelWidthPreference(
+      readStoredNumber(sidepanelWidthStorageKey) ?? sidepanelDefaultWidth,
+    ),
   );
   const [authState, setAuthState] = useState<"checking" | "ready" | "required">("checking");
   const [authEnabled, setAuthEnabled] = useState(false);
   const [loginDraft, setLoginDraft] = useState<LoginDraft>(defaultLoginDraft);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [railResizeActive, setRailResizeActive] = useState(false);
+  const [sidepanelResizeActive, setSidepanelResizeActive] = useState(false);
   const selectedVmIdRef = useRef<string | null>(null);
   const shellMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const railRef = useRef<HTMLElement | null>(null);
+  const railResizeRef = useRef<{ panelLeft: number } | null>(null);
+  const sidepanelRef = useRef<HTMLElement | null>(null);
+  const sidepanelResizeRef = useRef<{ panelRight: number } | null>(null);
 
   const deferredVms = useDeferredValue(summary?.vms ?? []);
   const deferredTemplates = useDeferredValue(summary?.templates ?? []);
@@ -144,10 +179,39 @@ export function DashboardApp(): JSX.Element {
   const currentDetail = selectedVm && detail?.vm.id === selectedVm.id ? detail : null;
   const providerReady = summary?.provider.available ?? false;
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
+  const wideShellLayout = viewportWidth > sidepanelCompactBreakpoint;
+  const railWidth = clampDisplayedRailWidth(
+    railWidthPreference,
+    viewportWidth,
+    sidepanelWidthPreference,
+  );
+  const compactRail = railDensityMode === "compact" || railWidth <= railCompactThreshold;
+  const compactSidepanelLayout = viewportWidth <= sidepanelCompactBreakpoint;
+  const sidepanelWidth = clampDisplayedSidepanelWidth(
+    sidepanelWidthPreference,
+    viewportWidth,
+  );
+  const sidepanelStyle = compactSidepanelLayout ? undefined : { width: sidepanelWidth };
+  const workspaceShellStyle = wideShellLayout
+    ? ({
+        gridTemplateColumns: `${railWidth}px minmax(0, 1fr) auto`,
+      } satisfies CSSProperties)
+    : undefined;
 
   useEffect(() => {
     selectedVmIdRef.current = selectedVmId;
   }, [selectedVmId]);
+
+  useEffect(() => {
+    function handleViewportResize(): void {
+      setViewportWidth(readViewportWidth());
+    }
+
+    window.addEventListener("resize", handleViewportResize);
+    return () => {
+      window.removeEventListener("resize", handleViewportResize);
+    };
+  }, []);
 
   useEffect(() => {
     const vmId = new URL(window.location.href).searchParams.get("vm");
@@ -315,6 +379,118 @@ export function DashboardApp(): JSX.Element {
     );
   }, [showLivePreviews]);
 
+  useEffect(() => {
+    writeStoredString(railWidthStorageKey, String(railWidthPreference));
+  }, [railWidthPreference]);
+
+  useEffect(() => {
+    writeStoredString(railDensityStorageKey, railDensityMode);
+  }, [railDensityMode]);
+
+  useEffect(() => {
+    writeStoredString(sidepanelWidthStorageKey, String(sidepanelWidthPreference));
+  }, [sidepanelWidthPreference]);
+
+  useEffect(() => {
+    if (!railResizeActive) {
+      return;
+    }
+
+    function stopResize(): void {
+      railResizeRef.current = null;
+      setRailResizeActive(false);
+    }
+
+    function handlePointerMove(event: PointerEvent): void {
+      const panelLeft = railResizeRef.current?.panelLeft;
+
+      if (panelLeft === undefined) {
+        return;
+      }
+
+      setRailWidthPreference(
+        clampRailWidthPreference(event.clientX - panelLeft),
+      );
+    }
+
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        stopResize();
+      }
+    }
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("blur", stopResize);
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", stopResize);
+    document.addEventListener("pointercancel", stopResize);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("blur", stopResize);
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", stopResize);
+      document.removeEventListener("pointercancel", stopResize);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [railResizeActive]);
+
+  useEffect(() => {
+    if (!sidepanelResizeActive) {
+      return;
+    }
+
+    function stopResize(): void {
+      sidepanelResizeRef.current = null;
+      setSidepanelResizeActive(false);
+    }
+
+    function handlePointerMove(event: PointerEvent): void {
+      const panelRight = sidepanelResizeRef.current?.panelRight;
+
+      if (panelRight === undefined) {
+        return;
+      }
+
+      setSidepanelWidthPreference(
+        clampSidepanelWidthPreference(panelRight - event.clientX),
+      );
+    }
+
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        stopResize();
+      }
+    }
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("blur", stopResize);
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", stopResize);
+    document.addEventListener("pointercancel", stopResize);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("blur", stopResize);
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", stopResize);
+      document.removeEventListener("pointercancel", stopResize);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [sidepanelResizeActive]);
+
   async function refreshSummary(): Promise<DashboardSummary> {
     const nextSummary = await fetchJson<DashboardSummary>("/api/summary");
     startTransition(() => {
@@ -443,6 +619,100 @@ export function DashboardApp(): JSX.Element {
     setSidePanelCollapsed(false);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
+  }
+
+  function handleRailResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (!wideShellLayout || event.button !== 0) {
+      return;
+    }
+
+    const panelLeft = railRef.current?.getBoundingClientRect().left;
+
+    if (panelLeft === undefined) {
+      return;
+    }
+
+    event.preventDefault();
+    railResizeRef.current = { panelLeft };
+    setRailResizeActive(true);
+  }
+
+  function handleRailResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    if (!wideShellLayout) {
+      return;
+    }
+
+    const currentWidth = railWidth;
+    let nextWidth: number | null = null;
+
+    switch (event.key) {
+      case "ArrowLeft":
+        nextWidth = currentWidth - 16;
+        break;
+      case "ArrowRight":
+        nextWidth = currentWidth + 16;
+        break;
+      case "Home":
+        nextWidth = railMinWidth;
+        break;
+      case "End":
+        nextWidth = railMaxWidth;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    setRailWidthPreference(clampRailWidthPreference(nextWidth));
+  }
+
+  function handleSidepanelResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (compactSidepanelLayout || event.button !== 0) {
+      return;
+    }
+
+    const panelRight = sidepanelRef.current?.getBoundingClientRect().right;
+
+    if (panelRight === undefined) {
+      return;
+    }
+
+    event.preventDefault();
+    sidepanelResizeRef.current = { panelRight };
+    setSidepanelResizeActive(true);
+  }
+
+  function handleSidepanelResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    if (compactSidepanelLayout) {
+      return;
+    }
+
+    const currentWidth = sidepanelWidth;
+    let nextWidth: number | null = null;
+
+    switch (event.key) {
+      case "ArrowLeft":
+        nextWidth = currentWidth + 24;
+        break;
+      case "ArrowRight":
+        nextWidth = currentWidth - 24;
+        break;
+      case "Home":
+        nextWidth = sidepanelMinWidth;
+        break;
+      case "End":
+        nextWidth = sidepanelMaxWidth;
+        break;
+      default:
+        break;
+    }
+
+    if (nextWidth === null) {
+      return;
+    }
+
+    event.preventDefault();
+    setSidepanelWidthPreference(clampSidepanelWidthPreference(nextWidth));
   }
 
   async function handleVmAction(
@@ -578,6 +848,62 @@ export function DashboardApp(): JSX.Element {
         await refreshDetail(detail.vm.id);
       },
       `Queued command for ${detail.vm.name}.`,
+    );
+  }
+
+  async function handleLaunchFromSnapshot(
+    vm: VmInstance,
+    snapshot: Snapshot,
+  ): Promise<void> {
+    const name = window.prompt(
+      "VM name",
+      defaultSnapshotLaunchName(vm, snapshot),
+    )?.trim();
+
+    if (!name) {
+      return;
+    }
+
+    const payload: SnapshotLaunchInput = {
+      name,
+    };
+
+    await runMutation(
+      `Launching ${name} from ${snapshot.label}`,
+      async () => {
+        const createdVm = await postJson<VmInstance>(
+          `/api/vms/${vm.id}/snapshots/${snapshot.id}/launch`,
+          payload,
+        );
+        setSelectedVmId(createdVm.id);
+        setSidePanelCollapsed(false);
+        await refreshSummary();
+        await refreshDetail(createdVm.id);
+      },
+      `Queued ${name} from ${snapshot.label}.`,
+    );
+  }
+
+  async function handleRestoreSnapshot(
+    vm: VmInstance,
+    snapshot: Snapshot,
+  ): Promise<void> {
+    const confirmed = window.confirm(
+      `Reset ${vm.name} to snapshot "${snapshot.label}"?${vm.status === "running" ? " The VM will restart." : ""}`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    await runMutation(
+      `Restoring ${vm.name} to ${snapshot.label}`,
+      async () => {
+        await postJson(`/api/vms/${vm.id}/snapshots/${snapshot.id}/restore`, {});
+        await refreshSummary();
+        await refreshDetail(vm.id);
+      },
+      `Queued restore to ${snapshot.label}.`,
     );
   }
 
@@ -737,11 +1063,27 @@ export function DashboardApp(): JSX.Element {
         ) : null}
 
         <section
+          style={workspaceShellStyle}
           className="workspace-shell"
           data-focused={workspaceFocused ? "true" : "false"}
           onClick={(event) => event.stopPropagation()}
         >
-          <aside className="workspace-rail">
+          <aside
+            ref={railRef}
+            className={joinClassNames(
+              "workspace-rail",
+              compactRail ? "workspace-rail--compact" : "",
+              railResizeActive ? "workspace-rail--resizing" : "",
+            )}
+          >
+            <RailResizeHandle
+              resizable={wideShellLayout}
+              resizing={railResizeActive}
+              width={railWidth}
+              onResizeKeyDown={handleRailResizeKeyDown}
+              onResizePointerDown={handleRailResizeStart}
+            />
+
             <div className="workspace-rail__header">
               <div className="workspace-rail__brand">
                 <div className="workspace-rail__topbar">
@@ -782,9 +1124,11 @@ export function DashboardApp(): JSX.Element {
                       ? `${capitalizeWord(summary.provider.kind)} ready`
                       : `${capitalizeWord(summary.provider.kind)} blocked`}
                   </span>
-                  <span className="surface-pill">
-                    {compactTransportLabel(summary.provider.desktopTransport)}
-                  </span>
+                  {!compactRail ? (
+                    <span className="surface-pill">
+                      {compactTransportLabel(summary.provider.desktopTransport)}
+                    </span>
+                  ) : null}
                 </div>
               </div>
 
@@ -792,8 +1136,12 @@ export function DashboardApp(): JSX.Element {
                 <span className="surface-pill">
                   {summary.metrics.runningVmCount}/{summary.metrics.totalVmCount} up
                 </span>
-                <span className="surface-pill">{summary.metrics.totalCpu} CPU</span>
-                <span className="surface-pill">{formatRam(summary.metrics.totalRamMb)} RAM</span>
+                {!compactRail ? (
+                  <span className="surface-pill">{summary.metrics.totalCpu} CPU</span>
+                ) : null}
+                {!compactRail ? (
+                  <span className="surface-pill">{formatRam(summary.metrics.totalRamMb)} RAM</span>
+                ) : null}
                 <span className="surface-pill">{summary.templates.length} tmpl</span>
                 {runningJobCount > 0 ? (
                   <span className="surface-pill">
@@ -808,7 +1156,7 @@ export function DashboardApp(): JSX.Element {
                   type="button"
                   onClick={() => setShowCreateDialog(true)}
                 >
-                  New VM
+                  {compactRail ? "New" : "New VM"}
                 </button>
               </div>
             </div>
@@ -846,6 +1194,22 @@ export function DashboardApp(): JSX.Element {
                 className="menu-action menu-action--split"
                 type="button"
                 onClick={() => {
+                  setRailDensityMode((current) =>
+                    current === "compact" ? "default" : "compact",
+                  );
+                  setShellMenuOpen(false);
+                }}
+              >
+                <span>Rail density</span>
+                <span className="menu-action__state">
+                  {compactRail ? "Compact" : "Default"}
+                </span>
+              </button>
+
+              <button
+                className="menu-action menu-action--split"
+                type="button"
+                onClick={() => {
                   setThemeMode((current) => (current === "dark" ? "light" : "dark"));
                   setShellMenuOpen(false);
                 }}
@@ -872,10 +1236,12 @@ export function DashboardApp(): JSX.Element {
 
             <div className="workspace-rail__list-head">
               <p className="workspace-shell__eyebrow">Workspace rail</p>
-              <span className="workspace-rail__list-count">
-                {summary.metrics.totalVmCount} workspace
-                {summary.metrics.totalVmCount === 1 ? "" : "s"}
-              </span>
+              {!compactRail ? (
+                <span className="workspace-rail__list-count">
+                  {summary.metrics.totalVmCount} workspace
+                  {summary.metrics.totalVmCount === 1 ? "" : "s"}
+                </span>
+              ) : null}
             </div>
 
             <div className="vm-strip">
@@ -883,6 +1249,7 @@ export function DashboardApp(): JSX.Element {
                 <VmTile
                   key={vm.id}
                   busy={isBusy}
+                  compact={compactRail}
                   menuOpen={openVmMenuId === vm.id}
                   selected={vm.id === selectedVmId}
                   showLivePreview={showLivePreviews}
@@ -988,15 +1355,34 @@ export function DashboardApp(): JSX.Element {
                 onResourceDraftChange={setResourceDraft}
                 onResize={handleResize}
                 onSaveForward={handleAddForward}
+                onLaunchFromSnapshot={handleLaunchFromSnapshot}
                 onSnapshot={handleSnapshot}
                 onStartStop={handleVmAction}
                 onSubmitCapture={handleCaptureTemplate}
                 onSubmitCommand={handleCommand}
+                onRestoreSnapshot={handleRestoreSnapshot}
                 onToggleCollapsed={() => setSidePanelCollapsed(true)}
+                panelRef={sidepanelRef}
+                resizing={sidepanelResizeActive}
+                resizable={!compactSidepanelLayout}
+                style={sidepanelStyle}
+                width={sidepanelWidth}
+                onResizeKeyDown={handleSidepanelResizeKeyDown}
+                onResizePointerDown={handleSidepanelResizeStart}
               />
             ) : null
           ) : (
-            <OverviewSidepanel summary={summary} onCreate={() => setShowCreateDialog(true)} />
+            <OverviewSidepanel
+              summary={summary}
+              onCreate={() => setShowCreateDialog(true)}
+              panelRef={sidepanelRef}
+              resizing={sidepanelResizeActive}
+              resizable={!compactSidepanelLayout}
+              style={sidepanelStyle}
+              width={sidepanelWidth}
+              onResizeKeyDown={handleSidepanelResizeKeyDown}
+              onResizePointerDown={handleSidepanelResizeStart}
+            />
           )}
         </section>
       </main>
@@ -1134,6 +1520,7 @@ function CreateVmDialog({
 
 interface VmTileProps {
   busy: boolean;
+  compact: boolean;
   menuOpen: boolean;
   selected: boolean;
   showLivePreview: boolean;
@@ -1148,6 +1535,7 @@ interface VmTileProps {
 
 function VmTile({
   busy,
+  compact,
   menuOpen,
   selected,
   showLivePreview,
@@ -1168,7 +1556,13 @@ function VmTile({
   const previewLabel = vmTilePreviewLabel(vm, showLivePreview);
 
   return (
-    <article className={joinClassNames("vm-tile", selected ? "vm-tile--active" : "")}>
+    <article
+      className={joinClassNames(
+        "vm-tile",
+        selected ? "vm-tile--active" : "",
+        compact ? "vm-tile--compact" : "",
+      )}
+    >
       <button className="vm-tile__open" type="button" onClick={() => onOpen(vm.id)}>
         <div className="vm-tile__preview">
           {canShowLivePreview && vm.session?.webSocketPath ? (
@@ -1176,8 +1570,8 @@ function VmTile({
               className="vm-tile__viewport"
               surfaceClassName="vm-tile__canvas"
               webSocketPath={vm.session.webSocketPath}
+              viewportMode="scale"
               viewOnly
-              resizeSession={false}
               showHeader={false}
               statusMode="overlay"
             />
@@ -1193,14 +1587,17 @@ function VmTile({
           <div className="vm-tile__body-head">
             <div className="vm-tile__identity">
               <h3 className="vm-tile__title">{vm.name}</h3>
-              <p className="vm-tile__resources">{formatResources(vm.resources)}</p>
+              {!compact ? (
+                <p className="vm-tile__resources">{formatResources(vm.resources)}</p>
+              ) : null}
             </div>
             <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
           </div>
 
-        <div className="vm-tile__meta">
-          <span>{formatForwardCount(vm.forwardedPorts.length)}</span>
-        </div>
+          <div className="vm-tile__meta">
+            {compact ? <span>{formatResources(vm.resources)}</span> : null}
+            <span>{formatForwardCount(vm.forwardedPorts.length)}</span>
+          </div>
         </div>
       </button>
 
@@ -1408,7 +1805,92 @@ interface WorkspaceSidepanelProps {
   onStartStop: (vmId: string, action: "start" | "stop") => Promise<void>;
   onSubmitCapture: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSubmitCommand: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  onLaunchFromSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
+  onRestoreSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
   onToggleCollapsed: () => void;
+  panelRef: RefObject<HTMLElement | null>;
+  resizable: boolean;
+  resizing: boolean;
+  style?: CSSProperties;
+  width: number;
+  onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+}
+
+interface SidepanelResizeHandleProps {
+  resizable: boolean;
+  resizing: boolean;
+  width: number;
+  onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+}
+
+interface RailResizeHandleProps {
+  resizable: boolean;
+  resizing: boolean;
+  width: number;
+  onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+}
+
+function RailResizeHandle({
+  resizable,
+  resizing,
+  width,
+  onResizeKeyDown,
+  onResizePointerDown,
+}: RailResizeHandleProps): JSX.Element | null {
+  if (!resizable) {
+    return null;
+  }
+
+  return (
+    <div
+      aria-label="Resize workspace rail"
+      aria-orientation="vertical"
+      aria-valuemax={railMaxWidth}
+      aria-valuemin={railMinWidth}
+      aria-valuenow={width}
+      className={joinClassNames(
+        "workspace-rail__resize-handle",
+        resizing ? "workspace-rail__resize-handle--active" : "",
+      )}
+      role="separator"
+      tabIndex={0}
+      onKeyDown={onResizeKeyDown}
+      onPointerDown={onResizePointerDown}
+    />
+  );
+}
+
+function SidepanelResizeHandle({
+  resizable,
+  resizing,
+  width,
+  onResizeKeyDown,
+  onResizePointerDown,
+}: SidepanelResizeHandleProps): JSX.Element | null {
+  if (!resizable) {
+    return null;
+  }
+
+  return (
+    <div
+      aria-label="Resize inspector"
+      aria-orientation="vertical"
+      aria-valuemax={sidepanelMaxWidth}
+      aria-valuemin={sidepanelMinWidth}
+      aria-valuenow={width}
+      className={joinClassNames(
+        "workspace-sidepanel__resize-handle",
+        resizing ? "workspace-sidepanel__resize-handle--active" : "",
+      )}
+      role="separator"
+      tabIndex={0}
+      onKeyDown={onResizeKeyDown}
+      onPointerDown={onResizePointerDown}
+    />
+  );
 }
 
 function WorkspaceSidepanel({
@@ -1429,14 +1911,38 @@ function WorkspaceSidepanel({
   onResourceDraftChange,
   onResize,
   onSaveForward,
+  onLaunchFromSnapshot,
   onSnapshot,
   onStartStop,
   onSubmitCapture,
   onSubmitCommand,
+  onRestoreSnapshot,
   onToggleCollapsed,
+  panelRef,
+  resizable,
+  resizing,
+  style,
+  width,
+  onResizeKeyDown,
+  onResizePointerDown,
 }: WorkspaceSidepanelProps): JSX.Element {
   return (
-    <aside className="workspace-sidepanel">
+    <aside
+      ref={panelRef}
+      className={joinClassNames(
+        "workspace-sidepanel",
+        resizing ? "workspace-sidepanel--resizing" : "",
+      )}
+      style={style}
+    >
+      <SidepanelResizeHandle
+        resizable={resizable}
+        resizing={resizing}
+        width={width}
+        onResizeKeyDown={onResizeKeyDown}
+        onResizePointerDown={onResizePointerDown}
+      />
+
       <button
         aria-label="Hide inspector"
         className="workspace-sidepanel__close"
@@ -1705,6 +2211,32 @@ function WorkspaceSidepanel({
                     Queue command
                   </button>
                 </form>
+
+                <div className="stack">
+                  {(detail.vm.commandHistory ?? []).length > 0 ? (
+                    detail.vm.commandHistory!.slice().reverse().map((entry, index) => (
+                      <div
+                        key={`${entry.createdAt}-${entry.command}-${index}`}
+                        className="command-log"
+                      >
+                        <div className="command-log__head">
+                          <strong className="mono-font">$ {entry.command}</strong>
+                          <span className="list-card__timestamp">
+                            {formatTimestamp(entry.createdAt)}
+                          </span>
+                        </div>
+                        <div className="chip-row">
+                          <span className="surface-pill mono-font">{entry.workspacePath}</span>
+                        </div>
+                        <pre className="command-log__output mono-font">
+                          {entry.output.join("\n")}
+                        </pre>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="empty-copy">Command output shows up here after each run.</p>
+                  )}
+                </div>
               </SidepanelSection>
 
               <SidepanelSection title="Capture template">
@@ -1855,10 +2387,30 @@ function WorkspaceSidepanel({
                     detail.snapshots.map((snapshot) => (
                       <div key={snapshot.id} className="list-card">
                         <div className="list-card__head">
-                          <strong>{snapshot.label}</strong>
-                          <span className="list-card__timestamp">
-                            {formatTimestamp(snapshot.createdAt)}
-                          </span>
+                          <div>
+                            <strong>{snapshot.label}</strong>
+                            <p className="list-card__timestamp">
+                              {formatTimestamp(snapshot.createdAt)}
+                            </p>
+                          </div>
+                          <div className="list-card__actions">
+                            <button
+                              className="button button--ghost"
+                              type="button"
+                              onClick={() => void onLaunchFromSnapshot(vm, snapshot)}
+                              disabled={busy}
+                            >
+                              Launch VM
+                            </button>
+                            <button
+                              className="button button--secondary"
+                              type="button"
+                              onClick={() => void onRestoreSnapshot(vm, snapshot)}
+                              disabled={busy}
+                            >
+                              Reset VM
+                            </button>
+                          </div>
                         </div>
                         <p>{snapshot.summary}</p>
                       </div>
@@ -1940,15 +2492,45 @@ function WorkspaceBootSurface({ state }: WorkspaceBootSurfaceProps): JSX.Element
 function OverviewSidepanel({
   onCreate,
   summary,
+  panelRef,
+  resizable,
+  resizing,
+  style,
+  width,
+  onResizeKeyDown,
+  onResizePointerDown,
 }: {
   onCreate: () => void;
   summary: DashboardSummary;
+  panelRef: RefObject<HTMLElement | null>;
+  resizable: boolean;
+  resizing: boolean;
+  style?: CSSProperties;
+  width: number;
+  onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }): JSX.Element {
   const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
   const recentJobs = summary.jobs.slice().reverse().slice(0, 5);
 
   return (
-    <aside className="workspace-sidepanel workspace-sidepanel--overview">
+    <aside
+      ref={panelRef}
+      className={joinClassNames(
+        "workspace-sidepanel",
+        "workspace-sidepanel--overview",
+        resizing ? "workspace-sidepanel--resizing" : "",
+      )}
+      style={style}
+    >
+      <SidepanelResizeHandle
+        resizable={resizable}
+        resizing={resizing}
+        width={width}
+        onResizeKeyDown={onResizeKeyDown}
+        onResizePointerDown={onResizePointerDown}
+      />
+
       <div className="workspace-sidepanel__scroll">
         <section className="sidepanel-summary">
           <div className="sidepanel-summary__head">
@@ -2457,6 +3039,11 @@ function readThemeMode(): ThemeMode {
   return "light";
 }
 
+function readRailDensityMode(): RailDensityMode {
+  const stored = readStoredString(railDensityStorageKey);
+  return stored === "compact" ? "compact" : "default";
+}
+
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   const stored = readStoredString(key);
 
@@ -2469,6 +3056,18 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
   }
 
   return fallback;
+}
+
+function readStoredNumber(key: string): number | null {
+  const stored = readStoredString(key);
+
+  if (!stored) {
+    return null;
+  }
+
+  const value = Number(stored);
+
+  return Number.isFinite(value) ? value : null;
 }
 
 function readStoredString(key: string): string | null {
@@ -2493,6 +3092,60 @@ function writeStoredString(key: string, value: string): void {
   } catch {
     // Ignore persistence failures and keep the session usable.
   }
+}
+
+function readViewportWidth(): number {
+  return typeof window === "undefined" ? 1440 : window.innerWidth;
+}
+
+function clampRailWidthPreference(width: number): number {
+  return Math.min(railMaxWidth, Math.max(railMinWidth, Math.round(width)));
+}
+
+function clampDisplayedRailWidth(
+  width: number,
+  viewportWidth: number,
+  sidepanelWidth: number,
+): number {
+  return Math.min(
+    clampRailWidthPreference(width),
+    maxDisplayedRailWidth(viewportWidth, sidepanelWidth),
+  );
+}
+
+function maxDisplayedRailWidth(viewportWidth: number, sidepanelWidth: number): number {
+  return Math.max(
+    railMinWidth,
+    Math.min(railMaxWidth, viewportWidth - Math.min(sidepanelWidth, sidepanelDefaultWidth) - 560),
+  );
+}
+
+function clampSidepanelWidthPreference(width: number): number {
+  return Math.min(sidepanelMaxWidth, Math.max(sidepanelMinWidth, Math.round(width)));
+}
+
+function clampDisplayedSidepanelWidth(width: number, viewportWidth: number): number {
+  return Math.min(
+    clampSidepanelWidthPreference(width),
+    maxDisplayedSidepanelWidth(viewportWidth),
+  );
+}
+
+function maxDisplayedSidepanelWidth(viewportWidth: number): number {
+  return Math.max(
+    sidepanelMinWidth,
+    Math.min(sidepanelMaxWidth, viewportWidth - 640),
+  );
+}
+
+function defaultSnapshotLaunchName(vm: VmInstance, snapshot: Snapshot): string {
+  const slug = snapshot.label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+
+  return `${vm.name}-${slug || "snapshot"}`;
 }
 
 function joinClassNames(...values: Array<string | false | null | undefined>): string {

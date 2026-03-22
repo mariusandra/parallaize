@@ -23,10 +23,12 @@ export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 export type JobKind =
   | "create"
   | "clone"
+  | "launch-snapshot"
   | "start"
   | "stop"
   | "delete"
   | "snapshot"
+  | "restore-snapshot"
   | "resize"
   | "capture-template"
   | "inject-command";
@@ -69,6 +71,13 @@ export interface VmPortForward extends TemplatePortForward {
   publicPath: string;
 }
 
+export interface VmCommandResult {
+  command: string;
+  output: string[];
+  workspacePath: string;
+  createdAt: string;
+}
+
 export interface EnvironmentTemplate {
   id: string;
   name: string;
@@ -103,6 +112,7 @@ export interface VmInstance {
   session: VmSession | null;
   forwardedPorts: VmPortForward[];
   activityLog: string[];
+  commandHistory?: VmCommandResult[];
 }
 
 export interface Snapshot {
@@ -183,6 +193,10 @@ export interface ResizeVmInput {
 
 export interface SnapshotInput {
   label?: string;
+}
+
+export interface SnapshotLaunchInput {
+  name?: string;
 }
 
 export interface CaptureTemplateInput {

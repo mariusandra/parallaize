@@ -8,6 +8,7 @@ import type {
   ProviderState,
   ProviderKind,
   TemplatePortForward,
+  VmCommandResult,
   VmInstance,
   VmPortForward,
   VmSession,
@@ -183,7 +184,32 @@ function normalizeVm(vm: LegacyVm): VmInstance {
     session: normalizeSession(vm.id ?? "vm-missing", vm.session, provider),
     forwardedPorts: normalizeVmForwardedPorts(vm.id ?? "vm-missing", vm.forwardedPorts),
     activityLog: Array.isArray(vm.activityLog) ? vm.activityLog : [],
+    commandHistory: normalizeCommandHistory(vm.commandHistory),
   };
+}
+
+function normalizeCommandHistory(
+  commandHistory: VmInstance["commandHistory"] | undefined,
+): VmCommandResult[] {
+  if (!Array.isArray(commandHistory)) {
+    return [];
+  }
+
+  return commandHistory
+    .filter(
+      (entry): entry is VmCommandResult =>
+        Boolean(entry) &&
+        typeof entry.command === "string" &&
+        Array.isArray(entry.output) &&
+        typeof entry.workspacePath === "string" &&
+        typeof entry.createdAt === "string",
+    )
+    .map((entry) => ({
+      command: entry.command,
+      output: entry.output.filter((line): line is string => typeof line === "string"),
+      workspacePath: entry.workspacePath,
+      createdAt: entry.createdAt,
+    }));
 }
 
 function normalizeSession(

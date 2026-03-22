@@ -717,6 +717,42 @@ textarea {
   white-space: nowrap;
 }
 
+.vm-tile--compact {
+  border-radius: 1.05rem;
+}
+
+.vm-tile--compact .vm-tile__open {
+  gap: 0.5rem;
+  padding: 0.55rem;
+}
+
+.vm-tile--compact .vm-tile__preview {
+  aspect-ratio: 16 / 8.2;
+}
+
+.vm-tile--compact .vm-tile__body {
+  gap: 0.35rem;
+}
+
+.vm-tile--compact .vm-tile__title {
+  font-size: 0.96rem;
+}
+
+.vm-tile--compact .vm-tile__meta {
+  font-size: 0.74rem;
+}
+
+.vm-tile--compact .status-badge {
+  min-height: 1.55rem;
+  padding-inline: 0.45rem;
+  font-size: 0.62rem;
+}
+
+.vm-tile--compact .vm-tile__preview-note {
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+}
+
 .vm-tile__menu {
   position: absolute;
   top: 0.55rem;
@@ -1132,10 +1168,29 @@ textarea {
   min-height: 100%;
 }
 
-.novnc-surface canvas {
-  display: block;
+.novnc-shell--remote {
+  overflow: auto;
+}
+
+.novnc-surface--remote {
+  display: grid;
+  place-items: center;
+}
+
+.novnc-surface--remote canvas {
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+}
+
+.novnc-surface--scale canvas {
   width: 100%;
   height: 100%;
+}
+
+.novnc-surface canvas {
+  display: block;
 }
 
 .status-badge {
@@ -1634,8 +1689,73 @@ section.workspace-shell {
   grid-template-rows: auto auto auto minmax(0, 1fr);
   gap: 0.75rem;
   min-height: 0;
+  position: relative;
   border-radius: 0;
   padding: 0;
+}
+
+.workspace-rail--resizing {
+  cursor: col-resize;
+}
+
+.workspace-rail__resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 1rem;
+  transform: translateX(50%);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-rail__resize-handle::before,
+.workspace-rail__resize-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease,
+    opacity 120ms ease;
+}
+
+.workspace-rail__resize-handle::before {
+  top: 0.95rem;
+  bottom: 0.95rem;
+  width: 1px;
+  background: rgba(120, 137, 152, 0.24);
+}
+
+.workspace-rail__resize-handle::after {
+  top: 50%;
+  width: 0.36rem;
+  height: 4.2rem;
+  margin-top: -2.1rem;
+  border-radius: 999px;
+  background: rgba(120, 137, 152, 0.5);
+  box-shadow: 0 0 0 0.35rem rgba(6, 10, 14, 0.28);
+}
+
+.workspace-rail__resize-handle:hover::before,
+.workspace-rail__resize-handle:hover::after,
+.workspace-rail__resize-handle--active::before,
+.workspace-rail__resize-handle--active::after,
+.workspace-rail__resize-handle:focus-visible::before,
+.workspace-rail__resize-handle:focus-visible::after {
+  background: rgba(125, 211, 199, 0.9);
+}
+
+.workspace-rail__resize-handle:hover::after,
+.workspace-rail__resize-handle--active::after,
+.workspace-rail__resize-handle:focus-visible::after {
+  box-shadow: 0 0 0 0.4rem rgba(125, 211, 199, 0.16);
+}
+
+.workspace-rail__resize-handle:focus-visible {
+  outline: none;
 }
 
 .workspace-rail__header,
@@ -1712,6 +1832,29 @@ section.workspace-shell {
   overflow-x: hidden;
   padding: 0 1rem 1rem;
   align-content: start;
+}
+
+.workspace-rail--compact {
+  gap: 0.55rem;
+}
+
+.workspace-rail--compact .workspace-rail__header {
+  gap: 0.45rem;
+  padding: 0.72rem 0.8rem 0.35rem;
+}
+
+.workspace-rail--compact .workspace-rail__list-head {
+  padding: 0.1rem 0.8rem 0;
+}
+
+.workspace-rail--compact .vm-strip {
+  gap: 0.55rem;
+  padding: 0 0.8rem 0.8rem;
+}
+
+.workspace-rail--compact .workspace-rail__summary,
+.workspace-rail--compact .workspace-rail__chips {
+  gap: 0.32rem;
 }
 
 .empty-state {
@@ -2294,9 +2437,73 @@ section.workspace-shell {
   padding: 0;
 }
 
+.workspace-sidepanel--resizing {
+  cursor: col-resize;
+}
+
 .workspace-sidepanel--collapsed {
   width: 3.4rem;
   min-width: 3.4rem;
+}
+
+.workspace-sidepanel__resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 6;
+  width: 1rem;
+  transform: translateX(-50%);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-sidepanel__resize-handle::before,
+.workspace-sidepanel__resize-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease,
+    opacity 120ms ease;
+}
+
+.workspace-sidepanel__resize-handle::before {
+  top: 0.95rem;
+  bottom: 0.95rem;
+  width: 1px;
+  background: rgba(120, 137, 152, 0.24);
+}
+
+.workspace-sidepanel__resize-handle::after {
+  top: 50%;
+  width: 0.36rem;
+  height: 4.2rem;
+  margin-top: -2.1rem;
+  border-radius: 999px;
+  background: rgba(120, 137, 152, 0.5);
+  box-shadow: 0 0 0 0.35rem rgba(6, 10, 14, 0.28);
+}
+
+.workspace-sidepanel__resize-handle:hover::before,
+.workspace-sidepanel__resize-handle:hover::after,
+.workspace-sidepanel__resize-handle--active::before,
+.workspace-sidepanel__resize-handle--active::after,
+.workspace-sidepanel__resize-handle:focus-visible::before,
+.workspace-sidepanel__resize-handle:focus-visible::after {
+  background: rgba(125, 211, 199, 0.9);
+}
+
+.workspace-sidepanel__resize-handle:hover::after,
+.workspace-sidepanel__resize-handle--active::after,
+.workspace-sidepanel__resize-handle:focus-visible::after {
+  box-shadow: 0 0 0 0.4rem rgba(125, 211, 199, 0.16);
+}
+
+.workspace-sidepanel__resize-handle:focus-visible {
+  outline: none;
 }
 
 .workspace-sidepanel__close {
@@ -2503,6 +2710,18 @@ section.workspace-shell {
   line-height: 1.5;
 }
 
+.list-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.list-card__actions .button {
+  min-height: 2.25rem;
+  padding-inline: 0.75rem;
+}
+
 .log-line {
   border: 1px solid var(--line);
   border-radius: 1rem;
@@ -2511,6 +2730,36 @@ section.workspace-shell {
   color: var(--ink);
   font-size: 0.82rem;
   line-height: 1.5;
+}
+
+.command-log {
+  display: grid;
+  gap: 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--panel-muted);
+  padding: 0.82rem;
+}
+
+.command-log__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.command-log__output {
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  background: rgba(4, 7, 11, 0.82);
+  padding: 0.72rem 0.8rem;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .dialog-backdrop {
@@ -2751,6 +3000,14 @@ section.workspace-shell {
   .workspace-sidepanel--collapsed {
     width: 100%;
     min-width: 0;
+  }
+
+  .workspace-sidepanel__resize-handle {
+    display: none;
+  }
+
+  .workspace-rail__resize-handle {
+    display: none;
   }
 
   .workspace-sidepanel--collapsed .workspace-sidepanel__handle {

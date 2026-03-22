@@ -16,6 +16,7 @@ import type {
   InjectCommandInput,
   LoginInput,
   ResizeVmInput,
+  SnapshotLaunchInput,
   SnapshotInput,
   UpdateVmForwardedPortsInput,
   VmDetail,
@@ -114,6 +115,30 @@ const server = createServer(async (request, response) => {
       });
       response.end(svg);
       return;
+    }
+
+    const snapshotActionMatch = url.pathname.match(
+      /^\/api\/vms\/([^/]+)\/snapshots\/([^/]+)\/(launch|restore)$/,
+    );
+    if (method === "POST" && snapshotActionMatch) {
+      const vmId = snapshotActionMatch[1];
+      const snapshotId = snapshotActionMatch[2];
+      const action = snapshotActionMatch[3];
+
+      if (action === "launch") {
+        const payload = await readJsonBody<SnapshotLaunchInput>(request);
+        const vm = manager.launchVmFromSnapshot(vmId, snapshotId, {
+          sourceVmId: vmId,
+          name: payload.name,
+        });
+        return writeJson(response, 202, {
+          ok: true,
+          data: vm,
+        });
+      }
+
+      manager.restoreVmSnapshot(vmId, snapshotId);
+      return writeAccepted(response);
     }
 
     if (method === "POST" && url.pathname === "/api/vms") {

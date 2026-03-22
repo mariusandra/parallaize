@@ -99,6 +99,7 @@ export function createSeedState(provider: ProviderState): AppState {
         "workspace: /srv/workspaces/alpha-workbench",
         "agent: waiting for operator input",
       ],
+      commandHistory: [],
     },
     {
       id: "vm-0002",
@@ -127,6 +128,7 @@ export function createSeedState(provider: ProviderState): AppState {
         "boot: session checkpoint saved",
         "browser: 16 tabs pinned for ongoing research",
       ],
+      commandHistory: [],
     },
   ];
 

@@ -1,6 +1,6 @@
 # Parallaize
 
-Parallaize is a server-first proof of concept for managing many isolated desktop workspaces from one browser UI. This repository ships a runnable control plane and dashboard with a `mock` provider by default, plus a real Incus CLI adapter that activates when the host has Incus installed and reachable.
+Parallaize is a server-first proof of concept for managing many isolated desktop workspaces from one browser UI. This repository now starts the control plane in real Incus VM mode by default, while still keeping a mock provider path available for fallback and tests.
 
 ## What Works
 
@@ -80,31 +80,31 @@ The repo Flox environment now ships both `incus` and `incusd`, so the control pl
 For VM-capable Incus on Ubuntu, the host also needs system QEMU/firmware helpers in standard locations:
 
 ```bash
-sudo apt-get install -y attr ovmf qemu-system-x86 qemu-utils
+sudo apt-get install -y attr ovmf qemu-system-x86 qemu-utils genisoimage
 ```
 
 If the daemon is not already managed by the host init system, a working bootstrap flow on this machine was:
 
 ```bash
 INCUSD_BIN="$(flox activate -d . -- bash -lc 'readlink -f $(command -v incusd)')"
-sudo env PATH=/usr/sbin:/usr/bin:/sbin:/bin "$INCUSD_BIN" --group sudo
+INCUS_AGENT_PATH="$(dirname "$(dirname "$INCUSD_BIN")")/share/agent"
+sudo env PATH=/usr/sbin:/usr/bin:/sbin:/bin INCUS_AGENT_PATH="$INCUS_AGENT_PATH" "$INCUSD_BIN" --group sudo
 flox activate -d . -- incus admin init --minimal
 flox activate -d . -- incus list --format json
 ```
 
 The `--group sudo` socket setting matters here because the dashboard runs as the current user and needs direct access to `/var/lib/incus/unix.socket`.
+`INCUS_AGENT_PATH` matters for VMs specifically: without it, the `agent:config` disk is created without the `incus-agent` binary, and browser command injection through `incus exec` fails with `VM agent isn't currently running`.
 
-Then start the app in Incus mode on a Linux host with a valid VM-capable image source such as `images:ubuntu/noble/desktop`:
+Then start the app on a Linux host with a valid VM-capable image source such as `images:ubuntu/noble/desktop`:
 
 ```bash
-PARALLAIZE_PROVIDER=incus \
-PARALLAIZE_DATA_FILE=data/incus-state.json \
 flox activate -d . -- pnpm start
 ```
 
 Captured templates publish a reusable local Incus image alias and future launches use that alias as the template launch source.
 
-If you switch from `mock` to `incus`, point `PARALLAIZE_DATA_FILE` at a fresh state file unless you intentionally want to keep old mock records around.
+If you need the old demo path, run `pnpm run start:mock`.
 
 ### Guest Networking And Internet Access
 
@@ -214,7 +214,7 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 - `HOST`: HTTP bind host, default `0.0.0.0`
 - `PORT`: HTTP bind port, default `3000`
 - `PARALLAIZE_DATA_FILE`: JSON state path, default `data/state.json`
-- `PARALLAIZE_PROVIDER`: `mock` or `incus`, default `mock`
+- `PARALLAIZE_PROVIDER`: `mock` or `incus`, default `incus` for `pnpm start`
 - `PARALLAIZE_INCUS_BIN`: Incus binary path, default `incus`
 - `PARALLAIZE_INCUS_PROJECT`: optional Incus project name
 - `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5901`

@@ -92,6 +92,62 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.ok((job?.progressPercent ?? 100) < 100);
 });
 
+test("command output is retained and snapshots can launch or restore VMs", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-command-history-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  manager.injectCommand("vm-0001", "pwd");
+  await wait(300);
+
+  const commandDetail = manager.getVmDetail("vm-0001");
+  assert.equal(commandDetail.vm.commandHistory?.length, 1);
+  assert.equal(commandDetail.vm.commandHistory?.[0]?.command, "pwd");
+  assert.equal(
+    commandDetail.vm.commandHistory?.[0]?.output[0],
+    "/srv/workspaces/alpha-workbench",
+  );
+
+  manager.snapshotVm("vm-0001", { label: "checkpoint" });
+  await wait(550);
+
+  const snapshot = manager.getVmDetail("vm-0001").snapshots[0];
+  assert.ok(snapshot);
+
+  const launchedVm = manager.launchVmFromSnapshot("vm-0001", snapshot!.id, {
+    sourceVmId: "vm-0001",
+    name: "alpha-from-checkpoint",
+  });
+  await wait(700);
+
+  const launchedDetail = manager.getVmDetail(launchedVm.id);
+  assert.equal(launchedDetail.vm.status, "running");
+  assert.match(launchedDetail.vm.lastAction, /Launched from snapshot checkpoint/);
+  assert.ok(
+    manager
+      .getSummary()
+      .jobs.some((job) => job.kind === "launch-snapshot" && job.status === "succeeded"),
+  );
+
+  manager.restoreVmSnapshot("vm-0001", snapshot!.id);
+  await wait(450);
+
+  const restoredDetail = manager.getVmDetail("vm-0001");
+  assert.match(restoredDetail.vm.lastAction, /Restored alpha-workbench to checkpoint/);
+  assert.ok(
+    restoredDetail.recentJobs.some(
+      (job) => job.kind === "restore-snapshot" && job.status === "succeeded",
+    ),
+  );
+});
+
 test("captured templates become reusable launch sources for subsequent VMs", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-captured-template-"));
   context.after(() => {
@@ -286,6 +342,14 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
       args[2] === instanceName &&
       args[3] === "cloud-init.user-data",
   );
+  const agentDeviceCall = calls.find(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "device" &&
+      args[2] === "add" &&
+      args[3] === instanceName &&
+      args[4] === "agent",
+  );
   const startCall = calls.find(
     (args) => args[0] === "start" && args[1] === instanceName,
   );
@@ -305,6 +369,16 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   ]);
   assert.ok(configSetCall);
   assert.match(configSetCall?.[4] ?? "", /x11vnc/);
+  assert.match(configSetCall?.[4] ?? "", /incus-agent\.service/);
+  assert.deepEqual(agentDeviceCall, [
+    "config",
+    "device",
+    "add",
+    instanceName,
+    "agent",
+    "disk",
+    "source=agent:config",
+  ]);
   assert.deepEqual(startCall, ["start", instanceName]);
 
   const snapshot = await provider.captureTemplate(vm, {
@@ -323,6 +397,203 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     "parallaize-template-tpl-0099",
     "--reuse",
   ]);
+});
+
+test("incus provider launches and restores snapshots with VM commands", async () => {
+  const calls: string[][] = [];
+  const sourceInstanceName = "parallaize-vm-0109-snap-origin";
+  const targetInstanceName = "parallaize-vm-0110-snap-launch";
+  const addAttempts = new Map<string, number>();
+  const instanceAddresses = new Map<string, string>([
+    [sourceInstanceName, "10.55.0.21"],
+    [targetInstanceName, "10.55.0.22"],
+  ]);
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (args[0] === "list" && args[2] === "--format" && args[3] === "json") {
+        const address = instanceAddresses.get(args[1]);
+
+        if (!address) {
+          return ok("[]", args);
+        }
+
+        return ok(
+          JSON.stringify([
+            {
+              name: args[1],
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address,
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      if (
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "add" &&
+        args[3] === sourceInstanceName &&
+        args[4] === "agent"
+      ) {
+        const attempts = (addAttempts.get(sourceInstanceName) ?? 0) + 1;
+        addAttempts.set(sourceInstanceName, attempts);
+
+        if (attempts === 1) {
+          return {
+            args,
+            status: 1,
+            stdout: "",
+            stderr: "Error: The device already exists",
+          };
+        }
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5901,
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const template: EnvironmentTemplate = {
+    id: "tpl-0109",
+    name: "Snapshot Launch Template",
+    description: "Used to validate snapshot workflows",
+    launchSource: "images:ubuntu/noble/desktop",
+    defaultResources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    defaultForwardedPorts: [],
+    tags: [],
+    notes: [],
+    snapshotIds: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const sourceVm: VmInstance = {
+    id: "vm-0109",
+    name: "snap-origin",
+    templateId: template.id,
+    provider: "incus",
+    providerRef: sourceInstanceName,
+    status: "running",
+    resources: template.defaultResources,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 17,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: {
+      kind: "vnc",
+      host: "10.55.0.21",
+      port: 5901,
+      webSocketPath: "/api/vms/vm-0109/vnc",
+      browserPath: "/?vm=vm-0109",
+      display: "10.55.0.21:5901",
+    },
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const targetVm: VmInstance = {
+    id: "vm-0110",
+    name: "snap-launch",
+    templateId: template.id,
+    provider: "incus",
+    providerRef: targetInstanceName,
+    status: "creating",
+    resources: template.defaultResources,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Queued",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 18,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const snapshot = {
+    id: "snap-0109",
+    vmId: sourceVm.id,
+    templateId: template.id,
+    label: "checkpoint",
+    summary: "Snapshot checkpoint captured from snap-origin.",
+    providerRef: `${sourceInstanceName}/parallaize-snap-checkpoint`,
+    resources: template.defaultResources,
+    createdAt: new Date().toISOString(),
+  };
+
+  const launchMutation = await provider.launchVmFromSnapshot(snapshot, targetVm, template);
+  assert.equal(launchMutation.session?.display, "10.55.0.22:5901");
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "copy" &&
+        args[1] === snapshot.providerRef &&
+        args[2] === targetInstanceName,
+    ),
+  );
+
+  const restoreMutation = await provider.restoreVmToSnapshot(sourceVm, snapshot);
+  assert.equal(restoreMutation.session?.display, "10.55.0.21:5901");
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "snapshot" &&
+        args[1] === "restore" &&
+        args[2] === sourceInstanceName &&
+        args[3] === "parallaize-snap-checkpoint",
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "remove" &&
+        args[3] === sourceInstanceName &&
+        args[4] === "agent",
+    ),
+  );
 });
 
 test("incus provider falls back to IPv6 guest metadata when IPv4 is absent", async () => {
@@ -892,6 +1163,159 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
         args[2] === cloneInstanceName,
     ),
   );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "add" &&
+        args[3] === cloneInstanceName &&
+        args[4] === "agent" &&
+        args[5] === "disk" &&
+        args[6] === "source=agent:config",
+    ),
+  );
+});
+
+test("incus provider refreshes an existing agent device before resuming a VM", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0110-resume-agent";
+  let addAttempts = 0;
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "add" &&
+        args[3] === instanceName &&
+        args[4] === "agent"
+      ) {
+        addAttempts += 1;
+
+        if (addAttempts === 1) {
+          return {
+            args,
+            status: 1,
+            stdout: "",
+            stderr: "Error: The device already exists",
+          };
+        }
+
+        return ok("", args);
+      }
+
+      if (args[0] === "list" && args[1] === instanceName) {
+        return ok(
+          JSON.stringify([
+            {
+              name: instanceName,
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address: "10.55.0.110",
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5901,
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0110",
+    name: "resume-agent",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "stopped",
+    resources: {
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 30,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Stopped",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 10,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.startVm(vm);
+  const agentDeviceAddCalls = calls.filter(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "device" &&
+      args[2] === "add" &&
+      args[3] === instanceName &&
+      args[4] === "agent",
+  );
+  const agentDeviceRemoveCall = calls.find(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "device" &&
+      args[2] === "remove" &&
+      args[3] === instanceName &&
+      args[4] === "agent",
+  );
+  const startCall = calls.find(
+    (args) => args[0] === "start" && args[1] === instanceName,
+  );
+
+  assert.equal(mutation.session?.display, "10.55.0.110:5901");
+  assert.equal(agentDeviceAddCalls.length, 2);
+  assert.deepEqual(agentDeviceAddCalls[1], [
+    "config",
+    "device",
+    "add",
+    instanceName,
+    "agent",
+    "disk",
+    "source=agent:config",
+  ]);
+  assert.deepEqual(agentDeviceRemoveCall, [
+    "config",
+    "device",
+    "remove",
+    instanceName,
+    "agent",
+  ]);
+  assert.deepEqual(startCall, ["start", instanceName]);
 });
 
 function ok(stdout: string, args: string[]) {

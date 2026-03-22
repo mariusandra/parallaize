@@ -7,6 +7,7 @@ import type {
   ProviderKind,
   ProviderState,
   ResourceSpec,
+  Snapshot,
   VmInstance,
   VmSession,
   VmWindow,
@@ -44,6 +45,15 @@ export interface DesktopProvider {
   deleteVm(vm: VmInstance): Promise<ProviderMutation>;
   resizeVm(vm: VmInstance, resources: ResourceSpec): Promise<ProviderMutation>;
   snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot>;
+  launchVmFromSnapshot(
+    snapshot: Snapshot,
+    targetVm: VmInstance,
+    template: EnvironmentTemplate,
+  ): Promise<ProviderMutation>;
+  restoreVmToSnapshot(
+    vm: VmInstance,
+    snapshot: Snapshot,
+  ): Promise<ProviderMutation>;
   captureTemplate(
     vm: VmInstance,
     target: CaptureTemplateTarget,
@@ -63,6 +73,7 @@ export interface ProviderMutation {
   activeWindow?: VmWindow;
   workspacePath?: string;
   session?: VmSession | null;
+  commandResult?: ProviderCommandResult;
 }
 
 export interface ProviderSnapshot {
@@ -74,6 +85,12 @@ export interface ProviderSnapshot {
 export interface ProviderTick {
   activity?: string;
   activeWindow?: VmWindow;
+}
+
+interface ProviderCommandResult {
+  command: string;
+  output: string[];
+  workspacePath: string;
 }
 
 interface IncusCommandRunner {
@@ -219,6 +236,40 @@ class MockProvider implements DesktopProvider {
     };
   }
 
+  async launchVmFromSnapshot(
+    snapshot: Snapshot,
+    targetVm: VmInstance,
+    template: EnvironmentTemplate,
+  ): Promise<ProviderMutation> {
+    return {
+      lastAction: `Launched from snapshot ${snapshot.label}`,
+      activity: [
+        `snapshot launch: ${snapshot.label}`,
+        `template: ${template.name}`,
+        `workspace: /srv/workspaces/${slugify(targetVm.name)}`,
+      ],
+      activeWindow: "terminal",
+      workspacePath: `/srv/workspaces/${slugify(targetVm.name)}`,
+      session: buildSyntheticSession(),
+    };
+  }
+
+  async restoreVmToSnapshot(
+    vm: VmInstance,
+    snapshot: Snapshot,
+  ): Promise<ProviderMutation> {
+    return {
+      lastAction: `Restored ${vm.name} to ${snapshot.label}`,
+      activity: [
+        `snapshot restore: ${snapshot.label}`,
+        `workspace: ${vm.workspacePath}`,
+      ],
+      activeWindow: "terminal",
+      workspacePath: vm.workspacePath,
+      session: buildSyntheticSession(),
+    };
+  }
+
   async captureTemplate(
     vm: VmInstance,
     target: CaptureTemplateTarget,
@@ -246,6 +297,11 @@ class MockProvider implements DesktopProvider {
       activeWindow: "terminal",
       workspacePath: nextWorkspacePath,
       session: buildSyntheticSession(),
+      commandResult: {
+        command: trimmed,
+        output: [reply],
+        workspacePath: nextWorkspacePath,
+      },
     };
   }
 
@@ -326,6 +382,7 @@ class IncusProvider implements DesktopProvider {
       "cloud-init.user-data",
       buildGuestVncCloudInit(this.guestVncPort),
     ]);
+    this.ensureAgentDevice(vm.providerRef);
     this.run(["start", vm.providerRef]);
 
     const session = await this.resolveSession(vm.providerRef);
@@ -362,6 +419,7 @@ class IncusProvider implements DesktopProvider {
       "-d",
       `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
     ]);
+    this.ensureAgentDevice(targetVm.providerRef);
     this.run(["start", targetVm.providerRef]);
 
     const session = await this.resolveSession(targetVm.providerRef);
@@ -381,6 +439,7 @@ class IncusProvider implements DesktopProvider {
 
   async startVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
+    this.ensureAgentDevice(vm.providerRef);
     this.run(["start", vm.providerRef]);
     const session = await this.resolveSession(vm.providerRef);
 
@@ -398,21 +457,7 @@ class IncusProvider implements DesktopProvider {
 
   async stopVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
-    const stopArgs = ["stop", vm.providerRef, "--timeout", "30"];
-    const stopResult = this.runner.execute(stopArgs);
-
-    if (stopResult.status !== 0 && !this.instanceMatchesStatus(vm.providerRef, "stopped")) {
-      const forceArgs = ["stop", vm.providerRef, "--force"];
-      const forceResult = this.runner.execute(forceArgs);
-
-      if (forceResult.status !== 0 && !this.instanceMatchesStatus(vm.providerRef, "stopped")) {
-        throw new Error(
-          [formatCommandFailure(stopArgs, stopResult), formatCommandFailure(forceArgs, forceResult)]
-            .filter(Boolean)
-            .join("\n"),
-        );
-      }
-    }
+    this.stopInstance(vm.providerRef);
 
     return {
       lastAction: "Workspace stopped",
@@ -479,6 +524,83 @@ class IncusProvider implements DesktopProvider {
     };
   }
 
+  async launchVmFromSnapshot(
+    snapshot: Snapshot,
+    targetVm: VmInstance,
+    template: EnvironmentTemplate,
+  ): Promise<ProviderMutation> {
+    this.assertAvailable();
+    this.assertLaunchSource(template);
+
+    this.run([
+      "copy",
+      snapshot.providerRef,
+      targetVm.providerRef,
+      "--instance-only",
+      "-c",
+      `limits.cpu=${targetVm.resources.cpu}`,
+      "-c",
+      `limits.memory=${formatMemoryLimit(targetVm.resources.ramMb)}`,
+      "-d",
+      `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
+    ]);
+    this.ensureAgentDevice(targetVm.providerRef);
+    this.run(["start", targetVm.providerRef]);
+
+    const session = await this.resolveSession(targetVm.providerRef);
+
+    return {
+      lastAction: `Launched from snapshot ${snapshot.label}`,
+      activity: [
+        `incus: launched ${targetVm.providerRef} from ${snapshot.providerRef}`,
+        `template: ${template.name}`,
+        session ? `vnc: ${session.display}` : "vnc: guest network pending",
+      ],
+      activeWindow: "terminal",
+      workspacePath: DEFAULT_GUEST_WORKSPACE,
+      session,
+    };
+  }
+
+  async restoreVmToSnapshot(
+    vm: VmInstance,
+    snapshot: Snapshot,
+  ): Promise<ProviderMutation> {
+    this.assertAvailable();
+
+    const snapshotName = parseSnapshotName(snapshot.providerRef, vm.providerRef);
+    const wasRunning = vm.status === "running";
+
+    if (wasRunning) {
+      this.stopInstance(vm.providerRef);
+    }
+
+    this.run(["snapshot", "restore", vm.providerRef, snapshotName]);
+    this.ensureAgentDevice(vm.providerRef);
+
+    let session: VmSession | null = null;
+
+    if (wasRunning) {
+      this.run(["start", vm.providerRef]);
+      session = await this.resolveSession(vm.providerRef);
+    }
+
+    return {
+      lastAction: `Restored ${vm.name} to ${snapshot.label}`,
+      activity: [
+        `incus: restored ${vm.providerRef} to ${snapshotName}`,
+        wasRunning
+          ? session
+            ? `vnc: ${session.display}`
+            : "vnc: guest network pending"
+          : "workspace remains stopped after restore",
+      ],
+      activeWindow: "terminal",
+      workspacePath: vm.workspacePath || DEFAULT_GUEST_WORKSPACE,
+      session,
+    };
+  }
+
   async captureTemplate(
     vm: VmInstance,
     target: CaptureTemplateTarget,
@@ -530,6 +652,11 @@ class IncusProvider implements DesktopProvider {
         activeWindow: "terminal",
         workspacePath: nextWorkspacePath,
         session: vm.session,
+        commandResult: {
+          command,
+          output: [`cwd: ${nextWorkspacePath}`],
+          workspacePath: nextWorkspacePath,
+        },
       };
     }
 
@@ -543,7 +670,8 @@ class IncusProvider implements DesktopProvider {
       "-lc",
       command,
     ]);
-    const activity = [`$ ${command}`, ...summarizeCommandOutput(result)];
+    const output = collectCommandOutput(result);
+    const activity = [`$ ${command}`, ...summarizeCommandOutput(output)];
 
     return {
       lastAction: `Executed: ${command}`,
@@ -551,6 +679,11 @@ class IncusProvider implements DesktopProvider {
       activeWindow: "terminal",
       workspacePath,
       session: vm.session,
+      commandResult: {
+        command,
+        output,
+        workspacePath,
+      },
     };
   }
 
@@ -589,6 +722,50 @@ class IncusProvider implements DesktopProvider {
       throw new Error(
         `Template ${template.name} was captured in mock mode and cannot be launched with Incus.`,
       );
+    }
+  }
+
+  private ensureAgentDevice(instanceName: string): void {
+    const addArgs = [
+      "config",
+      "device",
+      "add",
+      instanceName,
+      "agent",
+      "disk",
+      "source=agent:config",
+    ];
+    const result = this.runner.execute(addArgs);
+
+    if (result.status === 0) {
+      return;
+    }
+
+    const detail = `${result.stderr}\n${result.stdout}`;
+
+    if (!detail.includes("already exists")) {
+      throw new Error(formatCommandFailure(addArgs, result));
+    }
+
+    this.run(["config", "device", "remove", instanceName, "agent"]);
+    this.run(addArgs);
+  }
+
+  private stopInstance(instanceName: string): void {
+    const stopArgs = ["stop", instanceName, "--timeout", "30"];
+    const stopResult = this.runner.execute(stopArgs);
+
+    if (stopResult.status !== 0 && !this.instanceMatchesStatus(instanceName, "stopped")) {
+      const forceArgs = ["stop", instanceName, "--force"];
+      const forceResult = this.runner.execute(forceArgs);
+
+      if (forceResult.status !== 0 && !this.instanceMatchesStatus(instanceName, "stopped")) {
+        throw new Error(
+          [formatCommandFailure(stopArgs, stopResult), formatCommandFailure(forceArgs, forceResult)]
+            .filter(Boolean)
+            .join("\n"),
+        );
+      }
     }
   }
 
@@ -823,11 +1000,49 @@ function buildIncusProviderState(
   };
 }
 
-function summarizeCommandOutput(result: CommandResult): string[] {
-  const lines = `${result.stdout}${result.stderr}`.split("\n").map((line) => line.trim());
-  const filtered = lines.filter(Boolean).slice(0, 6);
+function collectCommandOutput(result: CommandResult): string[] {
+  const combined = [result.stdout, result.stderr]
+    .filter((chunk) => chunk.length > 0)
+    .join(result.stdout && result.stderr && !result.stdout.endsWith("\n") ? "\n" : "")
+    .replace(/\r/g, "");
+  const lines = combined
+    .split("\n")
+    .map((line) => line.replace(/\s+$/, ""))
+    .filter((line) => line.length > 0);
 
-  return filtered.length > 0 ? filtered : ["command completed without output"];
+  if (lines.length === 0) {
+    return ["command completed without output"];
+  }
+
+  if (lines.length <= 12) {
+    return lines;
+  }
+
+  const hiddenLineCount = lines.length - 11;
+  return [
+    ...lines.slice(0, 11),
+    `… ${hiddenLineCount} more line${hiddenLineCount === 1 ? "" : "s"}`,
+  ];
+}
+
+function summarizeCommandOutput(lines: string[]): string[] {
+  return lines.slice(0, 6);
+}
+
+function parseSnapshotName(providerRef: string, instanceName: string): string {
+  const prefix = `${instanceName}/`;
+
+  if (providerRef.startsWith(prefix)) {
+    return providerRef.slice(prefix.length);
+  }
+
+  const slashIndex = providerRef.lastIndexOf("/");
+
+  if (slashIndex >= 0 && slashIndex < providerRef.length - 1) {
+    return providerRef.slice(slashIndex + 1);
+  }
+
+  throw new Error(`Snapshot provider ref ${providerRef} is not attached to ${instanceName}.`);
 }
 
 function selectActivityLine(
@@ -1052,6 +1267,27 @@ runcmd:
   - ln -sf /dev/null /etc/systemd/user/gnome-remote-desktop.service
   - ln -sf /dev/null /etc/systemd/user/gnome-remote-desktop-handover.service
   - ln -sf /dev/null /etc/systemd/user/gnome-remote-desktop-headless.service
+  - mkdir -p /mnt/incus-agent
+  - |
+      if mount /dev/disk/by-label/incus-agent /mnt/incus-agent; then
+        (
+          cd /mnt/incus-agent
+          ./install.sh || true
+        )
+        umount /mnt/incus-agent || true
+        agent_target=""
+        for candidate in /usr/lib /lib /etc; do
+          if [ -f "$candidate/systemd/system/incus-agent.service" ]; then
+            agent_target="$candidate"
+            break
+          fi
+        done
+        if [ -n "$agent_target" ]; then
+          mkdir -p /etc/systemd/system/multi-user.target.wants
+          ln -sf "$agent_target/systemd/system/incus-agent.service" /etc/systemd/system/multi-user.target.wants/incus-agent.service
+        fi
+        systemctl start incus-agent.service || true
+      fi
   - systemctl enable parallaize-x11vnc.service
   - systemctl restart gdm3 || true
   - systemctl start parallaize-x11vnc.service

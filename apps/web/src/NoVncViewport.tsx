@@ -3,16 +3,18 @@ import { useEffect, useRef, useState, type JSX } from "react";
 import {
   buildRfbSocketUrls,
   resolveRfbConstructor,
+  viewportSettingsForMode,
   type RfbLike,
+  type RfbViewportMode,
 } from "./novnc.js";
 
 interface NoVncViewportProps {
   className?: string;
-  resizeSession?: boolean;
   showHeader?: boolean;
   statusMode?: "header" | "overlay" | "hidden";
   surfaceClassName?: string;
   title?: string;
+  viewportMode?: RfbViewportMode;
   viewOnly?: boolean;
   webSocketPath: string;
 }
@@ -23,11 +25,11 @@ const reconnectDelayMs = 5_000;
 
 export function NoVncViewport({
   className,
-  resizeSession = true,
   showHeader = true,
   statusMode = showHeader ? "header" : "overlay",
   surfaceClassName,
   title = "Desktop session",
+  viewportMode = "remote",
   viewOnly = false,
   webSocketPath,
 }: NoVncViewportProps): JSX.Element {
@@ -116,9 +118,10 @@ export function NoVncViewport({
         rfb = new RFB(container, socketUrl, {
           shared: true,
         });
-        rfb.scaleViewport = true;
-        rfb.resizeSession = resizeSession;
-        rfb.clipViewport = false;
+        const viewportSettings = viewportSettingsForMode(viewportMode);
+        rfb.scaleViewport = viewportSettings.scaleViewport;
+        rfb.resizeSession = viewportSettings.resizeSession;
+        rfb.clipViewport = viewportSettings.clipViewport;
         rfb.viewOnly = viewOnly;
         rfb.background = "#05070b";
 
@@ -168,10 +171,16 @@ export function NoVncViewport({
       clearRetryTimer();
       disposeRfb(true);
     };
-  }, [resizeSession, viewOnly, webSocketPath]);
+  }, [viewportMode, viewOnly, webSocketPath]);
 
   return (
-    <div className={joinClassNames("novnc-shell", className)}>
+    <div
+      className={joinClassNames(
+        "novnc-shell",
+        `novnc-shell--${viewportMode}`,
+        className,
+      )}
+    >
       {showHeader && statusMode === "header" ? (
         <div className="novnc-shell__header">
           <span>{title}</span>
@@ -181,7 +190,11 @@ export function NoVncViewport({
 
       <div
         ref={containerRef}
-        className={joinClassNames("novnc-surface", surfaceClassName)}
+        className={joinClassNames(
+          "novnc-surface",
+          `novnc-surface--${viewportMode}`,
+          surfaceClassName,
+        )}
       />
 
       {!showHeader && statusMode === "overlay" ? (

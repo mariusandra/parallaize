@@ -7,6 +7,8 @@ export interface RfbLike extends EventTarget {
   disconnect(): void;
 }
 
+export type RfbViewportMode = "remote" | "scale";
+
 export type RfbConstructor = new (
   target: Element,
   url: string,
@@ -24,6 +26,12 @@ interface LocationLike {
   hostname: string;
   port: string;
   protocol: string;
+}
+
+interface RfbViewportSettings {
+  clipViewport: boolean;
+  resizeSession: boolean;
+  scaleViewport: boolean;
 }
 
 export function resolveRfbConstructor(module: {
@@ -50,6 +58,23 @@ export function buildRfbSocketUrls(
 
   const socketProtocol = location.protocol === "https:" ? "wss" : "ws";
   return [`${socketProtocol}://${location.host}${webSocketPath}`];
+}
+
+export function viewportSettingsForMode(mode: RfbViewportMode): RfbViewportSettings {
+  switch (mode) {
+    case "scale":
+      return {
+        clipViewport: false,
+        resizeSession: false,
+        scaleViewport: true,
+      };
+    default:
+      return {
+        clipViewport: false,
+        resizeSession: true,
+        scaleViewport: false,
+      };
+  }
 }
 
 function isNestedModule(value: unknown): value is NestedNoVncModule {

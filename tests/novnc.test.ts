@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildRfbSocketUrls,
   resolveRfbConstructor,
+  viewportSettingsForMode,
 } from "../apps/web/src/novnc.js";
 
 class FakeRfb extends EventTarget {
@@ -59,4 +60,20 @@ test("buildRfbSocketUrls keeps an absolute websocket URL unchanged", () => {
   });
 
   assert.deepEqual(urls, ["ws://monster:3000/api/vms/vm-0003/vnc"]);
+});
+
+test("viewportSettingsForMode defaults the main session to remote resize", () => {
+  assert.deepEqual(viewportSettingsForMode("remote"), {
+    clipViewport: false,
+    resizeSession: true,
+    scaleViewport: false,
+  });
+});
+
+test("viewportSettingsForMode keeps previews on local scaling", () => {
+  assert.deepEqual(viewportSettingsForMode("scale"), {
+    clipViewport: false,
+    resizeSession: false,
+    scaleViewport: true,
+  });
 });
