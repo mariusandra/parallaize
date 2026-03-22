@@ -2039,6 +2039,20 @@ section.workspace-shell {
   gap: 0.45rem;
 }
 
+.brand-wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0;
+}
+
+.brand-wordmark__accent {
+  color: color-mix(in srgb, var(--ink) 84%, white 16%);
+}
+
+:root[data-theme="dark"] .brand-wordmark__accent {
+  color: color-mix(in srgb, white 48%, var(--ink) 26%);
+}
+
 .workspace-rail__status-dot {
   width: 0.58rem;
   height: 0.58rem;
@@ -2101,11 +2115,40 @@ section.workspace-shell {
 }
 
 .vm-tile--active {
-  border-color: rgba(125, 211, 199, 0.34);
-  box-shadow: inset 0 0 0 1px rgba(125, 211, 199, 0.18);
+  border-color: rgba(125, 211, 199, 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(125, 211, 199, 0.3),
+    0 0 0 1px rgba(125, 211, 199, 0.24),
+    0 18px 38px rgba(29, 78, 70, 0.18);
   background:
-    linear-gradient(180deg, rgba(125, 211, 199, 0.08), transparent 36%),
+    linear-gradient(180deg, rgba(125, 211, 199, 0.14), transparent 38%),
     var(--panel-strong);
+}
+
+:root[data-theme="dark"] .vm-tile--active {
+  border-color: rgba(167, 243, 208, 0.82);
+  box-shadow:
+    inset 0 0 0 1px rgba(167, 243, 208, 0.26),
+    0 0 0 1px rgba(167, 243, 208, 0.22),
+    0 20px 42px rgba(5, 12, 10, 0.48);
+  background:
+    linear-gradient(180deg, rgba(134, 239, 172, 0.12), rgba(16, 185, 129, 0.04) 42%, transparent 72%),
+    var(--panel-strong);
+}
+
+.vm-tile--active .vm-tile__preview,
+.vm-tile--active .vm-tile__compact-preview {
+  box-shadow:
+    inset 0 0 0 1px rgba(167, 243, 208, 0.3),
+    0 0 0 1px rgba(167, 243, 208, 0.14);
+}
+
+.vm-tile--active .vm-tile__title {
+  color: color-mix(in srgb, var(--ink) 86%, #0f766e 14%);
+}
+
+:root[data-theme="dark"] .vm-tile--active .vm-tile__title {
+  color: #f3fffb;
 }
 
 .vm-tile__open {
@@ -3477,5 +3520,169 @@ section.workspace-shell {
 
   .vm-strip {
     grid-template-columns: 1fr;
+  }
+}
+
+.novnc-shell__clipboard {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 4;
+  display: grid;
+  gap: 0.4rem;
+  justify-items: end;
+  max-width: min(30rem, calc(100% - 1.1rem));
+  pointer-events: none;
+}
+
+.novnc-shell__clipboard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  width: 100%;
+  pointer-events: auto;
+}
+
+.novnc-shell__clipboard-button {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(6, 10, 15, 0.72);
+  color: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(16px);
+}
+
+.novnc-shell__clipboard-button:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(10, 15, 21, 0.84);
+}
+
+.novnc-shell__clipboard-button:disabled {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(6, 10, 15, 0.42);
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.novnc-shell__clipboard-button--accent {
+  border-color: rgba(56, 189, 248, 0.2);
+  background: rgba(14, 116, 144, 0.72);
+  color: #ecfeff;
+}
+
+.novnc-shell__clipboard-dismiss {
+  min-width: 2rem;
+  padding-inline: 0.55rem;
+  font-size: 0.88rem;
+  text-transform: none;
+}
+
+.novnc-shell__clipboard-copy {
+  margin: 0;
+  width: min(30rem, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.95rem;
+  background: rgba(6, 10, 15, 0.68);
+  padding: 0.58rem 0.75rem;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  text-align: right;
+  backdrop-filter: blur(16px);
+  pointer-events: auto;
+}
+
+.novnc-shell__clipboard-copy--success {
+  border-color: rgba(16, 185, 129, 0.18);
+  color: #a7f3d0;
+}
+
+.novnc-shell__clipboard-copy--warning {
+  border-color: rgba(245, 158, 11, 0.18);
+  color: #fde68a;
+}
+
+.novnc-shell__clipboard-copy--muted {
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.novnc-shell__clipboard-panel {
+  display: grid;
+  gap: 0.45rem;
+  width: min(30rem, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  background: rgba(6, 10, 15, 0.82);
+  padding: 0.7rem;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(16px);
+  pointer-events: auto;
+}
+
+.novnc-shell__clipboard-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.novnc-shell__clipboard-input {
+  width: 100%;
+  min-height: 7rem;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.8rem;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.75rem 0.8rem;
+  color: #f8fafc;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.novnc-shell__clipboard-input::placeholder {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.novnc-shell__clipboard-input:focus {
+  outline: 2px solid rgba(56, 189, 248, 0.45);
+  outline-offset: 1px;
+  border-color: rgba(56, 189, 248, 0.38);
+}
+
+.novnc-shell__clipboard-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+@media (max-width: 780px) {
+  .novnc-shell__clipboard {
+    left: 0.45rem;
+    right: 0.45rem;
+    justify-items: stretch;
+    max-width: none;
+  }
+
+  .novnc-shell__clipboard-actions {
+    justify-content: stretch;
+  }
+
+  .novnc-shell__clipboard-actions .button {
+    flex: 1 1 10rem;
+  }
+
+  .novnc-shell__clipboard-copy {
+    width: 100%;
+    text-align: left;
+  }
+
+  .novnc-shell__clipboard-panel {
+    width: 100%;
+  }
+
+  .novnc-shell__clipboard-panel-actions {
+    justify-content: stretch;
+  }
+
+  .novnc-shell__clipboard-panel-actions .button {
+    flex: 1 1 auto;
   }
 }

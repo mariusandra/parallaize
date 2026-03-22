@@ -1,7 +1,7 @@
 # Parallaize TODO
 
 Last updated: 2026-03-22
-Current focus: validate PostgreSQL persistence on the live Incus path, codify guest template/VNC bootstrap, and tighten operator-session hardening.
+Current focus: validate PostgreSQL persistence on the live Incus path, codify guest template/VNC bootstrap, tighten operator-session hardening, and scope packaging plus host-routed service access.
 
 ## Current State
 
@@ -25,6 +25,7 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 - [x] Shared single-admin cookie login with Basic Auth fallback
 - [x] Host-backed `pnpm smoke:incus` automation
 - [x] Pluggable persistence backend with PostgreSQL support and JSON fallback
+- [x] Browser-to-guest and guest-to-browser clipboard flow for the main noVNC session, with browser-API fallback handling
 
 ## Priority Backlog
 
@@ -54,10 +55,24 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 - [ ] Verify the PostgreSQL store under repeated create/clone/delete churn, not just the happy path.
 - [ ] Record the exact production env/systemd flow for PostgreSQL-backed deployments.
 
+### P2: Packaging And Upgrades
+
+- [ ] Write a packaging decision note comparing Ubuntu `.deb` installs against an npm-only install path; npm should likely remain the dev/operator source path, while deployed installs probably need a real system package because Incus, Caddy, systemd, and host QEMU helpers live outside Node.
+- [ ] Inventory packaged-install dependencies explicitly: Node runtime or bundled binary, Incus CLI/socket access, Caddy, `attr`, VM-capable QEMU/OVMF helpers, optional PostgreSQL, and the systemd/env-file layout.
+- [ ] Decide first supported package targets, likely Ubuntu 24.04 LTS `amd64` first, then add `arm64` only after the live Incus/QEMU path is verified on that architecture.
+- [ ] Design an upgrade path for packaged installs: preflight checks, state backup/export, service restart ordering, rollback expectations, and how persistence/schema changes are handled safely.
+
+### P2: Forwarded Service Routing
+
+- [ ] Design host-based forwarded-service routing so operators can map a VM plus guest port to a stable HTTP/HTTPS hostname instead of only `/vm/:id/forwards/:forwardId/` paths.
+- [ ] Verify whether the intended Tailscale deployment can terminate wildcard hostnames for self-hosted service routing; if not, document the fallback model for self-hosted wildcard DNS plus Caddy.
+- [ ] Keep a fallback path-based or explicit-port routing mode for environments where wildcard host routing is not available or is too operationally heavy.
+
 ### P3: UX And Performance
 
 - [ ] Measure live thumbnail cost with several active VMs before adding more preview behavior.
 - [ ] Decide whether tile previews should stay low-frequency snapshots or move toward a more continuous stream.
+- [ ] Validate clipboard sync on the live Incus desktop path and note any guest-side VNC server quirks that still block rich clipboard behavior.
 - [ ] Revisit Guacamole or stronger session brokering only if noVNC becomes a real product blocker.
 
 ## Next Up
@@ -71,6 +86,7 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 - 2026-03-22: Verified the real `incus` server boots cleanly against both JSON and PostgreSQL persistence; the PostgreSQL backend seeded and served state from the local Docker PostgreSQL stack.
 - 2026-03-22: Added a persistence admin CLI for JSON/PostgreSQL export, import, and direct copy so deployment state can be migrated without manual edits.
 - 2026-03-22: Added persistence diagnostics to the store boundary, exposed them through `/api/health`, and surfaced backend/degraded-state status in the operator UI.
+- 2026-03-22: Added browser-session clipboard plumbing to the noVNC wrapper so the main stage can accept browser paste input and surface guest clipboard updates back to the operator.
 - 2026-03-22: Replaced the hard-wired JSON store with a pluggable JSON/PostgreSQL state-store boundary. PostgreSQL persists the full app state in a singleton JSONB row; JSON remains available for tests and fallback.
 - 2026-03-21: Chose Incus full VMs, Caddy, and noVNC as the shortest path to the first server-first browser POC.
 - 2026-03-21: Kept guest workload services out of the base image and modeled them as forwarded-port defaults captured on templates.

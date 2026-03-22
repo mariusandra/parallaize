@@ -3,9 +3,14 @@ import test from "node:test";
 
 import {
   buildRfbSocketUrls,
+  clipboardPasteShortcutLabel,
+  readBrowserClipboardText,
+  readClipboardEventText,
   readRfbFramebufferSize,
   resolveRfbConstructor,
+  sendGuestPasteShortcut,
   viewportSettingsForMode,
+  writeBrowserClipboardText,
 } from "../apps/web/src/novnc.js";
 
 class FakeRfb extends EventTarget {
@@ -15,7 +20,11 @@ class FakeRfb extends EventTarget {
   scaleViewport = false;
   viewOnly = false;
 
+  blur(): void {}
+  clipboardPasteFrom(_text: string): void {}
   disconnect(): void {}
+  focus(): void {}
+  sendKey(_keysym: number, _code: string, _down?: boolean): void {}
 }
 
 test("resolveRfbConstructor accepts a direct default export", () => {
@@ -61,6 +70,108 @@ test("buildRfbSocketUrls keeps an absolute websocket URL unchanged", () => {
   });
 
   assert.deepEqual(urls, ["ws://monster:3000/api/vms/vm-0003/vnc"]);
+});
+
+test("clipboardPasteShortcutLabel prefers the Mac shortcut for Apple platforms", () => {
+  assert.equal(clipboardPasteShortcutLabel("MacIntel"), "Cmd+V");
+  assert.equal(clipboardPasteShortcutLabel("iPhone"), "Cmd+V");
+});
+
+test("clipboardPasteShortcutLabel falls back to Ctrl+V elsewhere", () => {
+  assert.equal(clipboardPasteShortcutLabel("Linux x86_64"), "Ctrl+V");
+  assert.equal(clipboardPasteShortcutLabel(undefined), "Ctrl+V");
+});
+
+test("readBrowserClipboardText requires a readable clipboard implementation", async () => {
+  await assert.rejects(() => readBrowserClipboardText(null), /clipboard read/i);
+});
+
+test("readBrowserClipboardText delegates to the clipboard API", async () => {
+  const text = await readBrowserClipboardText({
+    readText: async () => "hello from the browser",
+  });
+
+  assert.equal(text, "hello from the browser");
+});
+
+test("writeBrowserClipboardText requires a writable clipboard implementation", async () => {
+  await assert.rejects(() => writeBrowserClipboardText(null, "hello"), /clipboard write/i);
+});
+
+test("writeBrowserClipboardText delegates to the clipboard API", async () => {
+  let written = "";
+
+  await writeBrowserClipboardText(
+    {
+      writeText: async (text) => {
+        written = text;
+      },
+    },
+    "hello from the guest",
+  );
+
+  assert.equal(written, "hello from the guest");
+});
+
+test("readClipboardEventText extracts noVNC clipboard payloads", () => {
+  assert.equal(
+    readClipboardEventText({
+      detail: {
+        text: "copied from the guest",
+      },
+    } as unknown as Event),
+    "copied from the guest",
+  );
+});
+
+test("readClipboardEventText ignores unsupported event payloads", () => {
+  assert.equal(readClipboardEventText(new Event("clipboard")), null);
+  assert.equal(
+    readClipboardEventText({
+      detail: {
+        text: 42,
+      },
+    } as unknown as Event),
+    null,
+  );
+});
+
+test("sendGuestPasteShortcut emits a Ctrl+V key sequence", () => {
+  const calls: Array<{ code: string; down: boolean | undefined; keysym: number }> = [];
+  const rfb = {
+    sendKey(keysym: number, code: string, down?: boolean) {
+      calls.push({
+        code,
+        down,
+        keysym,
+      });
+    },
+  } as Pick<FakeRfb, "sendKey"> as Parameters<typeof sendGuestPasteShortcut>[0];
+
+  sendGuestPasteShortcut(rfb);
+
+  assert.deepEqual(calls, [
+    {
+      code: "ControlLeft",
+      down: true,
+      keysym: 0xffe3,
+    },
+    {
+      code: "KeyV",
+      down: true,
+      keysym: 0x0076,
+    },
+    {
+      code: "KeyV",
+      down: false,
+      keysym: 0x0076,
+    },
+    {
+      code: "ControlLeft",
+      down: false,
+      keysym: 0xffe3,
+    },
+  ]);
 });
 
 test("viewportSettingsForMode defaults the main session to remote resize", () => {

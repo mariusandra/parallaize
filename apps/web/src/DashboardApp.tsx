@@ -2318,7 +2318,11 @@ export function DashboardApp(): JSX.Element {
                           )}
                           aria-hidden="true"
                         />
-                        <span>Parallaize</span>
+                        <span className="brand-wordmark" aria-label="Parallaize">
+                          <span>Parall</span>
+                          <span className="brand-wordmark__accent">ai</span>
+                          <span>ze</span>
+                        </span>
                       </button>
                       <button
                         ref={shellMenuButtonRef}

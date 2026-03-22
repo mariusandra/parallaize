@@ -2,9 +2,14 @@ import { useEffect, useRef, useState, type JSX } from "react";
 
 import {
   buildRfbSocketUrls,
+  clipboardPasteShortcutLabel,
+  readBrowserClipboardText,
+  readClipboardEventText,
   readRfbFramebufferSize,
   resolveRfbConstructor,
+  sendGuestPasteShortcut,
   viewportSettingsForMode,
+  writeBrowserClipboardText,
   type RfbLike,
   type RfbViewportMode,
 } from "./novnc.js";
@@ -30,8 +35,11 @@ interface NoVncViewportProps {
 }
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
+type ClipboardNoticeTone = "muted" | "success" | "warning";
 
 const reconnectDelayMs = 5_000;
+const clipboardNoticeTimeoutMs = 4_500;
+const guestPasteShortcutDelayMs = 80;
 
 export function NoVncViewport({
   className,
@@ -46,9 +54,188 @@ export function NoVncViewport({
   webSocketPath,
 }: NoVncViewportProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const lastGuestClipboardTextRef = useRef<string | null>(null);
+  const manualPasteInputRef = useRef<HTMLTextAreaElement | null>(null);
   const rfbRef = useRef<RfbLike | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [statusMessage, setStatusMessage] = useState("Connecting to the guest desktop...");
+  const [clipboardNotice, setClipboardNotice] = useState<string | null>(null);
+  const [clipboardNoticeTone, setClipboardNoticeTone] = useState<ClipboardNoticeTone>("muted");
+  const [clipboardControlsDismissed, setClipboardControlsDismissed] = useState(false);
+  const [manualPasteDraft, setManualPasteDraft] = useState("");
+  const [manualPasteVisible, setManualPasteVisible] = useState(false);
+  const [pendingGuestClipboardText, setPendingGuestClipboardText] = useState<string | null>(null);
+  const clipboardEnabled = !viewOnly;
+  const pasteShortcut = clipboardPasteShortcutLabel(globalThis.navigator?.platform);
+  const resolvedClipboardMessage =
+    clipboardNotice ??
+    (pendingGuestClipboardText
+      ? "Guest clipboard is ready. Automatic browser copy was blocked."
+      : null);
+  const resolvedClipboardTone =
+    clipboardNotice !== null
+      ? clipboardNoticeTone
+      : pendingGuestClipboardText
+        ? "warning"
+        : "muted";
+
+  function setTransientClipboardNotice(
+    message: string,
+    tone: ClipboardNoticeTone,
+  ): void {
+    setClipboardNotice(message);
+    setClipboardNoticeTone(tone);
+  }
+
+  function dismissClipboardControls(): void {
+    setClipboardControlsDismissed(true);
+    setClipboardNotice(null);
+    setClipboardNoticeTone("muted");
+    setManualPasteDraft("");
+    setManualPasteVisible(false);
+    focusRemoteDesktop();
+  }
+
+  function focusRemoteDesktop(): void {
+    rfbRef.current?.focus({
+      preventScroll: true,
+    });
+  }
+
+  function sendClipboardToGuest(text: string): boolean {
+    const rfb = rfbRef.current;
+
+    if (!clipboardEnabled || !rfb || connectionState !== "connected") {
+      return false;
+    }
+
+    rfb.clipboardPasteFrom(text);
+    focusRemoteDesktop();
+    return true;
+  }
+
+  function pasteClipboardIntoFocusedGuestTarget(text: string): boolean {
+    const rfb = rfbRef.current;
+
+    if (!sendClipboardToGuest(text) || !rfb) {
+      return false;
+    }
+
+    window.setTimeout(() => {
+      if (rfbRef.current !== rfb || connectionState !== "connected") {
+        return;
+      }
+
+      sendGuestPasteShortcut(rfb);
+      focusRemoteDesktop();
+    }, guestPasteShortcutDelayMs);
+
+    return true;
+  }
+
+  async function handlePasteFromBrowserClipboard(): Promise<void> {
+    try {
+      const clipboardText = await readBrowserClipboardText(globalThis.navigator?.clipboard);
+
+      if (clipboardText.length === 0) {
+        setTransientClipboardNotice("Local clipboard is empty.", "warning");
+        return;
+      }
+
+      if (!pasteClipboardIntoFocusedGuestTarget(clipboardText)) {
+        setTransientClipboardNotice("Desktop not ready yet. Retry once the session reconnects.", "warning");
+        return;
+      }
+
+      setTransientClipboardNotice("Sent local clipboard and triggered guest paste.", "success");
+    } catch {
+      setManualPasteVisible(true);
+      setTransientClipboardNotice(
+        `Browser clipboard read is unavailable here. Paste into the send box with ${pasteShortcut}.`,
+        "warning",
+      );
+    }
+  }
+
+  function handleSendManualPaste(): void {
+    const clipboardText = manualPasteDraft;
+
+    if (clipboardText.length === 0) {
+      setTransientClipboardNotice("Paste text into the send box first.", "warning");
+      return;
+    }
+
+    if (!pasteClipboardIntoFocusedGuestTarget(clipboardText)) {
+      setTransientClipboardNotice("Desktop not ready yet. Retry once the session reconnects.", "warning");
+      return;
+    }
+
+    setManualPasteDraft("");
+    setManualPasteVisible(false);
+    setTransientClipboardNotice("Sent local clipboard and triggered guest paste.", "success");
+  }
+
+  async function handleCopyGuestClipboard(): Promise<void> {
+    if (!pendingGuestClipboardText) {
+      return;
+    }
+
+    try {
+      await writeBrowserClipboardText(
+        globalThis.navigator?.clipboard,
+        pendingGuestClipboardText,
+      );
+      setPendingGuestClipboardText(null);
+      setTransientClipboardNotice("Guest clipboard copied to your browser.", "success");
+      return;
+    } catch {
+      if (!copyTextWithSelection(pendingGuestClipboardText)) {
+        setTransientClipboardNotice(
+          "Browser clipboard write was blocked. Try copying again inside the guest.",
+          "warning",
+        );
+        return;
+      }
+    }
+
+    setPendingGuestClipboardText(null);
+    setTransientClipboardNotice("Guest clipboard copied to your browser.", "success");
+  }
+
+  useEffect(() => {
+    if (!clipboardNotice) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setClipboardNotice(null);
+      setClipboardNoticeTone("muted");
+    }, clipboardNoticeTimeoutMs);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [clipboardNotice]);
+
+  useEffect(() => {
+    setClipboardNotice(null);
+    setClipboardNoticeTone("muted");
+    setClipboardControlsDismissed(false);
+    setManualPasteDraft("");
+    setManualPasteVisible(false);
+    setPendingGuestClipboardText(null);
+    lastGuestClipboardTextRef.current = null;
+  }, [viewOnly, webSocketPath]);
+
+  useEffect(() => {
+    if (!manualPasteVisible) {
+      return;
+    }
+
+    manualPasteInputRef.current?.focus({
+      preventScroll: true,
+    });
+  }, [manualPasteVisible]);
 
   useEffect(() => {
     if (!onResolutionChange) {
@@ -167,6 +354,44 @@ export function NoVncViewport({
   }, [onResolutionChange]);
 
   useEffect(() => {
+    if (!clipboardEnabled) {
+      return;
+    }
+
+    const mountNode = containerRef.current;
+
+    if (!mountNode) {
+      return;
+    }
+
+    function handlePaste(event: ClipboardEvent): void {
+      const clipboardText =
+        event.clipboardData?.getData("text/plain") ??
+        event.clipboardData?.getData("text") ??
+        "";
+
+      if (clipboardText.length === 0) {
+        return;
+      }
+
+      if (!pasteClipboardIntoFocusedGuestTarget(clipboardText)) {
+        setTransientClipboardNotice("Desktop not ready yet. Retry once the session reconnects.", "warning");
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      setTransientClipboardNotice("Sent local clipboard and triggered guest paste.", "success");
+    }
+
+    mountNode.addEventListener("paste", handlePaste);
+
+    return () => {
+      mountNode.removeEventListener("paste", handlePaste);
+    };
+  }, [clipboardEnabled, connectionState]);
+
+  useEffect(() => {
     const mountNode = containerRef.current;
 
     if (!mountNode) {
@@ -178,6 +403,7 @@ export function NoVncViewport({
     let cancelled = false;
     let rfb: RfbLike | null = null;
     let handleConnect: (() => void) | null = null;
+    let handleClipboard: ((event: Event) => void) | null = null;
     let handleDisconnect: ((event: Event) => void) | null = null;
     let handleSecurityFailure: (() => void) | null = null;
     let retryTimer: number | null = null;
@@ -191,10 +417,22 @@ export function NoVncViewport({
     }
 
     function disposeRfb(disconnect: boolean): void {
-      if (rfb && handleConnect && handleDisconnect && handleSecurityFailure) {
-        rfb.removeEventListener("connect", handleConnect);
-        rfb.removeEventListener("disconnect", handleDisconnect);
-        rfb.removeEventListener("securityfailure", handleSecurityFailure);
+      if (rfb) {
+        if (handleConnect) {
+          rfb.removeEventListener("connect", handleConnect);
+        }
+
+        if (handleClipboard) {
+          rfb.removeEventListener("clipboard", handleClipboard);
+        }
+
+        if (handleDisconnect) {
+          rfb.removeEventListener("disconnect", handleDisconnect);
+        }
+
+        if (handleSecurityFailure) {
+          rfb.removeEventListener("securityfailure", handleSecurityFailure);
+        }
       }
 
       if (disconnect) {
@@ -204,6 +442,7 @@ export function NoVncViewport({
       rfb = null;
       rfbRef.current = null;
       handleConnect = null;
+      handleClipboard = null;
       handleDisconnect = null;
       handleSecurityFailure = null;
       container.replaceChildren();
@@ -278,7 +517,59 @@ export function NoVncViewport({
           setStatusMessage("The browser VNC bridge rejected the connection.");
         };
 
+        handleClipboard =
+          clipboardEnabled
+            ? (event: Event) => {
+                const clipboardText = readClipboardEventText(event);
+
+                if (clipboardText === null || cancelled) {
+                  return;
+                }
+
+                if (clipboardText.length === 0) {
+                  setPendingGuestClipboardText(null);
+                  setTransientClipboardNotice("Guest clipboard cleared.", "success");
+                  return;
+                }
+
+                if (lastGuestClipboardTextRef.current !== clipboardText) {
+                  lastGuestClipboardTextRef.current = clipboardText;
+                  setClipboardControlsDismissed(false);
+                }
+
+                void writeBrowserClipboardText(
+                  globalThis.navigator?.clipboard,
+                  clipboardText,
+                )
+                  .then(() => {
+                    if (cancelled) {
+                      return;
+                    }
+
+                    setPendingGuestClipboardText(null);
+                    setTransientClipboardNotice(
+                      "Guest clipboard copied to your browser.",
+                      "success",
+                    );
+                  })
+                  .catch(() => {
+                    if (cancelled) {
+                      return;
+                    }
+
+                    setPendingGuestClipboardText(clipboardText);
+                    setTransientClipboardNotice(
+                      "Guest clipboard is ready. Automatic browser copy was blocked.",
+                      "warning",
+                    );
+                  });
+              }
+            : null;
+
         rfb.addEventListener("connect", handleConnect);
+        if (handleClipboard) {
+          rfb.addEventListener("clipboard", handleClipboard);
+        }
         rfb.addEventListener("disconnect", handleDisconnect);
         rfb.addEventListener("securityfailure", handleSecurityFailure);
       } catch (error) {
@@ -337,6 +628,87 @@ export function NoVncViewport({
           </span>
         </div>
       ) : null}
+
+      {clipboardEnabled && !clipboardControlsDismissed ? (
+        <div className="novnc-shell__clipboard">
+          <div className="novnc-shell__clipboard-actions">
+            <button
+              className="button button--ghost novnc-shell__clipboard-button"
+              type="button"
+              onClick={() => void handlePasteFromBrowserClipboard()}
+              disabled={connectionState !== "connected"}
+            >
+              Paste local
+            </button>
+            {pendingGuestClipboardText ? (
+              <button
+                className="button button--secondary novnc-shell__clipboard-button novnc-shell__clipboard-button--accent"
+                type="button"
+                onClick={() => void handleCopyGuestClipboard()}
+              >
+                Copy guest
+              </button>
+            ) : null}
+            <button
+              className="button button--ghost novnc-shell__clipboard-button novnc-shell__clipboard-dismiss"
+              type="button"
+              aria-label="Hide clipboard controls"
+              onClick={dismissClipboardControls}
+            >
+              x
+            </button>
+          </div>
+          {resolvedClipboardMessage ? (
+            <p
+              className={joinClassNames(
+                "novnc-shell__clipboard-copy",
+                `novnc-shell__clipboard-copy--${resolvedClipboardTone}`,
+              )}
+              aria-live="polite"
+            >
+              {resolvedClipboardMessage}
+            </p>
+          ) : null}
+          {manualPasteVisible ? (
+            <div className="novnc-shell__clipboard-panel">
+              <label className="novnc-shell__clipboard-label" htmlFor="novnc-manual-paste">
+                Manual paste send box
+              </label>
+              <textarea
+                id="novnc-manual-paste"
+                ref={manualPasteInputRef}
+                className="novnc-shell__clipboard-input"
+                value={manualPasteDraft}
+                onChange={(event) => {
+                  setManualPasteDraft(event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "Enter" &&
+                    (event.metaKey || event.ctrlKey)
+                  ) {
+                    event.preventDefault();
+                    handleSendManualPaste();
+                  }
+                }}
+                placeholder="Paste local text here, then send and paste it into the focused guest app."
+                spellCheck={false}
+                rows={5}
+              />
+              <div className="novnc-shell__clipboard-panel-actions">
+                <button
+                  className="button button--secondary novnc-shell__clipboard-button novnc-shell__clipboard-button--accent"
+                  type="button"
+                  onClick={handleSendManualPaste}
+                  disabled={connectionState !== "connected"}
+                >
+                  Paste into guest
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -356,4 +728,30 @@ function connectionStateClassName(state: ConnectionState): string {
 
 function joinClassNames(...values: Array<string | null | undefined | false>): string {
   return values.filter(Boolean).join(" ");
+}
+
+function copyTextWithSelection(text: string): boolean {
+  const documentRef = globalThis.document;
+
+  if (!documentRef?.body || typeof documentRef.execCommand !== "function") {
+    return false;
+  }
+
+  const textarea = documentRef.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.opacity = "0";
+  documentRef.body.append(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, text.length);
+
+  try {
+    return documentRef.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+  }
 }

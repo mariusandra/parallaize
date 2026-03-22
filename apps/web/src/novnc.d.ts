@@ -20,9 +20,13 @@ declare module "@novnc/novnc/lib/rfb.js" {
 
     background: string;
     clipViewport: boolean;
+    clipboardPasteFrom(text: string): void;
+    focus(options?: FocusOptions): void;
     resizeSession: boolean;
+    sendKey(keysym: number, code: string, down?: boolean): void;
     scaleViewport: boolean;
     viewOnly: boolean;
+    blur(): void;
     disconnect(): void;
   }
 }
