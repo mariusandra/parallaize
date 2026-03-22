@@ -33,6 +33,7 @@ const config = loadConfig();
 const provider = createProvider(config.providerKind, config.incusBinary, {
   project: config.incusProject ?? undefined,
   guestVncPort: config.guestVncPort,
+  templateCompression: config.templateCompression,
 });
 const store = new JsonStateStore(config.dataFile, () => createSeedState(provider.state));
 const manager = new DesktopManager(store, provider);

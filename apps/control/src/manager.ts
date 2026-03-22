@@ -643,15 +643,17 @@ export class DesktopManager {
 
     const reservedTemplateId = targetTemplateId;
 
-    void this.runJob(jobId, async () => {
-      await sleep(450);
+    void this.runJob(jobId, async (report) => {
+      report("Preparing template capture", 18);
+      await sleep(180);
       const detail = this.getVmDetail(vmId);
       this.ensureActiveProvider(detail.vm);
 
       const providerSnapshot = await this.provider.captureTemplate(detail.vm, {
         templateId: reservedTemplateId,
         name: captureName,
-      });
+      }, report);
+      report("Updating template metadata", 96);
       const launchSource =
         providerSnapshot.launchSource ??
         detail.template?.launchSource ??

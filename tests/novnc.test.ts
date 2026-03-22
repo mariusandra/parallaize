@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildRfbSocketUrls,
+  readRfbFramebufferSize,
   resolveRfbConstructor,
   viewportSettingsForMode,
 } from "../apps/web/src/novnc.js";
@@ -76,4 +77,34 @@ test("viewportSettingsForMode keeps previews on local scaling", () => {
     resizeSession: false,
     scaleViewport: true,
   });
+});
+
+test("readRfbFramebufferSize prefers the tracked framebuffer size over canvas backing size", () => {
+  assert.deepEqual(
+    readRfbFramebufferSize({
+      _display: {
+        height: 986,
+        width: 848,
+      },
+      _fbHeight: 1972,
+      _fbWidth: 1696,
+    }),
+    {
+      height: 986,
+      width: 848,
+    },
+  );
+});
+
+test("readRfbFramebufferSize falls back to direct framebuffer fields", () => {
+  assert.deepEqual(
+    readRfbFramebufferSize({
+      _fbHeight: 1233,
+      _fbWidth: 1152,
+    }),
+    {
+      height: 1233,
+      width: 1152,
+    },
+  );
 });

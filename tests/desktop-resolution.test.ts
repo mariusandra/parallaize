@@ -6,6 +6,7 @@ import {
   emptyResolutionRequestQueue,
   enqueueResolutionRequest,
   resolveResolutionRequest,
+  shouldScheduleResolutionRepair,
   type ResolutionRequest,
 } from "../apps/web/src/desktopResolution.js";
 
@@ -122,4 +123,56 @@ test("enqueueResolutionRequest ignores duplicate in-flight targets", () => {
   assert.equal(result.requestToStart, null);
   assert.equal(result.nextQueue.inFlight, inFlight);
   assert.equal(result.nextQueue.queued, null);
+});
+
+test("shouldScheduleResolutionRepair returns true for an idle mismatched target", () => {
+  assert.equal(
+    shouldScheduleResolutionRepair({
+      attempts: 1,
+      currentRemoteKey: "vm-0001:1688x1972",
+      maxAttempts: 4,
+      queue: emptyResolutionRequestQueue,
+      targetKey: "vm-0001:1352x1233",
+    }),
+    true,
+  );
+});
+
+test("shouldScheduleResolutionRepair returns false when the current resolution already matches", () => {
+  assert.equal(
+    shouldScheduleResolutionRepair({
+      attempts: 0,
+      currentRemoteKey: "vm-0001:1352x1233",
+      maxAttempts: 4,
+      queue: emptyResolutionRequestQueue,
+      targetKey: "vm-0001:1352x1233",
+    }),
+    false,
+  );
+});
+
+test("shouldScheduleResolutionRepair returns false while requests are still queued or exhausted", () => {
+  assert.equal(
+    shouldScheduleResolutionRepair({
+      attempts: 4,
+      currentRemoteKey: "vm-0001:1688x1972",
+      maxAttempts: 4,
+      queue: emptyResolutionRequestQueue,
+      targetKey: "vm-0001:1352x1233",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldScheduleResolutionRepair({
+      attempts: 0,
+      currentRemoteKey: "vm-0001:1688x1972",
+      maxAttempts: 4,
+      queue: {
+        inFlight: buildRequest(1, 1352, 1233),
+        queued: null,
+      },
+      targetKey: "vm-0001:1352x1233",
+    }),
+    false,
+  );
 });

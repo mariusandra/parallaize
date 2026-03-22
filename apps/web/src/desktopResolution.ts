@@ -129,3 +129,21 @@ export function resolveResolutionRequest(
     requestToStart: queue.queued,
   };
 }
+
+export function shouldScheduleResolutionRepair(input: {
+  attempts: number;
+  currentRemoteKey: string | null;
+  maxAttempts: number;
+  queue: ResolutionRequestQueue;
+  targetKey: string | null;
+}): boolean {
+  if (!input.targetKey || input.currentRemoteKey === input.targetKey) {
+    return false;
+  }
+
+  if (input.queue.inFlight !== null || input.queue.queued !== null) {
+    return false;
+  }
+
+  return input.attempts < input.maxAttempts;
+}

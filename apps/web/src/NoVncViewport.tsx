@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type JSX } from "react";
 
 import {
   buildRfbSocketUrls,
+  readRfbFramebufferSize,
   resolveRfbConstructor,
   viewportSettingsForMode,
   type RfbLike,
@@ -43,6 +44,7 @@ export function NoVncViewport({
   webSocketPath,
 }: NoVncViewportProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const rfbRef = useRef<RfbLike | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [statusMessage, setStatusMessage] = useState("Connecting to the guest desktop...");
 
@@ -64,15 +66,21 @@ export function NoVncViewport({
     let containerResizeObserver: ResizeObserver | null = null;
     let canvasResizeObserver: ResizeObserver | null = null;
     let canvasMutationObserver: MutationObserver | null = null;
+    let remoteResolutionPollTimer: number | null = null;
     let lastSerialized = "";
 
     function reportResolution(canvas: HTMLCanvasElement | null): void {
       const bounds = resolvedMountNode.getBoundingClientRect();
+      const framebufferSize = readRfbFramebufferSize(rfbRef.current);
       const nextResolution: NoVncViewportResolution = {
         clientHeight: bounds.height > 0 ? Math.round(bounds.height) : null,
         clientWidth: bounds.width > 0 ? Math.round(bounds.width) : null,
-        remoteHeight: canvas && canvas.height > 0 ? canvas.height : null,
-        remoteWidth: canvas && canvas.width > 0 ? canvas.width : null,
+        remoteHeight:
+          framebufferSize.height ??
+          (canvas && canvas.height > 0 ? canvas.height : null),
+        remoteWidth:
+          framebufferSize.width ??
+          (canvas && canvas.width > 0 ? canvas.width : null),
       };
       const serialized = JSON.stringify(nextResolution);
 
@@ -133,12 +141,18 @@ export function NoVncViewport({
       subtree: true,
     });
     containerResizeObserver.observe(resolvedMountNode);
+    remoteResolutionPollTimer = window.setInterval(() => {
+      reportResolution(activeCanvas);
+    }, 250);
 
     attachCanvas(resolvedMountNode.querySelector<HTMLCanvasElement>("canvas"));
 
     return () => {
       containerObserver.disconnect();
       containerResizeObserver?.disconnect();
+      if (remoteResolutionPollTimer !== null) {
+        window.clearInterval(remoteResolutionPollTimer);
+      }
       detachCanvasObservers();
       activeCanvas = null;
       reportResolutionChange({
@@ -186,6 +200,7 @@ export function NoVncViewport({
       }
 
       rfb = null;
+      rfbRef.current = null;
       handleConnect = null;
       handleDisconnect = null;
       handleSecurityFailure = null;
@@ -231,6 +246,7 @@ export function NoVncViewport({
         rfb = new RFB(container, socketUrl, {
           shared: true,
         });
+        rfbRef.current = rfb;
         const viewportSettings = viewportSettingsForMode(viewportMode);
         rfb.scaleViewport = viewportSettings.scaleViewport;
         rfb.resizeSession = viewportSettings.resizeSession;

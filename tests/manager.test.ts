@@ -92,6 +92,51 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.ok((job?.progressPercent ?? 100) < 100);
 });
 
+test("template capture jobs expose staged publish progress", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-capture-progress-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const originalCaptureTemplate = provider.captureTemplate.bind(provider);
+  provider.captureTemplate = async (vm, target, report) => {
+    report?.("Publishing template image (uncompressed export in progress, 1s elapsed)", 62);
+    await wait(80);
+    report?.("Publishing template image (uncompressed export in progress, 2s elapsed)", 66);
+    await wait(80);
+    return originalCaptureTemplate(vm, target, report);
+  };
+
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  manager.captureTemplate("vm-0001", {
+    name: "Progress Capture",
+    description: "Verifies capture progress reporting",
+  });
+
+  await wait(260);
+
+  const job = manager.getVmDetail("vm-0001").recentJobs[0];
+  assert.ok(job);
+  assert.equal(job?.kind, "capture-template");
+  assert.equal(job?.status, "running");
+  assert.match(job?.message ?? "", /Publishing template image/);
+  assert.ok((job?.progressPercent ?? 0) > 14);
+  assert.ok((job?.progressPercent ?? 100) < 100);
+
+  await wait(250);
+
+  assert.ok(
+    manager
+      .getSummary()
+      .jobs.some((entry) => entry.kind === "capture-template" && entry.status === "succeeded"),
+  );
+});
+
 test("command output is retained and snapshots can launch or restore VMs", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-command-history-"));
   context.after(() => {
@@ -361,6 +406,7 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   const provider = createProvider("incus", "incus", {
     guestVncPort: 5990,
     commandRunner: runner,
+    templateCompression: "zstd",
     guestPortProbe: {
       async probe() {
         return true;
@@ -481,6 +527,99 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     `${instanceName}/${calls.at(-2)?.[3] ?? ""}`,
     "--alias",
     "parallaize-template-tpl-0099",
+    "--reuse",
+    "--compression",
+    "zstd",
+  ]);
+});
+
+test("incus provider emits heartbeat progress while publishing a silent template export", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0100-publish-heartbeat";
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      return ok("", args);
+    },
+    async executeStreaming(args: string[]) {
+      calls.push(args);
+      await wait(130);
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+    templatePublishHeartbeatMs: 40,
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0100",
+    name: "publish-heartbeat",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 100,
+    activeWindow: "editor",
+    workspacePath: "/root",
+    session: {
+      kind: "vnc",
+      host: "10.55.0.100",
+      port: 5901,
+      webSocketPath: "/api/vms/vm-0100/vnc",
+      browserPath: "/?vm=vm-0100",
+      display: "10.55.0.100:5901",
+    },
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const reports: Array<{ message: string; progressPercent: number | null }> = [];
+  await provider.captureTemplate(
+    vm,
+    {
+      templateId: "tpl-0100",
+      name: "Heartbeat Capture",
+    },
+    (message, progressPercent) => {
+      reports.push({
+        message,
+        progressPercent,
+      });
+    },
+  );
+
+  assert.ok(
+    reports.some(
+      (entry) =>
+        entry.message.includes("uncompressed export in progress") &&
+        (entry.progressPercent ?? 0) > 58,
+    ),
+  );
+  assert.equal(reports.at(-1)?.message, "Template image published");
+  assert.equal(reports.at(-1)?.progressPercent, 92);
+  assert.deepEqual(calls.at(-1), [
+    "publish",
+    `${instanceName}/${calls.at(-2)?.[3] ?? ""}`,
+    "--alias",
+    "parallaize-template-tpl-0100",
     "--reuse",
   ]);
 });

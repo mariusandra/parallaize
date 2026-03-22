@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { connect as connectTcp } from "node:net";
 import { cpus, freemem, loadavg, totalmem } from "node:os";
 
@@ -16,6 +16,9 @@ import type {
 
 const DEFAULT_GUEST_VNC_PORT = 5900;
 const DEFAULT_GUEST_WORKSPACE = "/root";
+const DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS = 4000;
+const TEMPLATE_PUBLISH_START_PERCENT = 58;
+const TEMPLATE_PUBLISH_COMPLETE_PERCENT = 92;
 
 export interface CaptureTemplateTarget {
   templateId: string;
@@ -27,7 +30,23 @@ export interface CreateProviderOptions {
   guestVncPort?: number;
   commandRunner?: IncusCommandRunner;
   guestPortProbe?: GuestPortProbe;
+  templatePublishHeartbeatMs?: number;
+  templateCompression?: IncusImageCompression;
 }
+
+export type CaptureTemplateProgressReporter = (
+  message: string,
+  progressPercent: number | null,
+) => void;
+
+export type IncusImageCompression =
+  | "bzip2"
+  | "gzip"
+  | "lz4"
+  | "lzma"
+  | "xz"
+  | "zstd"
+  | "none";
 
 export interface DesktopProvider {
   state: ProviderState;
@@ -61,6 +80,7 @@ export interface DesktopProvider {
   captureTemplate(
     vm: VmInstance,
     target: CaptureTemplateTarget,
+    report?: CaptureTemplateProgressReporter,
   ): Promise<ProviderSnapshot>;
   injectCommand(vm: VmInstance, command: string): Promise<ProviderMutation>;
   tickVm(vm: VmInstance, template: EnvironmentTemplate): ProviderTick | null;
@@ -104,6 +124,10 @@ export interface ProviderTelemetrySample {
 
 interface IncusCommandRunner {
   execute(args: string[]): CommandResult;
+  executeStreaming?(
+    args: string[],
+    listeners?: CommandStreamListeners,
+  ): Promise<CommandResult>;
 }
 
 interface CommandResult {
@@ -112,6 +136,11 @@ interface CommandResult {
   stdout: string;
   stderr: string;
   error?: Error;
+}
+
+interface CommandStreamListeners {
+  onStdout?(chunk: string): void;
+  onStderr?(chunk: string): void;
 }
 
 interface GuestPortProbe {
@@ -317,7 +346,10 @@ class MockProvider implements DesktopProvider {
   async captureTemplate(
     vm: VmInstance,
     target: CaptureTemplateTarget,
+    report?: CaptureTemplateProgressReporter,
   ): Promise<ProviderSnapshot> {
+    report?.("Publishing template image", TEMPLATE_PUBLISH_START_PERCENT);
+
     return {
       providerRef: `mock://snapshots/${target.templateId}`,
       summary: `Template ${target.name} captured from ${vm.name}.`,
@@ -381,6 +413,8 @@ class IncusProvider implements DesktopProvider {
   private readonly runner: IncusCommandRunner;
   private readonly project: string | null;
   private readonly guestPortProbe: GuestPortProbe;
+  private readonly templatePublishHeartbeatMs: number;
+  private readonly templateCompression: IncusImageCompression | null;
   private telemetrySnapshotAt = 0;
   private telemetryInstances = new Map<string, IncusListInstance>();
   private readonly vmCpuUsage = new Map<string, { capturedAt: number; usage: number }>();
@@ -395,6 +429,11 @@ class IncusProvider implements DesktopProvider {
       options.commandRunner ??
       new SpawnIncusCommandRunner(this.incusBinary, options.project);
     this.guestPortProbe = options.guestPortProbe ?? new TcpGuestPortProbe();
+    this.templatePublishHeartbeatMs = Math.max(
+      options.templatePublishHeartbeatMs ?? DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS,
+      50,
+    );
+    this.templateCompression = options.templateCompression ?? null;
     this.state = this.probeState();
   }
 
@@ -729,19 +768,85 @@ class IncusProvider implements DesktopProvider {
   async captureTemplate(
     vm: VmInstance,
     target: CaptureTemplateTarget,
+    report?: CaptureTemplateProgressReporter,
   ): Promise<ProviderSnapshot> {
     this.assertAvailable();
     const snapshotName = buildTemplateSnapshotName(target.templateId);
     const alias = buildTemplateAlias(target.templateId);
 
+    report?.("Creating source snapshot", 34);
     this.run(["snapshot", "create", vm.providerRef, snapshotName]);
-    this.run([
-      "publish",
-      `${vm.providerRef}/${snapshotName}`,
-      "--alias",
-      alias,
-      "--reuse",
-    ]);
+    report?.("Publishing template image", TEMPLATE_PUBLISH_START_PERCENT);
+
+    const publishStartedAt = Date.now();
+    let lastReportedPercent = TEMPLATE_PUBLISH_START_PERCENT;
+    let lastPublishDetail: string | undefined;
+    const reportPublishProgress = (percent: number | null, detail?: string) => {
+      const elapsedSeconds = Math.max(
+        1,
+        Math.round((Date.now() - publishStartedAt) / 1000),
+      );
+      const message = detail
+        ? `Publishing template image (${detail}, ${elapsedSeconds}s elapsed)`
+        : `Publishing template image (${describeTemplatePublishActivity(this.templateCompression)}, ${elapsedSeconds}s elapsed)`;
+      report?.(message, percent);
+    };
+    const heartbeat = setInterval(() => {
+      if (!lastPublishDetail) {
+        lastReportedPercent = estimateTemplatePublishProgress(
+          publishStartedAt,
+          this.templatePublishHeartbeatMs,
+        );
+      }
+
+      reportPublishProgress(lastReportedPercent, lastPublishDetail);
+    }, this.templatePublishHeartbeatMs);
+
+    try {
+      const publishArgs = [
+        "publish",
+        `${vm.providerRef}/${snapshotName}`,
+        "--alias",
+        alias,
+        "--reuse",
+      ];
+
+      if (this.templateCompression) {
+        publishArgs.push("--compression", this.templateCompression);
+      }
+
+      await this.runStreaming(
+        publishArgs,
+        {
+          onStdout: (chunk) => {
+            const parsedPercent = parseTemplatePublishPercent(chunk);
+
+            if (parsedPercent === null) {
+              return;
+            }
+
+            lastReportedPercent = mapTemplatePublishPercent(parsedPercent);
+            lastPublishDetail = `${parsedPercent}% exported`;
+            reportPublishProgress(lastReportedPercent, lastPublishDetail);
+          },
+          onStderr: (chunk) => {
+            const parsedPercent = parseTemplatePublishPercent(chunk);
+
+            if (parsedPercent === null) {
+              return;
+            }
+
+            lastReportedPercent = mapTemplatePublishPercent(parsedPercent);
+            lastPublishDetail = `${parsedPercent}% exported`;
+            reportPublishProgress(lastReportedPercent, lastPublishDetail);
+          },
+        },
+      );
+    } finally {
+      clearInterval(heartbeat);
+    }
+
+    report?.("Template image published", TEMPLATE_PUBLISH_COMPLETE_PERCENT);
 
     return {
       providerRef: `${vm.providerRef}/${snapshotName}`,
@@ -971,6 +1076,21 @@ class IncusProvider implements DesktopProvider {
 
     throw new Error(formatCommandFailure(args, result));
   }
+
+  private async runStreaming(
+    args: string[],
+    listeners?: CommandStreamListeners,
+  ): Promise<CommandResult> {
+    const result = this.runner.executeStreaming
+      ? await this.runner.executeStreaming(args, listeners)
+      : this.runner.execute(args);
+
+    if (result.status === 0) {
+      return result;
+    }
+
+    throw new Error(formatCommandFailure(args, result));
+  }
 }
 
 class SpawnIncusCommandRunner implements IncusCommandRunner {
@@ -994,6 +1114,63 @@ class SpawnIncusCommandRunner implements IncusCommandRunner {
       stderr: result.stderr ?? "",
       error: result.error ?? undefined,
     };
+  }
+
+  async executeStreaming(
+    args: string[],
+    listeners: CommandStreamListeners = {},
+  ): Promise<CommandResult> {
+    const fullArgs = this.project
+      ? ["--project", this.project, ...args]
+      : args;
+
+    return new Promise((resolve) => {
+      const child = spawn(this.incusBinary, fullArgs, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      const finish = (result: CommandResult) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        resolve(result);
+      };
+
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk;
+        listeners.onStdout?.(chunk);
+      });
+
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        stderr += chunk;
+        listeners.onStderr?.(chunk);
+      });
+
+      child.on("error", (error) => {
+        finish({
+          args: fullArgs,
+          status: null,
+          stdout,
+          stderr,
+          error,
+        });
+      });
+
+      child.on("close", (status) => {
+        finish({
+          args: fullArgs,
+          status,
+          stdout,
+          stderr,
+        });
+      });
+    });
   }
 }
 
@@ -1602,6 +1779,63 @@ function buildTemplateSnapshotName(templateId: string): string {
 
 function buildTemplateAlias(templateId: string): string {
   return `parallaize-template-${slugify(templateId)}`;
+}
+
+function describeTemplatePublishActivity(
+  compression: IncusImageCompression | null,
+): string {
+  switch (compression) {
+    case "bzip2":
+    case "gzip":
+    case "lz4":
+    case "lzma":
+    case "xz":
+    case "zstd":
+      return `${compression} compression in progress`;
+    case "none":
+    case null:
+    default:
+      return "uncompressed export in progress";
+  }
+}
+
+function estimateTemplatePublishProgress(
+  startedAt: number,
+  heartbeatMs: number,
+): number {
+  const elapsedMs = Date.now() - startedAt;
+  const elapsedBeats = Math.max(Math.floor(elapsedMs / Math.max(heartbeatMs, 1)), 0);
+  const estimated = TEMPLATE_PUBLISH_START_PERCENT + elapsedBeats * 4;
+
+  return Math.min(estimated, TEMPLATE_PUBLISH_COMPLETE_PERCENT - 2);
+}
+
+function parseTemplatePublishPercent(chunk: string): number | null {
+  const normalized = stripAnsi(chunk).replace(/\r/g, "\n");
+  const matches = [...normalized.matchAll(/\b(\d{1,3})%\b/g)];
+  const rawValue = matches.at(-1)?.[1];
+
+  if (!rawValue) {
+    return null;
+  }
+
+  const percent = Number.parseInt(rawValue, 10);
+
+  if (!Number.isFinite(percent)) {
+    return null;
+  }
+
+  return Math.min(Math.max(percent, 0), 100);
+}
+
+function mapTemplatePublishPercent(percent: number): number {
+  const bounded = Math.min(Math.max(percent, 0), 100);
+  const span = TEMPLATE_PUBLISH_COMPLETE_PERCENT - TEMPLATE_PUBLISH_START_PERCENT;
+  return TEMPLATE_PUBLISH_START_PERCENT + Math.round((bounded / 100) * span);
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
 }
 
 function normalizeStatus(value: string | undefined): string {

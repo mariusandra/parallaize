@@ -34,6 +34,17 @@ interface RfbViewportSettings {
   scaleViewport: boolean;
 }
 
+interface RfbDisplayLike {
+  height?: unknown;
+  width?: unknown;
+}
+
+interface RfbInternalLike {
+  _display?: RfbDisplayLike;
+  _fbHeight?: unknown;
+  _fbWidth?: unknown;
+}
+
 export function resolveRfbConstructor(module: {
   default?: unknown;
 }): RfbConstructor | null {
@@ -77,6 +88,38 @@ export function viewportSettingsForMode(mode: RfbViewportMode): RfbViewportSetti
   }
 }
 
+export function readRfbFramebufferSize(rfb: unknown): {
+  height: number | null;
+  width: number | null;
+} {
+  if (!isNestedModule(rfb)) {
+    return {
+      height: null,
+      width: null,
+    };
+  }
+
+  const internal = rfb as RfbInternalLike;
+  const display = isNestedModule(internal._display)
+    ? (internal._display as RfbDisplayLike)
+    : null;
+
+  return {
+    height:
+      readPositiveNumber(display?.height) ??
+      readPositiveNumber(internal._fbHeight) ??
+      null,
+    width:
+      readPositiveNumber(display?.width) ??
+      readPositiveNumber(internal._fbWidth) ??
+      null,
+  };
+}
+
 function isNestedModule(value: unknown): value is NestedNoVncModule {
   return typeof value === "object" && value !== null;
+}
+
+function readPositiveNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }

@@ -46,6 +46,7 @@ import {
   emptyViewportBounds,
   enqueueResolutionRequest,
   resolveResolutionRequest,
+  shouldScheduleResolutionRepair,
   type ResolutionRequest,
   type ViewportBounds,
 } from "./desktopResolution.js";
@@ -189,7 +190,7 @@ const guestDisplayWidthStep = 8;
 const guestDisplayHeightMin = 200;
 const guestDisplayHeightMax = 8192;
 const desktopResolutionRetryDelayMs = 900;
-const desktopResolutionRetryMaxAttempts = 2;
+const desktopResolutionRetryMaxAttempts = 4;
 const desktopResolutionByVmStorageKey = "parallaize.desktop-resolution-by-vm";
 const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
@@ -727,6 +728,83 @@ export function DashboardApp(): JSX.Element {
       };
     }
   }, [currentRemoteResolutionKey, desiredDesktopResolutionTarget?.key]);
+
+  useEffect(() => {
+    if (!desiredDesktopResolutionTarget) {
+      return;
+    }
+
+    if (
+      desktopResolutionMode === "viewport" &&
+      (railResizeActive || sidepanelResizeActive)
+    ) {
+      return;
+    }
+
+    const attempts =
+      resolutionRetryStateRef.current?.key === desiredDesktopResolutionTarget.key
+        ? resolutionRetryStateRef.current.attempts
+        : 0;
+
+    if (
+      !shouldScheduleResolutionRepair({
+        attempts,
+        currentRemoteKey: currentRemoteResolutionKey,
+        maxAttempts: desktopResolutionRetryMaxAttempts,
+        queue: resolutionRequestQueueRef.current,
+        targetKey: desiredDesktopResolutionTarget.key,
+      }) ||
+      resolutionRetryTimerRef.current !== null
+    ) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      const currentTarget = currentResolutionTargetRef.current;
+
+      if (
+        !currentTarget ||
+        currentTarget.key !== desiredDesktopResolutionTarget.key ||
+        resolutionRetryTimerRef.current !== null
+      ) {
+        return;
+      }
+
+      const nextAttempts =
+        resolutionRetryStateRef.current?.key === currentTarget.key
+          ? resolutionRetryStateRef.current.attempts
+          : 0;
+
+      if (
+        !shouldScheduleResolutionRepair({
+          attempts: nextAttempts,
+          currentRemoteKey: currentRemoteResolutionKeyRef.current,
+          maxAttempts: desktopResolutionRetryMaxAttempts,
+          queue: resolutionRequestQueueRef.current,
+          targetKey: currentTarget.key,
+        })
+      ) {
+        return;
+      }
+
+      resolutionRetryStateRef.current = {
+        attempts: nextAttempts + 1,
+        key: currentTarget.key,
+      };
+      lastResolutionRequestKeyRef.current = null;
+      syncVmResolution(currentTarget.vmId, currentTarget.width, currentTarget.height, true);
+    }, desktopResolutionRetryDelayMs);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [
+    currentRemoteResolutionKey,
+    desiredDesktopResolutionTarget?.key,
+    desktopResolutionMode,
+    railResizeActive,
+    sidepanelResizeActive,
+  ]);
 
   useEffect(() => {
     return () => {
