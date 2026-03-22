@@ -160,7 +160,9 @@ export interface DashboardMetrics {
   totalVmCount: number;
   runningVmCount: number;
   totalCpu: number;
+  hostCpuCount: number;
   totalRamMb: number;
+  hostRamMb: number;
   totalDiskGb: number;
 }
 

@@ -1,4 +1,5 @@
 import { collectMetrics, slugify } from "../../../packages/shared/src/helpers.js";
+import { cpus, totalmem } from "node:os";
 import type {
   ActionJob,
   AppState,
@@ -33,7 +34,7 @@ const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 const MAX_ACTIVITY_LINES = 8;
 const MAX_COMMAND_RESULTS = 6;
 const MAX_JOBS = 20;
-const MAX_TELEMETRY_SAMPLES = 28;
+const MAX_TELEMETRY_SAMPLES = 72;
 const QUEUED_PROGRESS_PERCENT = 6;
 const RUNNING_PROGRESS_PERCENT = 14;
 
@@ -42,6 +43,8 @@ export class DesktopManager {
   private ticker: NodeJS.Timeout | null = null;
   private hostTelemetry: ResourceTelemetry = emptyResourceTelemetry();
   private readonly vmTelemetry = new Map<string, ResourceTelemetry>();
+  private readonly hostCpuCount = cpus().length;
+  private readonly hostRamMb = Math.round(totalmem() / (1024 * 1024));
 
   constructor(
     private readonly store: JsonStateStore,
@@ -159,6 +162,9 @@ export class DesktopManager {
   getSummary(): DashboardSummary {
     this.syncProviderState();
     const state = this.store.load();
+    const metrics = collectMetrics(state.vms);
+    metrics.hostCpuCount = this.hostCpuCount;
+    metrics.hostRamMb = this.hostRamMb;
 
     return {
       hostTelemetry: this.hostTelemetry,
@@ -170,7 +176,7 @@ export class DesktopManager {
       })),
       snapshots: state.snapshots,
       jobs: state.jobs,
-      metrics: collectMetrics(state.vms),
+      metrics,
       generatedAt: nowIso(),
     };
   }

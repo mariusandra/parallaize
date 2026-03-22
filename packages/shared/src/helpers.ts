@@ -45,7 +45,9 @@ export function collectMetrics(vms: VmInstance[]): DashboardMetrics {
       totalVmCount: 0,
       runningVmCount: 0,
       totalCpu: 0,
+      hostCpuCount: 0,
       totalRamMb: 0,
+      hostRamMb: 0,
       totalDiskGb: 0,
     },
   );

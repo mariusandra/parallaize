@@ -63,6 +63,13 @@ interface ResolutionDraft {
   height: string;
 }
 
+interface DesktopResolutionPreference {
+  mode: DesktopResolutionMode;
+  scale: number;
+  width: number;
+  height: number;
+}
+
 interface ForwardDraft {
   name: string;
   guestPort: string;
@@ -87,7 +94,6 @@ interface LoginDraft {
 }
 
 type ThemeMode = "light" | "dark";
-type RailDensityMode = "default" | "compact";
 type DesktopResolutionMode = "viewport" | "fixed";
 
 interface DesktopResolutionState {
@@ -138,30 +144,33 @@ const defaultLoginDraft: LoginDraft = {
 
 const quickCommands = ["pwd", "ls -la", "pnpm build", "pnpm test", "incus list"];
 const railWidthStorageKey = "parallaize.rail-width";
-const railDensityStorageKey = "parallaize.rail-density";
 const railDefaultWidth = 320;
 const railMinWidth = 248;
 const railMaxWidth = 420;
-const railCompactThreshold = 292;
-const desktopResolutionModeStorageKey = "parallaize.desktop-resolution-mode";
-const desktopViewportScaleStorageKey = "parallaize.desktop-viewport-scale";
 const desktopViewportScaleDefault = 1;
 const desktopViewportScaleMin = 0.5;
 const desktopViewportScaleMax = 3;
 const desktopViewportScaleStep = 0.25;
-const desktopFixedWidthStorageKey = "parallaize.desktop-fixed-width";
-const desktopFixedHeightStorageKey = "parallaize.desktop-fixed-height";
 const desktopFixedWidthDefault = 1280;
 const desktopFixedHeightDefault = 800;
 const desktopFixedWidthMin = 640;
 const desktopFixedWidthMax = 3840;
 const desktopFixedHeightMin = 480;
 const desktopFixedHeightMax = 2160;
+const desktopResolutionByVmStorageKey = "parallaize.desktop-resolution-by-vm";
 const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
+const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
 const sidepanelDefaultWidth = 380;
 const sidepanelMinWidth = 320;
 const sidepanelMaxWidth = 560;
 const sidepanelCompactBreakpoint = 1120;
+
+const defaultDesktopResolutionPreference: DesktopResolutionPreference = {
+  mode: "viewport",
+  scale: desktopViewportScaleDefault,
+  width: desktopFixedWidthDefault,
+  height: desktopFixedHeightDefault,
+};
 
 export function DashboardApp(): JSX.Element {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -176,43 +185,21 @@ export function DashboardApp(): JSX.Element {
   const [forwardDraft, setForwardDraft] = useState<ForwardDraft>(emptyForwardDraft);
   const [captureDraft, setCaptureDraft] = useState<CaptureDraft>(emptyCaptureDraft);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
+  const [sidepanelCollapsedByVm, setSidepanelCollapsedByVm] = useState<
+    Record<string, true>
+  >(() => readSidepanelCollapsedByVm());
+  const [desktopResolutionByVm, setDesktopResolutionByVm] = useState<
+    Record<string, DesktopResolutionPreference>
+  >(() => readDesktopResolutionByVm());
   const [openVmMenuId, setOpenVmMenuId] = useState<string | null>(null);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
-  const [railDensityMode, setRailDensityMode] = useState<RailDensityMode>(() =>
-    readRailDensityMode(),
-  );
-  const [desktopResolutionMode, setDesktopResolutionMode] = useState<DesktopResolutionMode>(() =>
-    readDesktopResolutionMode(),
-  );
-  const [desktopViewportScale, setDesktopViewportScale] = useState(() =>
-    clampDesktopViewportScale(
-      readStoredNumber(desktopViewportScaleStorageKey) ?? desktopViewportScaleDefault,
-    ),
-  );
-  const [desktopFixedWidth, setDesktopFixedWidth] = useState(() =>
-    clampDesktopFixedWidth(
-      readStoredNumber(desktopFixedWidthStorageKey) ?? desktopFixedWidthDefault,
-    ),
-  );
-  const [desktopFixedHeight, setDesktopFixedHeight] = useState(() =>
-    clampDesktopFixedHeight(
-      readStoredNumber(desktopFixedHeightStorageKey) ?? desktopFixedHeightDefault,
-    ),
-  );
   const [resolutionDraft, setResolutionDraft] = useState<ResolutionDraft>(() =>
     buildResolutionDraft(
-      readDesktopResolutionMode(),
-      clampDesktopViewportScale(
-        readStoredNumber(desktopViewportScaleStorageKey) ?? desktopViewportScaleDefault,
-      ),
-      clampDesktopFixedWidth(
-        readStoredNumber(desktopFixedWidthStorageKey) ?? desktopFixedWidthDefault,
-      ),
-      clampDesktopFixedHeight(
-        readStoredNumber(desktopFixedHeightStorageKey) ?? desktopFixedHeightDefault,
-      ),
+      defaultDesktopResolutionPreference.mode,
+      defaultDesktopResolutionPreference.scale,
+      defaultDesktopResolutionPreference.width,
+      defaultDesktopResolutionPreference.height,
     ),
   );
   const [showLivePreviews, setShowLivePreviews] = useState(() =>
@@ -249,6 +236,12 @@ export function DashboardApp(): JSX.Element {
   const deferredTemplates = useDeferredValue(summary?.templates ?? []);
   const selectedVm =
     summary?.vms.find((entry) => entry.id === selectedVmId) ?? detail?.vm ?? null;
+  const selectedDesktopResolutionPreference =
+    selectedVmId !== null
+      ? desktopResolutionByVm[selectedVmId] ?? defaultDesktopResolutionPreference
+      : defaultDesktopResolutionPreference;
+  const sidePanelCollapsed =
+    selectedVmId !== null ? sidepanelCollapsedByVm[selectedVmId] === true : false;
   const isBusy = busyLabel !== null;
   const currentDetail = selectedVm && detail?.vm.id === selectedVm.id ? detail : null;
   const liveResolutionVmId =
@@ -257,18 +250,24 @@ export function DashboardApp(): JSX.Element {
     currentDetail.vm.session.webSocketPath
       ? currentDetail.vm.id
       : null;
-  const providerReady = summary?.provider.available ?? false;
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
-  const appliedDesktopViewportScale = clampDesktopViewportScale(desktopViewportScale);
-  const appliedDesktopWidth = clampDesktopFixedWidth(desktopFixedWidth);
-  const appliedDesktopHeight = clampDesktopFixedHeight(desktopFixedHeight);
+  const desktopResolutionMode = selectedDesktopResolutionPreference.mode;
+  const appliedDesktopViewportScale = clampDesktopViewportScale(
+    selectedDesktopResolutionPreference.scale,
+  );
+  const appliedDesktopWidth = clampDesktopFixedWidth(
+    selectedDesktopResolutionPreference.width,
+  );
+  const appliedDesktopHeight = clampDesktopFixedHeight(
+    selectedDesktopResolutionPreference.height,
+  );
   const wideShellLayout = viewportWidth > sidepanelCompactBreakpoint;
   const railWidth = clampDisplayedRailWidth(
     railWidthPreference,
     viewportWidth,
     sidepanelWidthPreference,
   );
-  const compactRail = railDensityMode === "compact" || railWidth <= railCompactThreshold;
+  const compactRail = true;
   const compactSidepanelLayout = viewportWidth <= sidepanelCompactBreakpoint;
   const sidepanelWidth = clampDisplayedSidepanelWidth(
     sidepanelWidthPreference,
@@ -354,7 +353,6 @@ export function DashboardApp(): JSX.Element {
       if (currentVmId && !nextSummary.vms.some((vm) => vm.id === currentVmId)) {
         setSelectedVmId(null);
         setDetail(null);
-        setSidePanelCollapsed(false);
       }
     });
 
@@ -498,28 +496,22 @@ export function DashboardApp(): JSX.Element {
   }, [railWidthPreference]);
 
   useEffect(() => {
-    writeStoredString(railDensityStorageKey, railDensityMode);
-  }, [railDensityMode]);
-
-  useEffect(() => {
-    writeStoredString(desktopResolutionModeStorageKey, desktopResolutionMode);
-  }, [desktopResolutionMode]);
-
-  useEffect(() => {
-    writeStoredString(desktopViewportScaleStorageKey, String(desktopViewportScale));
-  }, [desktopViewportScale]);
-
-  useEffect(() => {
-    writeStoredString(desktopFixedWidthStorageKey, String(desktopFixedWidth));
-  }, [desktopFixedWidth]);
-
-  useEffect(() => {
-    writeStoredString(desktopFixedHeightStorageKey, String(desktopFixedHeight));
-  }, [desktopFixedHeight]);
-
-  useEffect(() => {
     writeStoredString(sidepanelWidthStorageKey, String(sidepanelWidthPreference));
   }, [sidepanelWidthPreference]);
+
+  useEffect(() => {
+    writeStoredString(
+      sidepanelCollapsedByVmStorageKey,
+      JSON.stringify(sidepanelCollapsedByVm),
+    );
+  }, [sidepanelCollapsedByVm]);
+
+  useEffect(() => {
+    writeStoredString(
+      desktopResolutionByVmStorageKey,
+      JSON.stringify(desktopResolutionByVm),
+    );
+  }, [desktopResolutionByVm]);
 
   useEffect(() => {
     if (
@@ -536,7 +528,31 @@ export function DashboardApp(): JSX.Element {
   }, [currentDetail?.vm.id]);
 
   useEffect(() => {
+    setResolutionDraft(
+      buildResolutionDraft(
+        desktopResolutionMode,
+        appliedDesktopViewportScale,
+        appliedDesktopWidth,
+        appliedDesktopHeight,
+      ),
+    );
+  }, [
+    appliedDesktopHeight,
+    appliedDesktopViewportScale,
+    appliedDesktopWidth,
+    desktopResolutionMode,
+    selectedVmId,
+  ]);
+
+  useEffect(() => {
     if (!liveResolutionVmId) {
+      return;
+    }
+
+    if (
+      desktopResolutionMode === "viewport" &&
+      (railResizeActive || sidepanelResizeActive)
+    ) {
       return;
     }
 
@@ -574,6 +590,8 @@ export function DashboardApp(): JSX.Element {
     desktopResolution.clientWidth,
     desktopResolutionMode,
     liveResolutionVmId,
+    railResizeActive,
+    sidepanelResizeActive,
   ]);
 
   useEffect(() => {
@@ -759,9 +777,9 @@ export function DashboardApp(): JSX.Element {
         if (template) {
           setCreateDraft(buildCreateDraft(template));
         }
+        setVmSidepanelCollapsed(createdVm.id, false);
         setSelectedVmId(createdVm.id);
         setShowCreateDialog(false);
-        setSidePanelCollapsed(false);
         await refreshSummary();
         await refreshDetail(createdVm.id);
       },
@@ -792,16 +810,63 @@ export function DashboardApp(): JSX.Element {
     setCreateDraft(buildCreateDraft(template, createDraft.name));
   }
 
+  function setVmSidepanelCollapsed(vmId: string, collapsed: boolean): void {
+    setSidepanelCollapsedByVm((current) => {
+      if (collapsed) {
+        if (current[vmId]) {
+          return current;
+        }
+
+        return {
+          ...current,
+          [vmId]: true,
+        };
+      }
+
+      if (!current[vmId]) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[vmId];
+      return next;
+    });
+  }
+
+  function setVmDesktopResolutionPreference(
+    vmId: string,
+    preference: DesktopResolutionPreference,
+  ): void {
+    const normalized = normalizeDesktopResolutionPreference(preference);
+
+    setDesktopResolutionByVm((current) => {
+      const existing = current[vmId];
+
+      if (
+        existing &&
+        existing.mode === normalized.mode &&
+        existing.scale === normalized.scale &&
+        existing.width === normalized.width &&
+        existing.height === normalized.height
+      ) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [vmId]: normalized,
+      };
+    });
+  }
+
   function selectVm(vmId: string): void {
     setSelectedVmId(vmId);
-    setSidePanelCollapsed(false);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
   }
 
   function openHomepage(): void {
     setSelectedVmId(null);
-    setSidePanelCollapsed(false);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
   }
@@ -933,8 +998,8 @@ export function DashboardApp(): JSX.Element {
           sourceVmId: vm.id,
           name,
         });
+        setVmSidepanelCollapsed(clone.id, false);
         setSelectedVmId(clone.id);
-        setSidePanelCollapsed(false);
         await refreshSummary();
         await refreshDetail(clone.id);
       },
@@ -979,7 +1044,6 @@ export function DashboardApp(): JSX.Element {
         if (selectedVmIdRef.current === vm.id) {
           setSelectedVmId(null);
           setDetail(null);
-          setSidePanelCollapsed(false);
         }
         await refreshSummary();
       },
@@ -1054,6 +1118,10 @@ export function DashboardApp(): JSX.Element {
   async function handleApplyResolution(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
+    if (!selectedVmId) {
+      return;
+    }
+
     if (resolutionDraft.mode === "viewport") {
       const requestedScale = Number(resolutionDraft.scale);
 
@@ -1066,8 +1134,12 @@ export function DashboardApp(): JSX.Element {
       }
 
       const nextScale = clampDesktopViewportScale(requestedScale);
-      setDesktopResolutionMode("viewport");
-      setDesktopViewportScale(nextScale);
+      setVmDesktopResolutionPreference(selectedVmId, {
+        mode: "viewport",
+        scale: nextScale,
+        width: appliedDesktopWidth,
+        height: appliedDesktopHeight,
+      });
       setResolutionDraft((current) => ({
         ...current,
         mode: "viewport",
@@ -1102,9 +1174,12 @@ export function DashboardApp(): JSX.Element {
     const nextWidth = clampDesktopFixedWidth(requestedWidth);
     const nextHeight = clampDesktopFixedHeight(requestedHeight);
 
-    setDesktopResolutionMode("fixed");
-    setDesktopFixedWidth(nextWidth);
-    setDesktopFixedHeight(nextHeight);
+    setVmDesktopResolutionPreference(selectedVmId, {
+      mode: "fixed",
+      scale: appliedDesktopViewportScale,
+      width: nextWidth,
+      height: nextHeight,
+    });
     setResolutionDraft(
       buildResolutionDraft("fixed", appliedDesktopViewportScale, nextWidth, nextHeight),
     );
@@ -1162,8 +1237,8 @@ export function DashboardApp(): JSX.Element {
           `/api/vms/${vm.id}/snapshots/${snapshot.id}/launch`,
           payload,
         );
+        setVmSidepanelCollapsed(createdVm.id, false);
         setSelectedVmId(createdVm.id);
-        setSidePanelCollapsed(false);
         await refreshSummary();
         await refreshDetail(createdVm.id);
       },
@@ -1404,9 +1479,17 @@ export function DashboardApp(): JSX.Element {
                   <button
                     className="workspace-shell__eyebrow workspace-rail__home-link"
                     type="button"
+                    title={providerStatusTitle(summary.provider)}
                     onClick={openHomepage}
                   >
-                    Parallaize
+                    <span
+                      className={joinClassNames(
+                        "workspace-rail__status-dot",
+                        providerStatusDotClassName(summary.provider),
+                      )}
+                      aria-hidden="true"
+                    />
+                    <span>Parallaize</span>
                   </button>
                   <button
                     ref={shellMenuButtonRef}
@@ -1427,57 +1510,11 @@ export function DashboardApp(): JSX.Element {
                   </button>
                 </div>
 
-                <div className="chip-row workspace-rail__summary">
-                  <span
-                    className={joinClassNames(
-                      "surface-pill",
-                      providerReady ? "surface-pill--success" : "surface-pill--warning",
-                    )}
-                  >
-                    {providerReady
-                      ? `${capitalizeWord(summary.provider.kind)} ready`
-                      : `${capitalizeWord(summary.provider.kind)} blocked`}
-                  </span>
-                  {!compactRail ? (
-                    <span className="surface-pill">
-                      {compactTransportLabel(summary.provider.desktopTransport)}
-                    </span>
-                  ) : null}
-                </div>
-
                 <TelemetryPanel
                   compact={compactRail}
-                  label={compactRail ? "Host" : "Host load"}
+                  label="Host"
                   telemetry={summary.hostTelemetry}
                 />
-              </div>
-
-              <div className="chip-row workspace-rail__chips">
-                <span className="surface-pill">
-                  {summary.metrics.runningVmCount}/{summary.metrics.totalVmCount} up
-                </span>
-                {!compactRail ? (
-                  <span className="surface-pill">{summary.metrics.totalCpu} CPU</span>
-                ) : null}
-                {!compactRail ? (
-                  <span className="surface-pill">{formatRam(summary.metrics.totalRamMb)} RAM</span>
-                ) : null}
-                <span className="surface-pill">{summary.templates.length} tmpl</span>
-                {runningJobCount > 0 ? (
-                  <span className="surface-pill">
-                    {runningJobCount} job{runningJobCount === 1 ? "" : "s"}
-                  </span>
-                ) : null}
-              </div>
-
-              <div className="workspace-rail__toolbar">
-                <button
-                  className="button button--primary button--full workspace-rail__create-button"
-                  type="button"
-                  onClick={() => setShowCreateDialog(true)}
-                >
-                  {compactRail ? "New" : "New VM"}
-                </button>
               </div>
             </div>
 
@@ -1514,22 +1551,6 @@ export function DashboardApp(): JSX.Element {
                 className="menu-action menu-action--split"
                 type="button"
                 onClick={() => {
-                  setRailDensityMode((current) =>
-                    current === "compact" ? "default" : "compact",
-                  );
-                  setShellMenuOpen(false);
-                }}
-              >
-                <span>Rail density</span>
-                <span className="menu-action__state">
-                  {compactRail ? "Compact" : "Default"}
-                </span>
-              </button>
-
-              <button
-                className="menu-action menu-action--split"
-                type="button"
-                onClick={() => {
                   setThemeMode((current) => (current === "dark" ? "light" : "dark"));
                   setShellMenuOpen(false);
                 }}
@@ -1555,13 +1576,26 @@ export function DashboardApp(): JSX.Element {
             </PortalPopover>
 
             <div className="workspace-rail__list-head">
-              <p className="workspace-shell__eyebrow">Workspace rail</p>
-              {!compactRail ? (
-                <span className="workspace-rail__list-count">
-                  {summary.metrics.totalVmCount} workspace
-                  {summary.metrics.totalVmCount === 1 ? "" : "s"}
-                </span>
-              ) : null}
+              <p className="workspace-shell__eyebrow">Workspaces</p>
+              <button
+                className="button button--secondary workspace-rail__create-button"
+                type="button"
+                onClick={() => setShowCreateDialog(true)}
+              >
+                New VM
+              </button>
+            </div>
+
+            <div className="chip-row workspace-rail__chips">
+              <span className="surface-pill">
+                {summary.metrics.runningVmCount}/{summary.metrics.totalVmCount} up
+              </span>
+              <span className="surface-pill">
+                {summary.metrics.totalCpu}/{summary.metrics.hostCpuCount} CPU
+              </span>
+              <span className="surface-pill">
+                {formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
+              </span>
             </div>
 
             <div className="vm-strip">
@@ -1668,7 +1702,7 @@ export function DashboardApp(): JSX.Element {
                     <button
                       className="button button--ghost"
                       type="button"
-                      onClick={() => setSidePanelCollapsed(false)}
+                      onClick={() => setVmSidepanelCollapsed(selectedVm.id, false)}
                     >
                       Show inspector
                     </button>
@@ -1708,7 +1742,7 @@ export function DashboardApp(): JSX.Element {
                 onSubmitCapture={handleCaptureTemplate}
                 onSubmitCommand={handleCommand}
                 onRestoreSnapshot={handleRestoreSnapshot}
-                onToggleCollapsed={() => setSidePanelCollapsed(true)}
+                onToggleCollapsed={() => setVmSidepanelCollapsed(selectedVm.id, true)}
                 panelRef={sidepanelRef}
                 resizing={sidepanelResizeActive}
                 resizable={!compactSidepanelLayout}
@@ -2042,7 +2076,7 @@ function TelemetryPanel({
   label?: string;
   telemetry?: ResourceTelemetry;
 }): JSX.Element {
-  const chartWidth = compact ? 108 : 128;
+  const chartWidth = compact ? 180 : 240;
   const chartHeight = compact ? 20 : 24;
   const cpuHistory = telemetry?.cpuHistory.length ? telemetry.cpuHistory : [0];
   const ramHistory = telemetry?.ramHistory.length ? telemetry.ramHistory : [0];
@@ -2052,13 +2086,19 @@ function TelemetryPanel({
       <div className="telemetry-panel__head">
         {label ? <span className="telemetry-panel__label">{label}</span> : <span />}
         <span className="telemetry-panel__stats">
-          CPU {formatTelemetryPercent(telemetry?.cpuPercent)} · RAM{" "}
-          {formatTelemetryPercent(telemetry?.ramPercent)}
+          <span className="telemetry-panel__metric telemetry-panel__metric--cpu">
+            CPU {formatTelemetryPercent(telemetry?.cpuPercent)}
+          </span>
+          <span className="telemetry-panel__separator">·</span>
+          <span className="telemetry-panel__metric telemetry-panel__metric--ram">
+            RAM {formatTelemetryPercent(telemetry?.ramPercent)}
+          </span>
         </span>
       </div>
       <svg
         aria-hidden="true"
         className="telemetry-panel__chart"
+        preserveAspectRatio="none"
         viewBox={`0 0 ${chartWidth} ${chartHeight}`}
       >
         <polyline
@@ -3394,8 +3434,29 @@ function providerTransportLabel(transport: DashboardSummary["provider"]["desktop
   return transport === "novnc" ? "Embedded noVNC bridge" : "Synthetic preview";
 }
 
-function compactTransportLabel(transport: DashboardSummary["provider"]["desktopTransport"]): string {
-  return transport === "novnc" ? "Browser VNC" : "Synthetic";
+function providerStatusTitle(provider: DashboardSummary["provider"]): string {
+  const status =
+    provider.hostStatus === "ready"
+      ? "Ready"
+      : provider.hostStatus === "missing-cli"
+        ? "CLI missing"
+        : provider.hostStatus === "daemon-unreachable"
+          ? "Daemon unreachable"
+          : "Error";
+
+  return `${capitalizeWord(provider.kind)} ${status}. ${provider.detail}`;
+}
+
+function providerStatusDotClassName(provider: DashboardSummary["provider"]): string {
+  switch (provider.hostStatus) {
+    case "ready":
+      return "workspace-rail__status-dot--ready";
+    case "missing-cli":
+    case "daemon-unreachable":
+      return "workspace-rail__status-dot--warning";
+    default:
+      return "workspace-rail__status-dot--error";
+  }
 }
 
 function findProminentJob(
@@ -3637,16 +3698,6 @@ function readThemeMode(): ThemeMode {
   return "light";
 }
 
-function readRailDensityMode(): RailDensityMode {
-  const stored = readStoredString(railDensityStorageKey);
-  return stored === "compact" ? "compact" : "default";
-}
-
-function readDesktopResolutionMode(): DesktopResolutionMode {
-  const stored = readStoredString(desktopResolutionModeStorageKey);
-  return stored === "fixed" ? "fixed" : "viewport";
-}
-
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   const stored = readStoredString(key);
 
@@ -3685,6 +3736,46 @@ function readStoredString(key: string): string | null {
   }
 }
 
+function readSidepanelCollapsedByVm(): Record<string, true> {
+  const stored = readStoredString(sidepanelCollapsedByVmStorageKey);
+
+  if (!stored) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([vmId, collapsed]) => vmId.length > 0 && collapsed === true,
+      ),
+    ) as Record<string, true>;
+  } catch {
+    return {};
+  }
+}
+
+function readDesktopResolutionByVm(): Record<string, DesktopResolutionPreference> {
+  const stored = readStoredString(desktopResolutionByVmStorageKey);
+
+  if (!stored) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Record<string, Partial<DesktopResolutionPreference>>;
+
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([vmId]) => vmId.length > 0)
+        .map(([vmId, preference]) => [vmId, normalizeDesktopResolutionPreference(preference)]),
+    );
+  } catch {
+    return {};
+  }
+}
+
 function writeStoredString(key: string, value: string): void {
   if (typeof window === "undefined") {
     return;
@@ -3712,6 +3803,18 @@ function buildResolutionDraft(
     scale: formatViewportScale(scale),
     width: String(width),
     height: String(height),
+  };
+}
+
+function normalizeDesktopResolutionPreference(
+  preference: Partial<DesktopResolutionPreference>,
+): DesktopResolutionPreference {
+  const mode = preference.mode === "fixed" ? "fixed" : "viewport";
+  return {
+    mode,
+    scale: clampDesktopViewportScale(preference.scale ?? desktopViewportScaleDefault),
+    width: clampDesktopFixedWidth(preference.width ?? desktopFixedWidthDefault),
+    height: clampDesktopFixedHeight(preference.height ?? desktopFixedHeightDefault),
   };
 }
 
@@ -3859,6 +3962,16 @@ function formatTargetResolution(
 
 function formatTelemetryPercent(value: number | null | undefined): string {
   return value === null || value === undefined ? "--" : `${Math.round(value)}%`;
+}
+
+function formatRamUsage(usedRamMb: number, totalRamMb: number): string {
+  if (usedRamMb >= 1024 && totalRamMb >= 1024) {
+    const used = (usedRamMb / 1024).toFixed(usedRamMb % 1024 === 0 ? 0 : 1);
+    const total = (totalRamMb / 1024).toFixed(totalRamMb % 1024 === 0 ? 0 : 1);
+    return `${used}/${total} GB`;
+  }
+
+  return `${usedRamMb}/${totalRamMb} MB`;
 }
 
 function buildSparklinePoints(
