@@ -2452,12 +2452,14 @@ export function DashboardApp(): JSX.Element {
                   key={vm.id}
                   busy={isBusy}
                   compact={compactRail}
+                  inspectorVisible={vm.id === selectedVmId && !effectiveSidePanelCollapsed}
                   menuOpen={openVmMenuId === vm.id}
                   selected={vm.id === selectedVmId}
                   showLivePreview={showLivePreviews}
                   vm={vm}
                   onClone={handleClone}
                   onDelete={handleDelete}
+                  onHideInspector={() => setVmSidepanelCollapsed(vm.id, true)}
                   onOpen={selectVm}
                   onInspect={inspectVm}
                   onSnapshot={handleSnapshot}
@@ -2756,12 +2758,14 @@ function CreateVmDialog({
 interface VmTileProps {
   busy: boolean;
   compact: boolean;
+  inspectorVisible: boolean;
   menuOpen: boolean;
   selected: boolean;
   showLivePreview: boolean;
   vm: VmInstance;
   onClone: (vm: VmInstance) => Promise<void>;
   onDelete: (vm: VmInstance) => Promise<void>;
+  onHideInspector: () => void;
   onInspect: (vmId: string) => void;
   onOpen: (vmId: string) => void;
   onSnapshot: (vm: VmInstance) => Promise<void>;
@@ -2830,12 +2834,14 @@ function RailSettingsIcon(): JSX.Element {
 function VmTile({
   busy,
   compact,
+  inspectorVisible,
   menuOpen,
   selected,
   showLivePreview,
   vm,
   onClone,
   onDelete,
+  onHideInspector,
   onInspect,
   onOpen,
   onSnapshot,
@@ -2870,25 +2876,36 @@ function VmTile({
           open={menuOpen}
           onClose={() => onToggleMenu(vm.id)}
         >
-          <button
-            className="menu-action"
-            type="button"
-            onClick={() => {
-              onToggleMenu(vm.id);
-              onOpen(vm.id);
-            }}
-          >
-            Open
-          </button>
+          {compact ? (
+            <div className="vm-tile__popover-telemetry">
+              <TelemetryPanel compact telemetry={vm.telemetry} />
+            </div>
+          ) : null}
+          {!selected ? (
+            <button
+              className="menu-action"
+              type="button"
+              onClick={() => {
+                onToggleMenu(vm.id);
+                onOpen(vm.id);
+              }}
+            >
+              Open
+            </button>
+          ) : null}
           {selected ? (
             <button
               className="menu-action"
               type="button"
               onClick={() => {
-                onInspect(vm.id);
+                if (inspectorVisible) {
+                  onHideInspector();
+                } else {
+                  onInspect(vm.id);
+                }
               }}
             >
-              Inspect
+              {inspectorVisible ? "Hide inspector" : "Inspector"}
             </button>
           ) : null}
           <button
@@ -2941,6 +2958,16 @@ function VmTile({
   );
 
   if (compact) {
+    const compactCpuPercent = compactVmCpuPercent(vm);
+    const compactStatusTitle =
+      vm.status === "running"
+        ? `${vm.name} · ${vm.status} · CPU ${formatTelemetryPercent(vm.telemetry?.cpuPercent)}`
+        : `${vm.name} · ${vm.status}`;
+    const compactCpuColor =
+      vm.status === "running"
+        ? compactVmCpuColor(compactCpuPercent)
+        : null;
+
     return (
       <article
         className={joinClassNames(
@@ -2953,7 +2980,7 @@ function VmTile({
           className="vm-tile__compact-trigger"
           type="button"
           aria-label={`Open ${vm.name}`}
-          title={`${vm.name} · ${vm.status}`}
+          title={compactStatusTitle}
           onClick={() => onOpen(vm.id)}
         >
           <div className="vm-tile__compact-preview">
@@ -2976,6 +3003,16 @@ function VmTile({
               "vm-tile__compact-status",
               statusClassName(vm.status),
             )}
+            style={
+              {
+                "--vm-compact-cpu-color": compactCpuColor ?? undefined,
+              } as CSSProperties
+            }
+            title={
+              vm.status === "running"
+                ? `CPU ${formatTelemetryPercent(vm.telemetry?.cpuPercent)}`
+                : undefined
+            }
             aria-hidden="true"
           />
         </button>
@@ -3077,6 +3114,86 @@ function TelemetryPanel({
       </svg>
     </div>
   );
+}
+
+function compactVmCpuPercent(vm: VmInstance): number {
+  const rawPercent = vm.telemetry?.cpuPercent;
+
+  if (rawPercent === null || rawPercent === undefined || !Number.isFinite(rawPercent)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(rawPercent)));
+}
+
+function compactVmCpuColor(percent: number): string {
+  const setpoints = [
+    {
+      color: { b: 94, g: 197, r: 34 },
+      percent: 0,
+    },
+    {
+      color: { b: 59, g: 235, r: 251 },
+      percent: 55,
+    },
+    {
+      color: { b: 22, g: 115, r: 249 },
+      percent: 78,
+    },
+    {
+      color: { b: 68, g: 68, r: 239 },
+      percent: 92,
+    },
+  ];
+
+  if (percent <= setpoints[0].percent) {
+    return rgbColorString(setpoints[0].color);
+  }
+
+  for (let index = 1; index < setpoints.length; index += 1) {
+    const previous = setpoints[index - 1];
+    const current = setpoints[index];
+
+    if (percent <= current.percent) {
+      return interpolateRgbColor(
+        previous.color,
+        current.color,
+        (percent - previous.percent) / (current.percent - previous.percent),
+      );
+    }
+  }
+
+  return rgbColorString(setpoints.at(-1)?.color ?? { b: 68, g: 68, r: 239 });
+}
+
+function interpolateRgbColor(
+  from: {
+    b: number;
+    g: number;
+    r: number;
+  },
+  to: {
+    b: number;
+    g: number;
+    r: number;
+  },
+  ratio: number,
+): string {
+  const clampedRatio = Math.max(0, Math.min(1, ratio));
+
+  const r = Math.round(from.r + (to.r - from.r) * clampedRatio);
+  const g = Math.round(from.g + (to.g - from.g) * clampedRatio);
+  const b = Math.round(from.b + (to.b - from.b) * clampedRatio);
+
+  return rgbColorString({ b, g, r });
+}
+
+function rgbColorString(color: {
+  b: number;
+  g: number;
+  r: number;
+}): string {
+  return `rgb(${color.r} ${color.g} ${color.b})`;
 }
 
 interface PortalPopoverProps {

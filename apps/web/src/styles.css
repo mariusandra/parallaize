@@ -2352,15 +2352,27 @@ section.workspace-shell {
   position: absolute;
   right: 0.24rem;
   bottom: 0.24rem;
-  width: 0.42rem;
-  height: 0.42rem;
+  display: block;
+  width: 0.62rem;
+  height: 0.62rem;
   border-radius: 999px;
   background: rgba(120, 137, 152, 0.9);
   box-shadow: 0 0 0 0.14rem rgba(4, 7, 11, 0.82);
+  transition:
+    background 420ms ease,
+    box-shadow 420ms ease,
+    transform 180ms ease;
 }
 
 .vm-tile__compact-status.status-badge--running {
-  background: #22c55e;
+  background: var(--vm-compact-cpu-color, #22c55e);
+  box-shadow:
+    0 0 0 0.14rem rgba(4, 7, 11, 0.82),
+    0 0 14px color-mix(in srgb, var(--vm-compact-cpu-color, #22c55e) 34%, transparent);
+}
+
+.vm-tile__compact-status.status-badge--running::after {
+  content: none;
 }
 
 .vm-tile__compact-status.status-badge--stopped {
@@ -2410,6 +2422,14 @@ section.workspace-shell {
   background: var(--panel);
   box-shadow: var(--shadow);
   padding: 0.35rem;
+}
+
+.vm-tile__popover-telemetry {
+  padding: 0.15rem 0.15rem 0.35rem;
+}
+
+.vm-tile__popover-telemetry .telemetry-panel {
+  border-radius: 0.85rem;
 }
 
 .workspace-rail--compact .vm-tile {
