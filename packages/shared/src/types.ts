@@ -191,6 +191,11 @@ export interface ResizeVmInput {
   resources: ResourceSpec;
 }
 
+export interface SetVmResolutionInput {
+  width: number;
+  height: number;
+}
+
 export interface SnapshotInput {
   label?: string;
 }

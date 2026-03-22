@@ -8,8 +8,16 @@ import {
   type RfbViewportMode,
 } from "./novnc.js";
 
+export interface NoVncViewportResolution {
+  clientHeight: number | null;
+  clientWidth: number | null;
+  remoteHeight: number | null;
+  remoteWidth: number | null;
+}
+
 interface NoVncViewportProps {
   className?: string;
+  onResolutionChange?: (resolution: NoVncViewportResolution) => void;
   showHeader?: boolean;
   statusMode?: "header" | "overlay" | "hidden";
   surfaceClassName?: string;
@@ -25,6 +33,7 @@ const reconnectDelayMs = 5_000;
 
 export function NoVncViewport({
   className,
+  onResolutionChange,
   showHeader = true,
   statusMode = showHeader ? "header" : "overlay",
   surfaceClassName,
@@ -36,6 +45,110 @@ export function NoVncViewport({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [statusMessage, setStatusMessage] = useState("Connecting to the guest desktop...");
+
+  useEffect(() => {
+    if (!onResolutionChange) {
+      return;
+    }
+
+    const mountNode = containerRef.current;
+    const reportResolutionChange = onResolutionChange;
+
+    if (!mountNode) {
+      return;
+    }
+
+    const resolvedMountNode: HTMLDivElement = mountNode;
+
+    let activeCanvas: HTMLCanvasElement | null = null;
+    let containerResizeObserver: ResizeObserver | null = null;
+    let canvasResizeObserver: ResizeObserver | null = null;
+    let canvasMutationObserver: MutationObserver | null = null;
+    let lastSerialized = "";
+
+    function reportResolution(canvas: HTMLCanvasElement | null): void {
+      const bounds = resolvedMountNode.getBoundingClientRect();
+      const nextResolution: NoVncViewportResolution = {
+        clientHeight: bounds.height > 0 ? Math.round(bounds.height) : null,
+        clientWidth: bounds.width > 0 ? Math.round(bounds.width) : null,
+        remoteHeight: canvas && canvas.height > 0 ? canvas.height : null,
+        remoteWidth: canvas && canvas.width > 0 ? canvas.width : null,
+      };
+      const serialized = JSON.stringify(nextResolution);
+
+      if (serialized === lastSerialized) {
+        return;
+      }
+
+      lastSerialized = serialized;
+      reportResolutionChange(nextResolution);
+    }
+
+    function detachCanvasObservers(): void {
+      canvasResizeObserver?.disconnect();
+      canvasMutationObserver?.disconnect();
+      canvasResizeObserver = null;
+      canvasMutationObserver = null;
+    }
+
+    function attachCanvas(canvas: HTMLCanvasElement | null): void {
+      if (canvas === activeCanvas) {
+        reportResolution(activeCanvas);
+        return;
+      }
+
+      detachCanvasObservers();
+      activeCanvas = canvas;
+
+      if (!activeCanvas) {
+        reportResolution(null);
+        return;
+      }
+
+      canvasResizeObserver = new ResizeObserver(() => {
+        reportResolution(activeCanvas);
+      });
+      canvasResizeObserver.observe(activeCanvas);
+
+      canvasMutationObserver = new MutationObserver(() => {
+        reportResolution(activeCanvas);
+      });
+      canvasMutationObserver.observe(activeCanvas, {
+        attributeFilter: ["height", "width"],
+        attributes: true,
+      });
+
+      reportResolution(activeCanvas);
+    }
+
+    const containerObserver = new MutationObserver(() => {
+      attachCanvas(resolvedMountNode.querySelector<HTMLCanvasElement>("canvas"));
+    });
+    containerResizeObserver = new ResizeObserver(() => {
+      reportResolution(activeCanvas);
+    });
+
+    containerObserver.observe(resolvedMountNode, {
+      childList: true,
+      subtree: true,
+    });
+    containerResizeObserver.observe(resolvedMountNode);
+
+    attachCanvas(resolvedMountNode.querySelector<HTMLCanvasElement>("canvas"));
+
+    return () => {
+      containerObserver.disconnect();
+      containerResizeObserver?.disconnect();
+      detachCanvasObservers();
+      activeCanvas = null;
+      reportResolutionChange({
+        clientHeight: null,
+        clientWidth: null,
+        remoteHeight: null,
+        remoteWidth: null,
+      });
+    };
+  }, [onResolutionChange]);
 
   useEffect(() => {
     const mountNode = containerRef.current;

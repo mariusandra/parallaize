@@ -16,6 +16,7 @@ import type {
   InjectCommandInput,
   LoginInput,
   ResizeVmInput,
+  SetVmResolutionInput,
   SnapshotLaunchInput,
   SnapshotInput,
   UpdateVmForwardedPortsInput,
@@ -154,6 +155,13 @@ const server = createServer(async (request, response) => {
     if (method === "POST" && forwardsMatch) {
       const payload = await readJsonBody<UpdateVmForwardedPortsInput>(request);
       manager.updateVmForwardedPorts(forwardsMatch[1], payload);
+      return writeAccepted(response);
+    }
+
+    const resolutionMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/resolution$/);
+    if (method === "POST" && resolutionMatch) {
+      const payload = await readJsonBody<SetVmResolutionInput>(request);
+      await manager.setVmResolution(resolutionMatch[1], payload);
       return writeAccepted(response);
     }
 

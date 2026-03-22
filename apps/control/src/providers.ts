@@ -44,6 +44,7 @@ export interface DesktopProvider {
   stopVm(vm: VmInstance): Promise<ProviderMutation>;
   deleteVm(vm: VmInstance): Promise<ProviderMutation>;
   resizeVm(vm: VmInstance, resources: ResourceSpec): Promise<ProviderMutation>;
+  setDisplayResolution(vm: VmInstance, width: number, height: number): Promise<void>;
   snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot>;
   launchVmFromSnapshot(
     snapshot: Snapshot,
@@ -227,6 +228,16 @@ class MockProvider implements DesktopProvider {
       activeWindow: "logs",
       session: buildSyntheticSession(),
     };
+  }
+
+  async setDisplayResolution(
+    vm: VmInstance,
+    width: number,
+    height: number,
+  ): Promise<void> {
+    void vm;
+    void width;
+    void height;
   }
 
   async snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot> {
@@ -510,6 +521,24 @@ class IncusProvider implements DesktopProvider {
       activeWindow: "logs",
       session: vm.status === "running" ? await this.resolveSession(vm.providerRef) : vm.session,
     };
+  }
+
+  async setDisplayResolution(
+    vm: VmInstance,
+    width: number,
+    height: number,
+  ): Promise<void> {
+    this.assertAvailable();
+    validateDisplayResolution(width, height);
+
+    this.run([
+      "exec",
+      vm.providerRef,
+      "--",
+      "sh",
+      "-lc",
+      buildSetDisplayResolutionScript(width, height),
+    ]);
   }
 
   async snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot> {
@@ -1228,6 +1257,62 @@ function buildVncSession(
     browserPath: null,
     display: host ? `${formatNetworkEndpoint(host, port)}` : `guest VNC on port ${port} pending DHCP`,
   };
+}
+
+function validateDisplayResolution(width: number, height: number): void {
+  if (!Number.isInteger(width) || !Number.isInteger(height)) {
+    throw new Error("Display resolution width and height must be integers.");
+  }
+
+  if (width < 320 || width > 8192 || height < 200 || height > 8192) {
+    throw new Error("Display resolution is outside the supported range.");
+  }
+}
+
+function buildSetDisplayResolutionScript(width: number, height: number): string {
+  return `set -eu
+WIDTH=${width}
+HEIGHT=${height}
+DISPLAY_NUMBER=":0"
+AUTH_FILE="$(ps -eo args | sed -n 's/.*x11vnc .* -auth \\([^ ]*\\) .*/\\1/p' | head -n 1)"
+if [ -z "$AUTH_FILE" ]; then
+  for candidate in /run/user/*/gdm/Xauthority /run/user/*/Xauthority /home/*/.Xauthority; do
+    if [ -f "$candidate" ]; then
+      AUTH_FILE="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
+  echo "Unable to locate an Xauthority file for the desktop session." >&2
+  exit 1
+fi
+export DISPLAY="$DISPLAY_NUMBER"
+export XAUTHORITY="$AUTH_FILE"
+OUTPUT="$(xrandr --query | awk '/ connected/ { print $1; exit }')"
+if [ -z "$OUTPUT" ]; then
+  echo "No connected XRANDR output was found." >&2
+  exit 1
+fi
+TARGET_MODE="${width}x${height}"
+if xrandr --query | awk -v target="$TARGET_MODE" '$1 == target { found=1 } END { exit found ? 0 : 1 }'; then
+  xrandr --output "$OUTPUT" --mode "$TARGET_MODE"
+else
+  if ! command -v cvt >/dev/null 2>&1; then
+    echo "cvt is required to generate a display mode for $TARGET_MODE." >&2
+    exit 1
+  fi
+  MODELINE="$(cvt "$WIDTH" "$HEIGHT" 60)"
+  MODE_NAME="$(printf '%s\n' "$MODELINE" | awk -F'"' '/^Modeline / { print $2; exit }')"
+  MODE_ARGS="$(printf '%s\n' "$MODELINE" | sed -n 's/^Modeline "[^"]*" //p')"
+  if [ -z "$MODE_NAME" ] || [ -z "$MODE_ARGS" ]; then
+    echo "Failed to generate an XRANDR modeline for $TARGET_MODE." >&2
+    exit 1
+  fi
+  xrandr --newmode "$MODE_NAME" $MODE_ARGS 2>/dev/null || true
+  xrandr --addmode "$OUTPUT" "$MODE_NAME" 2>/dev/null || true
+  xrandr --output "$OUTPUT" --mode "$MODE_NAME"
+fi`;
 }
 
 function buildGuestVncCloudInit(port: number): string {

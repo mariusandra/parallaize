@@ -399,6 +399,74 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   ]);
 });
 
+test("incus provider applies guest display resolution through xrandr", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0199-resolution-lab";
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0199",
+    name: "resolution-lab",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 99,
+    activeWindow: "editor",
+    workspacePath: "/root",
+    session: {
+      kind: "vnc",
+      host: "10.55.0.77",
+      port: 5901,
+      webSocketPath: "/api/vms/vm-0199/vnc",
+      browserPath: "/?vm=vm-0199",
+      display: "10.55.0.77:5901",
+    },
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  await provider.setDisplayResolution(vm, 1366, 768);
+
+  const execCall = calls.find(
+    (args) => args[0] === "exec" && args[1] === instanceName,
+  );
+
+  assert.ok(execCall);
+  assert.equal(execCall?.[2], "--");
+  assert.equal(execCall?.[3], "sh");
+  assert.equal(execCall?.[4], "-lc");
+  assert.match(execCall?.[5] ?? "", /TARGET_MODE="1366x768"/);
+  assert.match(execCall?.[5] ?? "", /xrandr --query/);
+  assert.match(execCall?.[5] ?? "", /cvt "\$WIDTH" "\$HEIGHT" 60/);
+  assert.match(execCall?.[5] ?? "", /xrandr --output "\$OUTPUT" --mode "\$TARGET_MODE"/);
+});
+
 test("incus provider launches and restores snapshots with VM commands", async () => {
   const calls: string[][] = [];
   const sourceInstanceName = "parallaize-vm-0109-snap-origin";

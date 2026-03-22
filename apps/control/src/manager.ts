@@ -10,6 +10,7 @@ import type {
   JobKind,
   ProviderState,
   ResizeVmInput,
+  SetVmResolutionInput,
   Snapshot,
   SnapshotInput,
   TemplatePortForward,
@@ -682,6 +683,28 @@ export class DesktopManager {
 
       return `${vm.name} command completed`;
     });
+  }
+
+  async setVmResolution(vmId: string, input: SetVmResolutionInput): Promise<void> {
+    const width = Math.round(input.width);
+    const height = Math.round(input.height);
+
+    if (!Number.isFinite(width) || !Number.isFinite(height)) {
+      throw new Error("Display resolution width and height are required.");
+    }
+
+    const vm = this.getVmDetail(vmId).vm;
+    this.ensureActiveProvider(vm);
+
+    if (vm.status !== "running") {
+      throw new Error("VM must be running before the display resolution can be changed.");
+    }
+
+    if (vm.session?.kind !== "vnc") {
+      throw new Error("Display resolution changes require a live VNC-backed desktop.");
+    }
+
+    await this.provider.setDisplayResolution(vm, width, height);
   }
 
   updateVmForwardedPorts(vmId: string, input: UpdateVmForwardedPortsInput): void {

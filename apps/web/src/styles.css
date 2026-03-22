@@ -2192,6 +2192,31 @@ section.workspace-shell {
   z-index: 1;
 }
 
+.workspace-stage__viewport-shell {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.workspace-stage__viewport-shell--fixed {
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 1rem;
+}
+
+.workspace-stage__viewport-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.workspace-stage__viewport-frame--fixed {
+  flex: 0 0 auto;
+}
+
 .workspace-stage__viewport,
 .novnc-shell {
   height: 100%;
@@ -2885,8 +2910,27 @@ section.workspace-shell {
   min-height: 100%;
 }
 
+.novnc-shell--remote {
+  overflow: auto;
+}
+
+.novnc-surface--remote {
+  display: grid;
+  place-items: center;
+}
+
 .novnc-surface canvas {
   display: block;
+}
+
+.novnc-surface--remote canvas {
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+}
+
+.novnc-surface--scale canvas {
   width: 100%;
   height: 100%;
 }

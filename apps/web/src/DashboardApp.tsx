@@ -29,6 +29,7 @@ import type {
   EnvironmentTemplate,
   InjectCommandInput,
   ResizeVmInput,
+  SetVmResolutionInput,
   Snapshot,
   SnapshotLaunchInput,
   SnapshotInput,
@@ -52,6 +53,12 @@ interface ResourceDraft {
   cpu: string;
   ramMb: string;
   diskGb: string;
+}
+
+interface ResolutionDraft {
+  mode: DesktopResolutionMode;
+  width: string;
+  height: string;
 }
 
 interface ForwardDraft {
@@ -79,6 +86,14 @@ interface LoginDraft {
 
 type ThemeMode = "light" | "dark";
 type RailDensityMode = "default" | "compact";
+type DesktopResolutionMode = "viewport" | "fixed";
+
+interface DesktopResolutionState {
+  clientHeight: number | null;
+  clientWidth: number | null;
+  remoteHeight: number | null;
+  remoteWidth: number | null;
+}
 
 const emptyCreateDraft: CreateDraft = {
   templateId: "",
@@ -92,6 +107,13 @@ const emptyResourceDraft: ResourceDraft = {
   cpu: "",
   ramMb: "",
   diskGb: "",
+};
+
+const emptyResolutionState: DesktopResolutionState = {
+  clientHeight: null,
+  clientWidth: null,
+  remoteHeight: null,
+  remoteWidth: null,
 };
 
 const emptyForwardDraft: ForwardDraft = {
@@ -119,6 +141,15 @@ const railDefaultWidth = 320;
 const railMinWidth = 248;
 const railMaxWidth = 420;
 const railCompactThreshold = 292;
+const desktopResolutionModeStorageKey = "parallaize.desktop-resolution-mode";
+const desktopFixedWidthStorageKey = "parallaize.desktop-fixed-width";
+const desktopFixedHeightStorageKey = "parallaize.desktop-fixed-height";
+const desktopFixedWidthDefault = 1280;
+const desktopFixedHeightDefault = 800;
+const desktopFixedWidthMin = 640;
+const desktopFixedWidthMax = 3840;
+const desktopFixedHeightMin = 480;
+const desktopFixedHeightMax = 2160;
 const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 const sidepanelDefaultWidth = 380;
 const sidepanelMinWidth = 320;
@@ -145,6 +176,30 @@ export function DashboardApp(): JSX.Element {
   const [railDensityMode, setRailDensityMode] = useState<RailDensityMode>(() =>
     readRailDensityMode(),
   );
+  const [desktopResolutionMode, setDesktopResolutionMode] = useState<DesktopResolutionMode>(() =>
+    readDesktopResolutionMode(),
+  );
+  const [desktopFixedWidth, setDesktopFixedWidth] = useState(() =>
+    clampDesktopFixedWidth(
+      readStoredNumber(desktopFixedWidthStorageKey) ?? desktopFixedWidthDefault,
+    ),
+  );
+  const [desktopFixedHeight, setDesktopFixedHeight] = useState(() =>
+    clampDesktopFixedHeight(
+      readStoredNumber(desktopFixedHeightStorageKey) ?? desktopFixedHeightDefault,
+    ),
+  );
+  const [resolutionDraft, setResolutionDraft] = useState<ResolutionDraft>(() =>
+    buildResolutionDraft(
+      readDesktopResolutionMode(),
+      clampDesktopFixedWidth(
+        readStoredNumber(desktopFixedWidthStorageKey) ?? desktopFixedWidthDefault,
+      ),
+      clampDesktopFixedHeight(
+        readStoredNumber(desktopFixedHeightStorageKey) ?? desktopFixedHeightDefault,
+      ),
+    ),
+  );
   const [showLivePreviews, setShowLivePreviews] = useState(() =>
     readStoredBoolean("parallaize.live-previews", true),
   );
@@ -162,6 +217,8 @@ export function DashboardApp(): JSX.Element {
   const [loginDraft, setLoginDraft] = useState<LoginDraft>(defaultLoginDraft);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [desktopResolution, setDesktopResolution] =
+    useState<DesktopResolutionState>(emptyResolutionState);
   const [railResizeActive, setRailResizeActive] = useState(false);
   const [sidepanelResizeActive, setSidepanelResizeActive] = useState(false);
   const selectedVmIdRef = useRef<string | null>(null);
@@ -170,6 +227,8 @@ export function DashboardApp(): JSX.Element {
   const railResizeRef = useRef<{ panelLeft: number } | null>(null);
   const sidepanelRef = useRef<HTMLElement | null>(null);
   const sidepanelResizeRef = useRef<{ panelRight: number } | null>(null);
+  const lastResolutionRequestKeyRef = useRef<string | null>(null);
+  const resolutionRequestSequenceRef = useRef(0);
 
   const deferredVms = useDeferredValue(summary?.vms ?? []);
   const deferredTemplates = useDeferredValue(summary?.templates ?? []);
@@ -177,8 +236,16 @@ export function DashboardApp(): JSX.Element {
     summary?.vms.find((entry) => entry.id === selectedVmId) ?? detail?.vm ?? null;
   const isBusy = busyLabel !== null;
   const currentDetail = selectedVm && detail?.vm.id === selectedVm.id ? detail : null;
+  const liveResolutionVmId =
+    currentDetail?.vm.status === "running" &&
+    currentDetail.vm.session?.kind === "vnc" &&
+    currentDetail.vm.session.webSocketPath
+      ? currentDetail.vm.id
+      : null;
   const providerReady = summary?.provider.available ?? false;
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
+  const appliedDesktopWidth = clampDesktopFixedWidth(desktopFixedWidth);
+  const appliedDesktopHeight = clampDesktopFixedHeight(desktopFixedHeight);
   const wideShellLayout = viewportWidth > sidepanelCompactBreakpoint;
   const railWidth = clampDisplayedRailWidth(
     railWidthPreference,
@@ -192,6 +259,13 @@ export function DashboardApp(): JSX.Element {
     viewportWidth,
   );
   const sidepanelStyle = compactSidepanelLayout ? undefined : { width: sidepanelWidth };
+  const stageViewportFrameStyle =
+    desktopResolutionMode === "fixed"
+      ? ({
+          width: `${appliedDesktopWidth}px`,
+          height: `${appliedDesktopHeight}px`,
+        } satisfies CSSProperties)
+      : undefined;
   const workspaceShellStyle = wideShellLayout
     ? ({
         gridTemplateColumns: `${railWidth}px minmax(0, 1fr) auto`,
@@ -388,8 +462,64 @@ export function DashboardApp(): JSX.Element {
   }, [railDensityMode]);
 
   useEffect(() => {
+    writeStoredString(desktopResolutionModeStorageKey, desktopResolutionMode);
+  }, [desktopResolutionMode]);
+
+  useEffect(() => {
+    writeStoredString(desktopFixedWidthStorageKey, String(desktopFixedWidth));
+  }, [desktopFixedWidth]);
+
+  useEffect(() => {
+    writeStoredString(desktopFixedHeightStorageKey, String(desktopFixedHeight));
+  }, [desktopFixedHeight]);
+
+  useEffect(() => {
     writeStoredString(sidepanelWidthStorageKey, String(sidepanelWidthPreference));
   }, [sidepanelWidthPreference]);
+
+  useEffect(() => {
+    if (
+      !currentDetail ||
+      currentDetail.vm.session?.kind !== "vnc" ||
+      !currentDetail.vm.session.webSocketPath
+    ) {
+      setDesktopResolution(emptyResolutionState);
+    }
+  }, [currentDetail?.vm.id, currentDetail?.vm.session?.kind, currentDetail?.vm.session?.webSocketPath]);
+
+  useEffect(() => {
+    lastResolutionRequestKeyRef.current = null;
+  }, [currentDetail?.vm.id]);
+
+  useEffect(() => {
+    if (!liveResolutionVmId) {
+      return;
+    }
+
+    const targetWidth =
+      desktopResolutionMode === "fixed" ? appliedDesktopWidth : desktopResolution.clientWidth;
+    const targetHeight =
+      desktopResolutionMode === "fixed" ? appliedDesktopHeight : desktopResolution.clientHeight;
+
+    if (!targetWidth || !targetHeight) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void syncVmResolution(liveResolutionVmId, targetWidth, targetHeight, true);
+    }, desktopResolutionMode === "viewport" ? 220 : 0);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [
+    appliedDesktopHeight,
+    appliedDesktopWidth,
+    desktopResolution.clientHeight,
+    desktopResolution.clientWidth,
+    desktopResolutionMode,
+    liveResolutionVmId,
+  ]);
 
   useEffect(() => {
     if (!railResizeActive) {
@@ -802,6 +932,44 @@ export function DashboardApp(): JSX.Element {
     );
   }
 
+  async function syncVmResolution(
+    vmId: string,
+    width: number,
+    height: number,
+    silent: boolean,
+  ): Promise<void> {
+    const payload: SetVmResolutionInput = {
+      width: Math.max(1, Math.round(width)),
+      height: Math.max(1, Math.round(height)),
+    };
+    const requestKey = buildDesktopResolutionRequestKey(
+      vmId,
+      payload.width,
+      payload.height,
+    );
+
+    if (lastResolutionRequestKeyRef.current === requestKey) {
+      return;
+    }
+
+    lastResolutionRequestKeyRef.current = requestKey;
+    const requestId = resolutionRequestSequenceRef.current + 1;
+    resolutionRequestSequenceRef.current = requestId;
+
+    try {
+      await postJson(`/api/vms/${vmId}/resolution`, payload);
+    } catch (error) {
+      if (requestId !== resolutionRequestSequenceRef.current || silent) {
+        return;
+      }
+
+      setNotice({
+        tone: "error",
+        message: errorMessage(error),
+      });
+    }
+  }
+
   async function handleResize(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
@@ -826,6 +994,55 @@ export function DashboardApp(): JSX.Element {
       },
       `Queued resize for ${detail.vm.name}.`,
     );
+  }
+
+  async function handleApplyResolution(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (resolutionDraft.mode === "viewport") {
+      setDesktopResolutionMode("viewport");
+      setResolutionDraft((current) => ({
+        ...current,
+        mode: "viewport",
+      }));
+
+      lastResolutionRequestKeyRef.current = null;
+
+      if (liveResolutionVmId && desktopResolution.clientWidth && desktopResolution.clientHeight) {
+        await syncVmResolution(
+          liveResolutionVmId,
+          desktopResolution.clientWidth,
+          desktopResolution.clientHeight,
+          false,
+        );
+      }
+
+      return;
+    }
+
+    const requestedWidth = Number(resolutionDraft.width);
+    const requestedHeight = Number(resolutionDraft.height);
+
+    if (!Number.isFinite(requestedWidth) || !Number.isFinite(requestedHeight)) {
+      setNotice({
+        tone: "error",
+        message: "Fixed resolution must use numeric width and height.",
+      });
+      return;
+    }
+
+    const nextWidth = clampDesktopFixedWidth(requestedWidth);
+    const nextHeight = clampDesktopFixedHeight(requestedHeight);
+
+    setDesktopResolutionMode("fixed");
+    setDesktopFixedWidth(nextWidth);
+    setDesktopFixedHeight(nextHeight);
+    setResolutionDraft(buildResolutionDraft("fixed", nextWidth, nextHeight));
+    lastResolutionRequestKeyRef.current = null;
+
+    if (liveResolutionVmId) {
+      await syncVmResolution(liveResolutionVmId, nextWidth, nextHeight, false);
+    }
   }
 
   async function handleCommand(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1294,13 +1511,33 @@ export function DashboardApp(): JSX.Element {
                   <WorkspaceBootSurface state={getVmDesktopBootState(currentDetail)!} />
                 ) : currentDetail.vm.session?.kind === "vnc" &&
                   currentDetail.vm.session.webSocketPath ? (
-                  <NoVncViewport
-                    className="workspace-stage__viewport"
-                    surfaceClassName="workspace-stage__canvas"
-                    webSocketPath={currentDetail.vm.session.webSocketPath}
-                    showHeader={false}
-                    statusMode="overlay"
-                  />
+                  <div
+                    className={joinClassNames(
+                      "workspace-stage__viewport-shell",
+                      desktopResolutionMode === "fixed"
+                        ? "workspace-stage__viewport-shell--fixed"
+                        : "",
+                    )}
+                  >
+                    <div
+                      className={joinClassNames(
+                        "workspace-stage__viewport-frame",
+                        desktopResolutionMode === "fixed"
+                          ? "workspace-stage__viewport-frame--fixed"
+                          : "",
+                      )}
+                      style={stageViewportFrameStyle}
+                    >
+                      <NoVncViewport
+                        className="workspace-stage__viewport"
+                        onResolutionChange={setDesktopResolution}
+                        surfaceClassName="workspace-stage__canvas"
+                        webSocketPath={currentDetail.vm.session.webSocketPath}
+                        showHeader={false}
+                        statusMode="overlay"
+                      />
+                    </div>
+                  </div>
                 ) : (
                   <div className="workspace-fallback">
                     <StaticPatternPreview vm={currentDetail.vm} variant="stage" />
@@ -1343,6 +1580,8 @@ export function DashboardApp(): JSX.Element {
                 commandDraft={commandDraft}
                 detail={currentDetail}
                 forwardDraft={forwardDraft}
+                resolutionDraft={resolutionDraft}
+                resolutionState={desktopResolution}
                 resourceDraft={resourceDraft}
                 summary={summary}
                 vm={selectedVm}
@@ -1351,8 +1590,10 @@ export function DashboardApp(): JSX.Element {
                 onCommandDraftChange={setCommandDraft}
                 onDelete={handleDelete}
                 onForwardDraftChange={setForwardDraft}
+                onResolutionDraftChange={setResolutionDraft}
                 onRemoveForward={handleRemoveForward}
                 onResourceDraftChange={setResourceDraft}
+                onApplyResolution={handleApplyResolution}
                 onResize={handleResize}
                 onSaveForward={handleAddForward}
                 onLaunchFromSnapshot={handleLaunchFromSnapshot}
@@ -1789,14 +2030,18 @@ interface WorkspaceSidepanelProps {
   commandDraft: string;
   detail: VmDetail | null;
   forwardDraft: ForwardDraft;
+  resolutionDraft: ResolutionDraft;
+  resolutionState: DesktopResolutionState;
   resourceDraft: ResourceDraft;
   summary: DashboardSummary;
   vm: VmInstance;
+  onApplyResolution: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onCaptureDraftChange: (draft: CaptureDraft) => void;
   onClone: (vm: VmInstance) => Promise<void>;
   onCommandDraftChange: (value: string) => void;
   onDelete: (vm: VmInstance) => Promise<void>;
   onForwardDraftChange: (draft: ForwardDraft) => void;
+  onResolutionDraftChange: (draft: ResolutionDraft) => void;
   onRemoveForward: (forwardId: string) => Promise<void>;
   onResourceDraftChange: (draft: ResourceDraft) => void;
   onResize: (event: FormEvent<HTMLFormElement>) => Promise<void>;
@@ -1899,14 +2144,18 @@ function WorkspaceSidepanel({
   commandDraft,
   detail,
   forwardDraft,
+  resolutionDraft,
+  resolutionState,
   resourceDraft,
   summary,
   vm,
+  onApplyResolution,
   onCaptureDraftChange,
   onClone,
   onCommandDraftChange,
   onDelete,
   onForwardDraftChange,
+  onResolutionDraftChange,
   onRemoveForward,
   onResourceDraftChange,
   onResize,
@@ -2047,6 +2296,75 @@ function WorkspaceSidepanel({
                   }
                 />
               </div>
+            </SidepanelSection>
+
+            <SidepanelSection title="Resolution" defaultOpen>
+              <form className="sidepanel-form" onSubmit={onApplyResolution}>
+                <div className="compact-grid">
+                  <FieldPair
+                    label="Current"
+                    mono
+                    value={formatCurrentResolution(resolutionState)}
+                  />
+                  <FieldPair
+                    label="Viewport"
+                    mono
+                    value={formatViewportResolution(resolutionState)}
+                  />
+                </div>
+
+                <label className="field-shell">
+                  <span>Mode</span>
+                  <select
+                    className="field-input"
+                    value={resolutionDraft.mode}
+                    onChange={(event) =>
+                      onResolutionDraftChange({
+                        ...resolutionDraft,
+                        mode: event.target.value === "fixed" ? "fixed" : "viewport",
+                      })
+                    }
+                  >
+                    <option value="viewport">Match viewport</option>
+                    <option value="fixed">Fixed resolution</option>
+                  </select>
+                </label>
+
+                {resolutionDraft.mode === "fixed" ? (
+                  <div className="compact-grid compact-grid--double">
+                    <NumberField
+                      label="Width"
+                      value={resolutionDraft.width}
+                      onChange={(value) =>
+                        onResolutionDraftChange({
+                          ...resolutionDraft,
+                          width: value,
+                        })
+                      }
+                    />
+                    <NumberField
+                      label="Height"
+                      value={resolutionDraft.height}
+                      onChange={(value) =>
+                        onResolutionDraftChange({
+                          ...resolutionDraft,
+                          height: value,
+                        })
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                <p className="empty-copy">
+                  {resolutionDraft.mode === "fixed"
+                    ? "Fixed mode keeps the desktop at a chosen size and centers it in the stage."
+                    : "Viewport mode resizes the guest desktop to the space the live session currently occupies."}
+                </p>
+
+                <button className="button button--secondary button--full" type="submit">
+                  Apply display mode
+                </button>
+              </form>
             </SidepanelSection>
 
               <SidepanelSection title="Resize">
@@ -3044,6 +3362,11 @@ function readRailDensityMode(): RailDensityMode {
   return stored === "compact" ? "compact" : "default";
 }
 
+function readDesktopResolutionMode(): DesktopResolutionMode {
+  const stored = readStoredString(desktopResolutionModeStorageKey);
+  return stored === "fixed" ? "fixed" : "viewport";
+}
+
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   const stored = readStoredString(key);
 
@@ -3098,6 +3421,26 @@ function readViewportWidth(): number {
   return typeof window === "undefined" ? 1440 : window.innerWidth;
 }
 
+function buildResolutionDraft(
+  mode: DesktopResolutionMode,
+  width: number,
+  height: number,
+): ResolutionDraft {
+  return {
+    mode,
+    width: String(width),
+    height: String(height),
+  };
+}
+
+function buildDesktopResolutionRequestKey(
+  vmId: string,
+  width: number,
+  height: number,
+): string {
+  return `${vmId}:${width}x${height}`;
+}
+
 function clampRailWidthPreference(width: number): number {
   return Math.min(railMaxWidth, Math.max(railMinWidth, Math.round(width)));
 }
@@ -3117,6 +3460,20 @@ function maxDisplayedRailWidth(viewportWidth: number, sidepanelWidth: number): n
   return Math.max(
     railMinWidth,
     Math.min(railMaxWidth, viewportWidth - Math.min(sidepanelWidth, sidepanelDefaultWidth) - 560),
+  );
+}
+
+function clampDesktopFixedWidth(width: number): number {
+  return Math.min(
+    desktopFixedWidthMax,
+    Math.max(desktopFixedWidthMin, Math.round(width)),
+  );
+}
+
+function clampDesktopFixedHeight(height: number): number {
+  return Math.min(
+    desktopFixedHeightMax,
+    Math.max(desktopFixedHeightMin, Math.round(height)),
   );
 }
 
@@ -3146,6 +3503,22 @@ function defaultSnapshotLaunchName(vm: VmInstance, snapshot: Snapshot): string {
     .slice(0, 24);
 
   return `${vm.name}-${slug || "snapshot"}`;
+}
+
+function formatCurrentResolution(state: DesktopResolutionState): string {
+  if (state.remoteWidth !== null && state.remoteHeight !== null) {
+    return `${state.remoteWidth} x ${state.remoteHeight}`;
+  }
+
+  return "Waiting for live desktop";
+}
+
+function formatViewportResolution(state: DesktopResolutionState): string {
+  if (state.clientWidth !== null && state.clientHeight !== null) {
+    return `${state.clientWidth} x ${state.clientHeight}`;
+  }
+
+  return "Unavailable";
 }
 
 function joinClassNames(...values: Array<string | false | null | undefined>): string {
