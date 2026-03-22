@@ -452,6 +452,9 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   ]);
   assert.ok(configSetCall);
   assert.match(configSetCall?.[4] ?? "", /x11vnc/);
+  assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-x11vnc/);
+  assert.match(configSetCall?.[4] ?? "", /-xrandr newfbsize/);
+  assert.match(configSetCall?.[4] ?? "", /-noshm/);
   assert.match(configSetCall?.[4] ?? "", /incus-agent\.service/);
   assert.deepEqual(agentDeviceCall, [
     "config",
@@ -537,17 +540,25 @@ test("incus provider applies guest display resolution through xrandr", async () 
   await provider.setDisplayResolution(vm, 1366, 768);
 
   const execCall = calls.find(
-    (args) => args[0] === "exec" && args[1] === instanceName,
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      (args[5] ?? "").includes('TARGET_MODE="1366x768"'),
   );
 
   assert.ok(execCall);
   assert.equal(execCall?.[2], "--");
   assert.equal(execCall?.[3], "sh");
   assert.equal(execCall?.[4], "-lc");
+  assert.match(execCall?.[5] ?? "", /LAUNCHER_FILE="\/usr\/local\/bin\/parallaize-x11vnc"/);
+  assert.match(execCall?.[5] ?? "", /parallaize-x11vnc\.service/);
+  assert.match(execCall?.[5] ?? "", /-xrandr newfbsize/);
+  assert.match(execCall?.[5] ?? "", /-noshm/);
   assert.match(execCall?.[5] ?? "", /TARGET_MODE="1366x768"/);
   assert.match(execCall?.[5] ?? "", /xrandr --query/);
   assert.match(execCall?.[5] ?? "", /cvt "\$WIDTH" "\$HEIGHT" 60/);
-  assert.match(execCall?.[5] ?? "", /xrandr --output "\$OUTPUT" --mode "\$TARGET_MODE"/);
+  assert.match(execCall?.[5] ?? "", /MODE_TO_APPLY=/);
+  assert.match(execCall?.[5] ?? "", /xrandr --output "\$OUTPUT" --mode "\$MODE_TO_APPLY"/);
 });
 
 test("incus provider launches and restores snapshots with VM commands", async () => {

@@ -634,7 +634,7 @@ class IncusProvider implements DesktopProvider {
       "--",
       "sh",
       "-lc",
-      buildSetDisplayResolutionScript(width, height),
+      buildSetDisplayResolutionScript(width, height, this.guestVncPort),
     ]);
   }
 
@@ -1382,13 +1382,41 @@ function validateDisplayResolution(width: number, height: number): void {
   }
 }
 
-function buildSetDisplayResolutionScript(width: number, height: number): string {
+function buildSetDisplayResolutionScript(
+  width: number,
+  height: number,
+  port: number,
+): string {
   return `set -eu
 WIDTH=${width}
 HEIGHT=${height}
 DISPLAY_NUMBER=":0"
+SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
+LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
+CURRENT_SERVICE="$(cat "$SERVICE_FILE" 2>/dev/null || true)"
+DESIRED_SERVICE="$(cat <<'UNIT'
+${buildGuestVncServiceUnit()}
+UNIT
+)"
+CURRENT_LAUNCHER="$(cat "$LAUNCHER_FILE" 2>/dev/null || true)"
+DESIRED_LAUNCHER="$(cat <<'SCRIPT'
+${buildGuestVncLauncherScript(port)}
+SCRIPT
+)"
+if [ "$CURRENT_SERVICE" != "$DESIRED_SERVICE" ] || [ "$CURRENT_LAUNCHER" != "$DESIRED_LAUNCHER" ]; then
+  cat > "$LAUNCHER_FILE" <<'SCRIPT'
+${buildGuestVncLauncherScript(port)}
+SCRIPT
+  chmod 0755 "$LAUNCHER_FILE"
+  cat > "$SERVICE_FILE" <<'UNIT'
+${buildGuestVncServiceUnit()}
+UNIT
+  systemctl daemon-reload
+  systemctl restart parallaize-x11vnc.service
+  sleep 1
+fi
 AUTH_FILE="$(ps -eo args | sed -n 's/.*x11vnc .* -auth \\([^ ]*\\) .*/\\1/p' | head -n 1)"
-if [ -z "$AUTH_FILE" ]; then
+if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
   for candidate in /run/user/*/gdm/Xauthority /run/user/*/Xauthority /home/*/.Xauthority; do
     if [ -f "$candidate" ]; then
       AUTH_FILE="$candidate"
@@ -1408,8 +1436,9 @@ if [ -z "$OUTPUT" ]; then
   exit 1
 fi
 TARGET_MODE="${width}x${height}"
-if xrandr --query | awk -v target="$TARGET_MODE" '$1 == target { found=1 } END { exit found ? 0 : 1 }'; then
-  xrandr --output "$OUTPUT" --mode "$TARGET_MODE"
+MODE_TO_APPLY="$(xrandr --query | awk -v target="$TARGET_MODE" '$1 == target || $1 ~ ("^" target "(_|R|$)") { print $1; exit }')"
+if [ -n "$MODE_TO_APPLY" ]; then
+  xrandr --output "$OUTPUT" --mode "$MODE_TO_APPLY"
 else
   if ! command -v cvt >/dev/null 2>&1; then
     echo "cvt is required to generate a display mode for $TARGET_MODE." >&2
@@ -1424,8 +1453,43 @@ else
   fi
   xrandr --newmode "$MODE_NAME" $MODE_ARGS 2>/dev/null || true
   xrandr --addmode "$OUTPUT" "$MODE_NAME" 2>/dev/null || true
-  xrandr --output "$OUTPUT" --mode "$MODE_NAME"
+  MODE_TO_APPLY="$MODE_NAME"
+  xrandr --output "$OUTPUT" --mode "$MODE_TO_APPLY"
 fi`;
+}
+
+function buildGuestVncLauncherScript(port: number): string {
+  return `#!/bin/sh
+set -eu
+AUTH_FILE=""
+for candidate in /run/user/*/gdm/Xauthority /run/user/*/Xauthority /home/*/.Xauthority; do
+  if [ -f "$candidate" ]; then
+    AUTH_FILE="$candidate"
+    break
+  fi
+done
+if [ -z "$AUTH_FILE" ]; then
+  echo "Unable to locate an Xauthority file for the desktop session." >&2
+  exit 1
+fi
+export HOME="\${HOME:-/root}"
+exec /usr/bin/x11vnc -display :0 -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noshm -nopw -rfbport ${port} -o /var/log/x11vnc.log`;
+}
+
+function buildGuestVncServiceUnit(): string {
+  return `[Unit]
+Description=Parallaize x11vnc bridge
+After=display-manager.service
+Wants=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/parallaize-x11vnc
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target`;
 }
 
 function buildGuestVncCloudInit(port: number): string {
@@ -1441,22 +1505,14 @@ write_files:
       AutomaticLoginEnable=true
       AutomaticLogin=ubuntu
       WaylandEnable=false
+  - path: /usr/local/bin/parallaize-x11vnc
+    permissions: '0755'
+    content: |
+${indentBlock(buildGuestVncLauncherScript(port), "      ")}
   - path: /etc/systemd/system/parallaize-x11vnc.service
     permissions: '0644'
     content: |
-      [Unit]
-      Description=Parallaize x11vnc bridge
-      After=display-manager.service
-      Wants=display-manager.service
-
-      [Service]
-      Type=simple
-      ExecStart=/usr/bin/x11vnc -display WAIT:0 -auth guess -forever -loop -shared -nopw -rfbport ${port} -o /var/log/x11vnc.log
-      Restart=always
-      RestartSec=3
-
-      [Install]
-      WantedBy=multi-user.target
+${indentBlock(buildGuestVncServiceUnit(), "      ")}
 runcmd:
   - systemctl daemon-reload
   - systemctl disable --now gnome-remote-desktop.service || true
@@ -1490,6 +1546,13 @@ runcmd:
   - systemctl restart gdm3 || true
   - systemctl start parallaize-x11vnc.service
 `;
+}
+
+function indentBlock(value: string, prefix: string): string {
+  return value
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
 }
 
 function findGlobalGuestAddress(instance: IncusListInstance): string | null {

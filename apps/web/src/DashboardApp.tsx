@@ -1394,7 +1394,6 @@ export function DashboardApp(): JSX.Element {
   }
 
   const workspaceFocused = selectedVm !== null;
-  const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
   const prominentJob = findProminentJob(summary, selectedVmId);
 
   return (
@@ -1510,6 +1509,15 @@ export function DashboardApp(): JSX.Element {
                   </button>
                 </div>
 
+                <div className="chip-row workspace-rail__chips">
+                  <span className="surface-pill">
+                    {summary.metrics.totalCpu}/{summary.metrics.hostCpuCount} CPU
+                  </span>
+                  <span className="surface-pill">
+                    {formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
+                  </span>
+                </div>
+
                 <TelemetryPanel
                   compact={compactRail}
                   label="Host"
@@ -1576,7 +1584,9 @@ export function DashboardApp(): JSX.Element {
             </PortalPopover>
 
             <div className="workspace-rail__list-head">
-              <p className="workspace-shell__eyebrow">Workspaces</p>
+              <p className="workspace-shell__eyebrow">
+                VMs ({summary.metrics.runningVmCount}/{summary.metrics.totalVmCount})
+              </p>
               <button
                 className="button button--secondary workspace-rail__create-button"
                 type="button"
@@ -1584,18 +1594,6 @@ export function DashboardApp(): JSX.Element {
               >
                 New VM
               </button>
-            </div>
-
-            <div className="chip-row workspace-rail__chips">
-              <span className="surface-pill">
-                {summary.metrics.runningVmCount}/{summary.metrics.totalVmCount} up
-              </span>
-              <span className="surface-pill">
-                {summary.metrics.totalCpu}/{summary.metrics.hostCpuCount} CPU
-              </span>
-              <span className="surface-pill">
-                {formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
-              </span>
             </div>
 
             <div className="vm-strip">
@@ -3119,18 +3117,6 @@ function OverviewSidepanel({
             Launch workspace
           </button>
         </SidepanelSection>
-
-        {summary.provider.nextSteps.length > 0 ? (
-          <SidepanelSection title="Provider notes" defaultOpen>
-            <div className="stack">
-              {summary.provider.nextSteps.map((step, index) => (
-                <div key={`${step}-${index}`} className="log-line">
-                  {step}
-                </div>
-              ))}
-            </div>
-          </SidepanelSection>
-        ) : null}
 
         <SidepanelSection title="Templates">
           <div className="stack">

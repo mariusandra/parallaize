@@ -1823,7 +1823,6 @@ section.workspace-shell {
 
 .workspace-rail__chips {
   gap: 0.4rem;
-  padding: 0 1rem;
 }
 
 .workspace-rail__chips .surface-pill {
@@ -1962,6 +1961,7 @@ section.workspace-shell {
 
 .workspace-rail--compact .workspace-rail__chips {
   gap: 0.32rem;
+  margin-top: -1rem;
 }
 
 .workspace-rail--compact .telemetry-panel__label {
