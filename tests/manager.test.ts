@@ -482,6 +482,12 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   const startCall = calls.find(
     (args) => args[0] === "start" && args[1] === instanceName,
   );
+  const bootstrapExecCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      (args[5] ?? "").includes('LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"'),
+  );
 
   assert.equal(createMutation.session?.display, "10.55.0.12:5990");
   assert.deepEqual(initCall, [
@@ -512,6 +518,13 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     "source=agent:config",
   ]);
   assert.deepEqual(startCall, ["start", instanceName]);
+  assert.ok(bootstrapExecCall);
+  assert.equal(bootstrapExecCall?.[2], "--");
+  assert.equal(bootstrapExecCall?.[3], "sh");
+  assert.equal(bootstrapExecCall?.[4], "-lc");
+  assert.match(bootstrapExecCall?.[5] ?? "", /chmod 0755 "\$LAUNCHER_FILE"/);
+  assert.match(bootstrapExecCall?.[5] ?? "", /systemctl restart parallaize-x11vnc\.service/);
+  assert.match(bootstrapExecCall?.[5] ?? "", /-auth "\$AUTH_FILE"/);
 
   const snapshot = await provider.captureTemplate(vm, {
     templateId: "tpl-0099",

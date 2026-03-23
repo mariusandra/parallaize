@@ -1,12 +1,12 @@
 # Parallaize TODO
 
 Last updated: 2026-03-23
-Current focus: validate PostgreSQL persistence on the live Incus path, codify guest template/VNC bootstrap, and scope packaging plus host-routed service access.
+Current focus: codify guest template/VNC bootstrap, scope packaging and deployment choices, and design host-routed service access.
 
 ## Current State
 
 - The web POC is runnable end to end with the React dashboard, Node control plane, Caddy front door, noVNC browser sessions, forwarded guest-service routes, and Incus-backed VM lifecycle operations.
-- Real-host validation already covers template capture, browser VNC through Caddy, forwarded guest HTTP services, cookie-backed login, and the `pnpm smoke:incus` path.
+- Real-host validation already covers template capture, browser VNC through Caddy, forwarded guest HTTP services, cookie-backed login, and the `pnpm smoke:incus` path against both JSON and PostgreSQL persistence.
 - State persistence now has a proper backend boundary: JSON remains available for tests and fallback, and PostgreSQL is wired in as a deployable backend.
 - The main unfinished work is no longer core product plumbing. It is now persistence rollout polish, template/bootstrap repeatability, packaging/deployment cleanup, and ops verification.
 
@@ -31,7 +31,7 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 
 ### P0: Persistence Rollout
 
-- [ ] Run a full live `pnpm smoke:incus` pass with `PARALLAIZE_PERSISTENCE=postgres` and capture any host-specific fixes.
+- [x] Run a full live `pnpm smoke:incus` pass with `PARALLAIZE_PERSISTENCE=postgres` and capture any host-specific fixes.
 - [x] Add a supported import/export path so existing JSON state can be migrated into PostgreSQL without manual editing.
 - [x] Surface persistence backend and persistence-failure status in `/api/health` and the operator UI/provider diagnostics.
 - [x] Document PostgreSQL backup/recovery and the expected table shape for deployed hosts.
@@ -52,7 +52,7 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 ### P2: Operations And Verification
 
 - [x] Add a lightweight server smoke check that boots the control plane and asserts `/api/health` plus `/api/summary`.
-- [ ] Verify the PostgreSQL store under repeated create/clone/delete churn, not just the happy path.
+- [x] Verify the PostgreSQL store under repeated create/clone/delete churn, not just the happy path.
 - [x] Record the exact production env/systemd flow for PostgreSQL-backed deployments.
 
 ### P2: Packaging And Upgrades
@@ -77,12 +77,14 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 
 ## Next Up
 
-1. Validate PostgreSQL-backed persistence against the real Incus smoke path.
-2. Codify the guest template/VNC bootstrap workflow so new base images are repeatable.
-3. Verify the PostgreSQL store under repeated create/clone/delete churn, not just the happy path.
+1. Codify the guest template/VNC bootstrap workflow so new base images are repeatable.
+2. Write the packaging decision note for deployed installs versus the npm/operator path.
+3. Inventory packaged-install dependencies and upgrade constraints for the first supported target.
 
 ## Decision Log
 
+- 2026-03-23: Added a dedicated `pnpm smoke:incus:churn` verifier for PostgreSQL-backed live hosts. A two-iteration run on this machine repeatedly created, booted, cloned, and deleted Incus VMs while polling the singleton `app_state` row directly, confirming that PostgreSQL state converges with the live control-plane view after churn and cleanup.
+- 2026-03-23: Validated the live `pnpm smoke:incus` path against PostgreSQL-backed persistence. The run surfaced two host-specific VNC issues: the control-plane default guest VNC port had drifted to `5901` while the guest bootstrap still targeted `5900`, and captured-template launches could keep a stale `x11vnc -auth guess` service because cloud-init did not reliably rewrite it. Fixed both by restoring the default to `5900`, adding a config regression test, and repairing the guest VNC launcher/service over `incus exec` before the provider waits for the browser session.
 - 2026-03-23: Added server-side browser-session expiry plus rotation, kept sessions intentionally in-memory across restarts, and covered login/logout/rotation/expiry behavior with built-server integration tests.
 - 2026-03-23: Recorded the PostgreSQL-backed `/opt/parallaize` plus systemd deployment flow, env-file shape, and optional Caddy enablement in the README.
 - 2026-03-23: Added a lightweight server smoke test that boots the built control plane in mock mode and validates `/api/health` plus `/api/summary`.

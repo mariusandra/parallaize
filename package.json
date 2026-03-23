@@ -12,6 +12,7 @@
     "start:mock": "PARALLAIZE_PROVIDER=mock PARALLAIZE_DATA_FILE=data/state.json node dist/apps/control/src/server.js",
     "dev": "pnpm build && pnpm start",
     "smoke:incus": "node scripts/smoke-incus.mjs",
+    "smoke:incus:churn": "node scripts/smoke-incus-churn.mjs",
     "persistence:export": "pnpm build && node dist/apps/control/src/persistence-cli.js export",
     "persistence:import": "pnpm build && node dist/apps/control/src/persistence-cli.js import",
     "persistence:copy": "pnpm build && node dist/apps/control/src/persistence-cli.js copy",
