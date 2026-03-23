@@ -1,15 +1,60 @@
 import {
   type AppState,
+  type EnvironmentTemplate,
   type ProviderState,
   type Snapshot,
   type VmInstance,
   type VmSession,
 } from "../../../packages/shared/src/types.js";
-import { buildSeedTemplates } from "./template-catalog.js";
+
+const DEFAULT_UBUNTU_DESKTOP_IMAGE = "images:ubuntu/noble/desktop";
 
 export function createSeedState(provider: ProviderState): AppState {
   const now = new Date().toISOString();
-  const templates = buildSeedTemplates(provider.kind, now);
+
+  const templates: EnvironmentTemplate[] = [
+    {
+      id: "tpl-0001",
+      name: "Ubuntu Agent Forge",
+      description:
+        "Balanced Ubuntu desktop for coding agents, shell tasks, and browser-based reviews.",
+      launchSource: DEFAULT_UBUNTU_DESKTOP_IMAGE,
+      defaultResources: {
+        cpu: 6,
+        ramMb: 12288,
+        diskGb: 80,
+      },
+      defaultForwardedPorts: [],
+      tags: ["coding", "agents", "ubuntu"],
+      notes: [
+        "GNOME desktop with terminal and editor workspace layout.",
+        "Base image is intended for iterative snapshotting during development.",
+      ],
+      snapshotIds: provider.kind === "mock" ? ["snap-0001"] : [],
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "tpl-0002",
+      name: "Research Bench",
+      description:
+        "Heavier desktop profile for docs, browser automation, and parallel review sessions.",
+      launchSource: DEFAULT_UBUNTU_DESKTOP_IMAGE,
+      defaultResources: {
+        cpu: 10,
+        ramMb: 24576,
+        diskGb: 140,
+      },
+      defaultForwardedPorts: [],
+      tags: ["research", "browser", "analysis"],
+      notes: [
+        "Configured for large-browser workloads and long-running analysis tasks.",
+      ],
+      snapshotIds: provider.kind === "mock" ? ["snap-0002"] : [],
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
 
   if (provider.kind === "incus") {
     return {

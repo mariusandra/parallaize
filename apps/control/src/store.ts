@@ -7,7 +7,6 @@ import { slugify } from "../../../packages/shared/src/helpers.js";
 import type {
   ActionJob,
   AppState,
-  EnvironmentTemplateCatalog,
   EnvironmentTemplate,
   PersistenceDiagnostics,
   ProviderState,
@@ -19,7 +18,6 @@ import type {
   VmSession,
   VmPortForward,
 } from "../../../packages/shared/src/types.js";
-import { appendMissingDefaultImageTemplates } from "./template-catalog.js";
 
 const DEFAULT_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 export const POSTGRES_STORE_KEY = "singleton";
@@ -311,17 +309,15 @@ export function normalizePersistedState(rawState: unknown): AppState {
 }
 
 function normalizeState(rawState: LegacyAppState): AppState {
-  const normalizedTemplates = Array.isArray(rawState.templates)
-    ? rawState.templates.map(normalizeTemplate)
-    : [];
-
   return {
     sequence:
       typeof rawState.sequence === "number" && Number.isFinite(rawState.sequence)
         ? Math.max(1, Math.trunc(rawState.sequence))
         : 1,
     provider: normalizeProviderState(rawState.provider),
-    templates: appendMissingDefaultImageTemplates(normalizedTemplates, nowIso()),
+    templates: Array.isArray(rawState.templates)
+      ? rawState.templates.map(normalizeTemplate)
+      : [],
     vms: Array.isArray(rawState.vms) ? rawState.vms.map(normalizeVm) : [],
     snapshots: Array.isArray(rawState.snapshots)
       ? rawState.snapshots
@@ -387,8 +383,6 @@ function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
     id: template.id ?? "tpl-missing",
     name: template.name ?? "Recovered template",
     description: template.description ?? "Recovered from persisted state.",
-    kind: template.kind === "default-image" ? "default-image" : "workspace",
-    catalog: normalizeTemplateCatalog(template.catalog),
     launchSource:
       template.launchSource ?? template.baseImage ?? DEFAULT_LAUNCH_SOURCE,
     defaultResources: {
@@ -404,27 +398,6 @@ function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
     snapshotIds: Array.isArray(template.snapshotIds) ? template.snapshotIds : [],
     createdAt: template.createdAt ?? nowIso(),
     updatedAt: template.updatedAt ?? template.createdAt ?? nowIso(),
-  };
-}
-
-function normalizeTemplateCatalog(
-  catalog: EnvironmentTemplate["catalog"] | undefined,
-): EnvironmentTemplateCatalog | null {
-  if (!catalog) {
-    return null;
-  }
-
-  const distribution = catalog.distribution?.trim();
-  const release = catalog.release?.trim();
-
-  if (!distribution || !release) {
-    return null;
-  }
-
-  return {
-    distribution,
-    release,
-    prepRequired: catalog.prepRequired === true,
   };
 }
 

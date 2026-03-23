@@ -1,7 +1,7 @@
 # Parallaize TODO
 
 Last updated: 2026-03-23
-Current focus: packaging/deployment choices and host-routed service access after finishing template/bootstrap polish.
+Current focus: codify guest template/VNC bootstrap, scope packaging and deployment choices, and design host-routed service access.
 
 ## Current State
 
@@ -38,10 +38,10 @@ Current focus: packaging/deployment choices and host-routed service access after
 
 ### P1: Guest Template And Bootstrap Polish
 
-- [x] Turn the current guest VNC bootstrap notes into a repeatable template-prep checklist or script.
-- [x] Audit seeded templates and docs so forwarded services stay workload-specific and are not implied to be part of the base image.
-- [x] Tighten template capture/update ergonomics around real launch sources, snapshot history, and template notes.
-- [x] Clean up any leftover probe/validation instances and document the maintenance path.
+- [ ] Turn the current guest VNC bootstrap notes into a repeatable template-prep checklist or script.
+- [ ] Audit seeded templates and docs so forwarded services stay workload-specific and are not implied to be part of the base image.
+- [ ] Tighten template capture/update ergonomics around real launch sources, snapshot history, and template notes.
+- [ ] Clean up any leftover probe/validation instances and document the maintenance path.
 
 ### P1: Auth And Session Hardening
 
@@ -77,13 +77,12 @@ Current focus: packaging/deployment choices and host-routed service access after
 
 ## Next Up
 
-1. Write the packaging decision note for deployed installs versus the npm/operator path.
-2. Inventory packaged-install dependencies and upgrade constraints for the first supported target.
-3. Start the forwarded-service routing design for stable hostnames alongside the current path-based mode.
+1. Codify the guest template/VNC bootstrap workflow so new base images are repeatable.
+2. Write the packaging decision note for deployed installs versus the npm/operator path.
+3. Inventory packaged-install dependencies and upgrade constraints for the first supported target.
 
 ## Decision Log
 
-- 2026-03-23: Finished the guest-template/bootstrap P1 slice. Added a repeatable `pnpm template:prep` host helper plus `docs/template-prep.md`, split the `+` dialog between captured templates and default-image choices, surfaced template launch-source/snapshot/note metadata in the UI, and added `pnpm cleanup:incus:validation` for stale smoke/churn instances. Verified locally on 2026-03-23 that `images:ubuntu/noble/desktop` is available directly, and kept the seeded default picker limited to launch-ready defaults rather than prep-heavy entries.
 - 2026-03-23: Added a dedicated `pnpm smoke:incus:churn` verifier for PostgreSQL-backed live hosts. A two-iteration run on this machine repeatedly created, booted, cloned, and deleted Incus VMs while polling the singleton `app_state` row directly, confirming that PostgreSQL state converges with the live control-plane view after churn and cleanup.
 - 2026-03-23: Validated the live `pnpm smoke:incus` path against PostgreSQL-backed persistence. The run surfaced two host-specific VNC issues: the control-plane default guest VNC port had drifted to `5901` while the guest bootstrap still targeted `5900`, and captured-template launches could keep a stale `x11vnc -auth guess` service because cloud-init did not reliably rewrite it. Fixed both by restoring the default to `5900`, adding a config regression test, and repairing the guest VNC launcher/service over `incus exec` before the provider waits for the browser session.
 - 2026-03-23: Added server-side browser-session expiry plus rotation, kept sessions intentionally in-memory across restarts, and covered login/logout/rotation/expiry behavior with built-server integration tests.

@@ -323,7 +323,6 @@ test("template capture can refresh an existing template while preserving history
     createSeedState(provider.state),
   );
   const manager = new DesktopManager(store, provider);
-  const initialTemplateCount = manager.getSummary().templates.length;
 
   manager.captureTemplate("vm-0001", {
     templateId: "tpl-0001",
@@ -337,7 +336,7 @@ test("template capture can refresh an existing template while preserving history
   const template = summary.templates.find((entry) => entry.id === "tpl-0001");
 
   assert.ok(template);
-  assert.equal(summary.templates.length, initialTemplateCount);
+  assert.equal(summary.templates.length, 2);
   assert.equal(template?.description, "Refreshed from alpha-workbench");
   assert.equal(template?.launchSource, "mock://templates/ubuntu-agent-forge");
   assert.equal(template?.snapshotIds.length, 2);
@@ -423,8 +422,6 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     id: "tpl-0099",
     name: "Incus Template",
     description: "Backed by a real image alias",
-    kind: "workspace",
-    catalog: null,
     launchSource: "images:ubuntu/noble/desktop",
     defaultResources: {
       cpu: 4,
@@ -785,8 +782,6 @@ test("incus provider targets the configured storage pool for creates and copies"
     id: "tpl-0200",
     name: "Storage Pool Template",
     description: "Verifies Incus storage targeting",
-    kind: "workspace",
-    catalog: null,
     launchSource: "images:ubuntu/noble/desktop",
     defaultResources: {
       cpu: 4,
@@ -990,8 +985,6 @@ test("incus provider launches and restores snapshots with VM commands", async ()
     id: "tpl-0109",
     name: "Snapshot Launch Template",
     description: "Used to validate snapshot workflows",
-    kind: "workspace",
-    catalog: null,
     launchSource: "images:ubuntu/noble/desktop",
     defaultResources: {
       cpu: 4,
@@ -1154,8 +1147,6 @@ test("incus provider falls back to IPv6 guest metadata when IPv4 is absent", asy
     id: "tpl-0100",
     name: "IPv6 Template",
     description: "IPv6-only guest metadata probe",
-    kind: "workspace",
-    catalog: null,
     launchSource: "images:ubuntu/noble/desktop",
     defaultResources: {
       cpu: 2,
@@ -1271,8 +1262,6 @@ test("incus provider only marks a guest VNC session ready after an RFB handshake
     id: "tpl-0102",
     name: "RFB Probe Template",
     description: "Uses the built-in VNC readiness probe",
-    kind: "workspace",
-    catalog: null,
     launchSource: "images:ubuntu/noble/desktop",
     defaultResources: {
       cpu: 2,
@@ -1651,8 +1640,6 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
     id: "tpl-0055",
     name: "Clone Test Template",
     description: "Used to verify clone identity isolation",
-    kind: "workspace",
-    catalog: null,
     launchSource: "images:ubuntu/noble/desktop",
     defaultResources: {
       cpu: 4,

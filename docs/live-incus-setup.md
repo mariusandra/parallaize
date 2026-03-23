@@ -89,7 +89,7 @@ When the JSON state file is missing, Parallaize will create a fresh state with s
 
 Set `PARALLAIZE_GUEST_VNC_PORT=5900` explicitly before starting the app.
 
-That matches the checked-in env example, the cloud-init VNC service wiring, and the documented template prep helper.
+That matches the checked-in env example and the cloud-init VNC service wiring. There is a default mismatch in the codebase between the sample env file and the config fallback, so exporting it removes ambiguity.
 
 Use admin auth as well:
 
@@ -171,8 +171,6 @@ What should happen:
 - Parallaize injects cloud-init to install and start `x11vnc`.
 - The guest gets an address on the Incus bridge.
 - The browser VNC path becomes available through the app and through Caddy if Caddy is running.
-
-Before you capture or refresh a base image, use the repeatable prep checklist in `docs/template-prep.md`. That document also covers the host-side `pnpm template:prep` helper and cleanup of leftover smoke/churn instances.
 
 ## Optional smoke test
 

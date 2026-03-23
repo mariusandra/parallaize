@@ -1,6 +1,5 @@
 export type ProviderKind = "mock" | "incus";
 export type PersistenceKind = "json" | "postgres";
-export type EnvironmentTemplateKind = "workspace" | "default-image";
 export type ProviderHostStatus =
   | "ready"
   | "missing-cli"
@@ -76,12 +75,6 @@ export interface TemplatePortForward {
   description: string;
 }
 
-export interface EnvironmentTemplateCatalog {
-  distribution: string;
-  release: string;
-  prepRequired: boolean;
-}
-
 export interface VmPortForward extends TemplatePortForward {
   id: string;
   publicPath: string;
@@ -98,8 +91,6 @@ export interface EnvironmentTemplate {
   id: string;
   name: string;
   description: string;
-  kind: EnvironmentTemplateKind;
-  catalog: EnvironmentTemplateCatalog | null;
   launchSource: string;
   defaultResources: ResourceSpec;
   defaultForwardedPorts: TemplatePortForward[];
