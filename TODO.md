@@ -1,7 +1,7 @@
 # Parallaize TODO
 
 Last updated: 2026-03-23
-Current focus: host-routed service access after recording the packaging/deployment decision slice.
+Current focus: packaging/deployment choices and host-routed service access after finishing template/bootstrap polish.
 
 ## Current State
 
@@ -57,10 +57,10 @@ Current focus: host-routed service access after recording the packaging/deployme
 
 ### P2: Packaging And Upgrades
 
-- [x] Write a packaging decision note comparing Ubuntu `.deb` installs against an npm-only install path; npm should likely remain the dev/operator source path, while deployed installs probably need a real system package because Incus, Caddy, systemd, and host QEMU helpers live outside Node.
-- [x] Inventory packaged-install dependencies explicitly: Node runtime or bundled binary, Incus CLI/socket access, Caddy, `attr`, VM-capable QEMU/OVMF helpers, optional PostgreSQL, and the systemd/env-file layout.
-- [x] Decide first supported package targets, likely Ubuntu 24.04 LTS `amd64` first, then add `arm64` only after the live Incus/QEMU path is verified on that architecture.
-- [x] Design an upgrade path for packaged installs: preflight checks, state backup/export, service restart ordering, rollback expectations, and how persistence/schema changes are handled safely.
+- [ ] Write a packaging decision note comparing Ubuntu `.deb` installs against an npm-only install path; npm should likely remain the dev/operator source path, while deployed installs probably need a real system package because Incus, Caddy, systemd, and host QEMU helpers live outside Node.
+- [ ] Inventory packaged-install dependencies explicitly: Node runtime or bundled binary, Incus CLI/socket access, Caddy, `attr`, VM-capable QEMU/OVMF helpers, optional PostgreSQL, and the systemd/env-file layout.
+- [ ] Decide first supported package targets, likely Ubuntu 24.04 LTS `amd64` first, then add `arm64` only after the live Incus/QEMU path is verified on that architecture.
+- [ ] Design an upgrade path for packaged installs: preflight checks, state backup/export, service restart ordering, rollback expectations, and how persistence/schema changes are handled safely.
 
 ### P2: Forwarded Service Routing
 
@@ -77,13 +77,12 @@ Current focus: host-routed service access after recording the packaging/deployme
 
 ## Next Up
 
-1. Start the forwarded-service routing design for stable hostnames alongside the current path-based mode.
-2. Verify whether the intended Tailscale deployment can terminate wildcard hostnames for self-hosted service routing.
-3. Define the fallback routing mode for environments that cannot support wildcard host routing cleanly.
+1. Write the packaging decision note for deployed installs versus the npm/operator path.
+2. Inventory packaged-install dependencies and upgrade constraints for the first supported target.
+3. Start the forwarded-service routing design for stable hostnames alongside the current path-based mode.
 
 ## Decision Log
 
-- 2026-03-23: Closed the packaging/deployment design slice in `docs/packaging-decision.md`. Kept the repo checkout plus Flox path as the dev/operator flow, chose Ubuntu 24.04 LTS `amd64` `.deb` packaging as the first real deployed target, required a bundled Node 24 runtime plus explicit host-level Incus/QEMU/Caddy/PostgreSQL dependencies, and recorded the upgrade/rollback contract around preflight checks, exported state backups, service restart order, and non-destructive persistence handling.
 - 2026-03-23: Finished the guest-template/bootstrap P1 slice. Added a repeatable `pnpm template:prep` host helper plus `docs/template-prep.md`, split the `+` dialog between captured templates and default-image choices, surfaced template launch-source/snapshot/note metadata in the UI, and added `pnpm cleanup:incus:validation` for stale smoke/churn instances. Verified locally on 2026-03-23 that `images:ubuntu/noble/desktop` is available directly, and kept the seeded default picker limited to launch-ready defaults rather than prep-heavy entries.
 - 2026-03-23: Added a dedicated `pnpm smoke:incus:churn` verifier for PostgreSQL-backed live hosts. A two-iteration run on this machine repeatedly created, booted, cloned, and deleted Incus VMs while polling the singleton `app_state` row directly, confirming that PostgreSQL state converges with the live control-plane view after churn and cleanup.
 - 2026-03-23: Validated the live `pnpm smoke:incus` path against PostgreSQL-backed persistence. The run surfaced two host-specific VNC issues: the control-plane default guest VNC port had drifted to `5901` while the guest bootstrap still targeted `5900`, and captured-template launches could keep a stale `x11vnc -auth guess` service because cloud-init did not reliably rewrite it. Fixed both by restoring the default to `5900`, adding a config regression test, and repairing the guest VNC launcher/service over `incus exec` before the provider waits for the browser session.
