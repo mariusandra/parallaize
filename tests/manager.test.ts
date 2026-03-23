@@ -92,6 +92,91 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.ok((job?.progressPercent ?? 100) < 100);
 });
 
+test("manager marks a running VM stopped after the provider reports an external shutdown", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-external-stop-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const instanceName = "parallaize-vm-0103-external-stop";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Stopped",
+                state: {
+                  status: "Stopped",
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const now = new Date().toISOString();
+
+  store.update((draft) => {
+    draft.vms.unshift({
+      id: "vm-0103",
+      name: "external-stop",
+      templateId: "tpl-0001",
+      provider: "incus",
+      providerRef: instanceName,
+      status: "running",
+      resources: {
+        cpu: 4,
+        ramMb: 8192,
+        diskGb: 60,
+      },
+      createdAt: now,
+      updatedAt: now,
+      liveSince: now,
+      lastAction: "Running",
+      snapshotIds: [],
+      frameRevision: 1,
+      screenSeed: 103,
+      activeWindow: "terminal",
+      workspacePath: "/root",
+      session: {
+        kind: "vnc",
+        host: "10.55.0.103",
+        port: 5900,
+        webSocketPath: "/api/vms/vm-0103/vnc",
+        browserPath: "/?vm=vm-0103",
+        display: "10.55.0.103:5900",
+      },
+      forwardedPorts: [],
+      activityLog: ["vnc: 10.55.0.103:5900"],
+      commandHistory: [],
+    });
+  });
+
+  assert.equal(store.load().vms[0]?.status, "running");
+
+  const detail = manager.getVmDetail("vm-0103");
+
+  assert.equal(detail.vm.status, "stopped");
+  assert.equal(detail.vm.liveSince, null);
+  assert.equal(detail.vm.session, null);
+  assert.equal(detail.vm.lastAction, "Workspace stopped");
+  assert.match(
+    detail.vm.activityLog.at(-1) ?? "",
+    /detected .* stopped outside the dashboard/,
+  );
+});
+
 test("template capture jobs expose staged publish progress", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-capture-progress-"));
   context.after(() => {

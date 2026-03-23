@@ -58,6 +58,7 @@ export interface DesktopProvider {
   refreshState(): ProviderState;
   sampleHostTelemetry(): ProviderTelemetrySample | null;
   sampleVmTelemetry(vm: VmInstance): ProviderTelemetrySample | null;
+  observeVmPowerState(vm: VmInstance): ProviderVmPowerState | null;
   createVm(
     vm: VmInstance,
     template: EnvironmentTemplate,
@@ -125,6 +126,10 @@ interface ProviderCommandResult {
 export interface ProviderTelemetrySample {
   cpuPercent: number | null;
   ramPercent: number | null;
+}
+
+export interface ProviderVmPowerState {
+  status: "running" | "stopped";
 }
 
 interface IncusCommandRunner {
@@ -212,6 +217,16 @@ class MockProvider implements DesktopProvider {
       cpuPercent: 18 + ((Math.sin(clock / 5 + seed) + 1) * 28),
       ramPercent: 32 + ((Math.cos(clock / 7 + seed) + 1) * 18),
     };
+  }
+
+  observeVmPowerState(vm: VmInstance): ProviderVmPowerState | null {
+    if (vm.status === "running" || vm.status === "stopped") {
+      return {
+        status: vm.status,
+      };
+    }
+
+    return null;
   }
 
   async createVm(
@@ -505,6 +520,32 @@ class IncusProvider implements DesktopProvider {
     } catch {
       return null;
     }
+  }
+
+  observeVmPowerState(vm: VmInstance): ProviderVmPowerState | null {
+    if (!this.state.available) {
+      return null;
+    }
+
+    try {
+      const info = this.getTelemetryInstanceInfo(vm.providerRef);
+
+      if (!info) {
+        return null;
+      }
+
+      const status = normalizeStatus(info.status ?? info.state?.status);
+
+      if (status === "running" || status === "stopped") {
+        return {
+          status,
+        };
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
   }
 
   async createVm(
@@ -1012,6 +1053,11 @@ class IncusProvider implements DesktopProvider {
 
   private probeState(): ProviderState {
     const probe = this.runner.execute(["list", "--format", "json"]);
+
+    if (probe.status === 0) {
+      this.captureTelemetrySnapshot(probe.stdout);
+    }
+
     return buildIncusProviderState(this.incusBinary, this.project, probe);
   }
 
@@ -1115,16 +1161,20 @@ class IncusProvider implements DesktopProvider {
 
     if (now - this.telemetrySnapshotAt > 1000 || this.telemetryInstances.size === 0) {
       const result = this.run(["list", "--format", "json"]);
-      const instances = parseJson<IncusListInstance[]>(result.stdout);
-      this.telemetryInstances = new Map(
-        instances
-          .filter((entry): entry is IncusListInstance & { name: string } => typeof entry.name === "string")
-          .map((entry) => [entry.name, entry]),
-      );
-      this.telemetrySnapshotAt = now;
+      this.captureTelemetrySnapshot(result.stdout, now);
     }
 
     return this.telemetryInstances.get(instanceName) ?? null;
+  }
+
+  private captureTelemetrySnapshot(rawInstances: string, capturedAt = Date.now()): void {
+    const instances = parseJson<IncusListInstance[]>(rawInstances);
+    this.telemetryInstances = new Map(
+      instances
+        .filter((entry): entry is IncusListInstance & { name: string } => typeof entry.name === "string")
+        .map((entry) => [entry.name, entry]),
+    );
+    this.telemetrySnapshotAt = capturedAt;
   }
 
   private instanceMatchesStatus(

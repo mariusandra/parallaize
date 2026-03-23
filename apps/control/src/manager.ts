@@ -1059,12 +1059,33 @@ export class DesktopManager {
   private syncProviderState(): boolean {
     const nextProviderState = this.provider.refreshState();
     const { changed } = this.store.update((draft) => {
-      if (sameProviderState(draft.provider, nextProviderState)) {
-        return false;
+      let dirty = !sameProviderState(draft.provider, nextProviderState);
+
+      if (dirty) {
+        draft.provider = nextProviderState;
       }
 
-      draft.provider = nextProviderState;
-      return true;
+      if (!nextProviderState.available) {
+        return dirty;
+      }
+
+      for (const vm of draft.vms) {
+        if (vm.status !== "running" || vm.provider !== nextProviderState.kind) {
+          continue;
+        }
+
+        const observedPowerState = this.provider.observeVmPowerState(vm);
+
+        if (observedPowerState?.status !== "stopped") {
+          continue;
+        }
+
+        markVmStoppedOutsideControlPlane(vm);
+        this.vmTelemetry.delete(vm.id);
+        dirty = true;
+      }
+
+      return dirty;
     });
 
     return changed;
@@ -1223,6 +1244,20 @@ function appendManyActivity(vm: VmInstance, lines: string[]): void {
 function appendCommandResult(vm: VmInstance, entry: VmCommandResult): void {
   const history = [...(vm.commandHistory ?? []), entry];
   vm.commandHistory = history.slice(-MAX_COMMAND_RESULTS);
+}
+
+function markVmStoppedOutsideControlPlane(vm: VmInstance): void {
+  vm.status = "stopped";
+  vm.liveSince = null;
+  vm.lastAction = "Workspace stopped";
+  vm.updatedAt = nowIso();
+  vm.frameRevision += 1;
+  vm.activeWindow = "logs";
+  vm.session = null;
+  appendActivity(
+    vm,
+    `${vm.provider}: detected ${vm.providerRef} stopped outside the dashboard`,
+  );
 }
 
 function trimJobs(state: AppState): void {
