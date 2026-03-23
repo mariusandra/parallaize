@@ -1,6 +1,6 @@
 import { createReadStream, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { extname, join, normalize } from "node:path";
@@ -23,13 +23,6 @@ import type {
   UpdateVmForwardedPortsInput,
   VmDetail,
 } from "../../../packages/shared/src/types.js";
-import {
-  AdminSessionStore,
-  clearSessionCookie,
-  parseCookies,
-  serializeSessionCookie,
-  type SessionValidationResult,
-} from "./auth.js";
 import { loadConfig } from "./config.js";
 import { DesktopManager } from "./manager.js";
 import { VmNetworkBridge } from "./network.js";
@@ -61,27 +54,19 @@ const staticRoot = join(distRoot, "dist", "apps", "web", "static");
 const htmlPath = join(staticRoot, "index.html");
 const faviconPath = join(staticRoot, "favicon.svg");
 const sessionCookieName = "parallaize_session";
-const sessionStore = new AdminSessionStore({
-  maxAgeSeconds: config.sessionMaxAgeSeconds,
-  rotationWindowSeconds: config.sessionRotationWindowSeconds,
-});
-
-interface RequestAuthResult {
-  mode: AuthStatus["mode"];
-  responseHeaders: Record<string, string>;
-}
+const sessionMaxAgeSeconds = 60 * 60 * 24 * 7;
+const activeSessionTokens = new Set<string>();
 
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
     const method = request.method ?? "GET";
-    const auth = resolveRequestAuth(request);
 
     if (method === "GET" && url.pathname === "/api/auth/status") {
       return writeJson<AuthStatus>(response, 200, {
         ok: true,
-        data: buildAuthStatus(auth.mode),
-      }, auth.responseHeaders);
+        data: buildAuthStatus(request),
+      });
     }
 
     if (method === "POST" && url.pathname === "/api/auth/login") {
@@ -92,8 +77,8 @@ const server = createServer(async (request, response) => {
       return handleLogout(request, response);
     }
 
-    if (!isAuthorized(auth.mode) && !isPublicRoute(method, url.pathname)) {
-      writeAuthRequired(response, auth.responseHeaders);
+    if (!isAuthorized(request) && !isPublicRoute(method, url.pathname)) {
+      writeAuthRequired(response);
       return;
     }
 
@@ -113,18 +98,18 @@ const server = createServer(async (request, response) => {
           persistence,
           generatedAt: new Date().toISOString(),
         },
-      }, auth.responseHeaders);
+      });
     }
 
     if (method === "GET" && url.pathname === "/api/summary") {
       return writeJson<DashboardSummary>(response, 200, {
         ok: true,
         data: manager.getSummary(),
-      }, auth.responseHeaders);
+      });
     }
 
     if (method === "GET" && url.pathname === "/events") {
-      return handleEvents(response, auth.responseHeaders);
+      return handleEvents(response);
     }
 
     if (await networkBridge.maybeHandleRequest(request, response, url)) {
@@ -136,7 +121,7 @@ const server = createServer(async (request, response) => {
       return writeJson<VmDetail>(response, 200, {
         ok: true,
         data: manager.getVmDetail(vmMatch[1]),
-      }, auth.responseHeaders);
+      });
     }
 
     const frameMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/frame\.svg$/);
@@ -146,7 +131,6 @@ const server = createServer(async (request, response) => {
       response.writeHead(200, {
         "content-type": "image/svg+xml; charset=utf-8",
         "cache-control": "no-store",
-        ...auth.responseHeaders,
       });
       response.end(svg);
       return;
@@ -169,11 +153,11 @@ const server = createServer(async (request, response) => {
         return writeJson(response, 202, {
           ok: true,
           data: vm,
-        }, auth.responseHeaders);
+        });
       }
 
       manager.restoreVmSnapshot(vmId, snapshotId);
-      return writeAccepted(response, auth.responseHeaders);
+      return writeAccepted(response);
     }
 
     if (method === "POST" && url.pathname === "/api/vms") {
@@ -182,21 +166,21 @@ const server = createServer(async (request, response) => {
       return writeJson(response, 202, {
         ok: true,
         data: vm,
-      }, auth.responseHeaders);
+      });
     }
 
     const forwardsMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/forwards$/);
     if (method === "POST" && forwardsMatch) {
       const payload = await readJsonBody<UpdateVmForwardedPortsInput>(request);
       manager.updateVmForwardedPorts(forwardsMatch[1], payload);
-      return writeAccepted(response, auth.responseHeaders);
+      return writeAccepted(response);
     }
 
     const resolutionMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/resolution$/);
     if (method === "POST" && resolutionMatch) {
       const payload = await readJsonBody<SetVmResolutionInput>(request);
       await manager.setVmResolution(resolutionMatch[1], payload);
-      return writeAccepted(response, auth.responseHeaders);
+      return writeAccepted(response);
     }
 
     const actionMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/(clone|start|stop|delete|snapshot|resize|template|input)$/);
@@ -214,36 +198,36 @@ const server = createServer(async (request, response) => {
           return writeJson(response, 202, {
             ok: true,
             data: vm,
-          }, auth.responseHeaders);
+          });
         }
         case "start":
           manager.startVm(vmId);
-          return writeAccepted(response, auth.responseHeaders);
+          return writeAccepted(response);
         case "stop":
           manager.stopVm(vmId);
-          return writeAccepted(response, auth.responseHeaders);
+          return writeAccepted(response);
         case "delete":
           manager.deleteVm(vmId);
-          return writeAccepted(response, auth.responseHeaders);
+          return writeAccepted(response);
         case "snapshot": {
           const payload = await readJsonBody<SnapshotInput>(request);
           manager.snapshotVm(vmId, payload);
-          return writeAccepted(response, auth.responseHeaders);
+          return writeAccepted(response);
         }
         case "resize": {
           const payload = await readJsonBody<ResizeVmInput>(request);
           manager.resizeVm(vmId, payload);
-          return writeAccepted(response, auth.responseHeaders);
+          return writeAccepted(response);
         }
         case "template": {
           const payload = await readJsonBody<CaptureTemplateInput>(request);
           manager.captureTemplate(vmId, payload);
-          return writeAccepted(response, auth.responseHeaders);
+          return writeAccepted(response);
         }
         case "input": {
           const payload = await readJsonBody<InjectCommandInput>(request);
           manager.injectCommand(vmId, payload.command);
-          return writeAccepted(response, auth.responseHeaders);
+          return writeAccepted(response);
         }
         default:
           break;
@@ -251,13 +235,7 @@ const server = createServer(async (request, response) => {
     }
 
     if ((method === "GET" || method === "HEAD") && url.pathname === "/") {
-      return serveFile(
-        response,
-        htmlPath,
-        "text/html; charset=utf-8",
-        method === "HEAD",
-        auth.responseHeaders,
-      );
+      return serveFile(response, htmlPath, "text/html; charset=utf-8", method === "HEAD");
     }
 
     if (
@@ -269,7 +247,6 @@ const server = createServer(async (request, response) => {
         faviconPath,
         "image/svg+xml; charset=utf-8",
         method === "HEAD",
-        auth.responseHeaders,
       );
     }
 
@@ -281,7 +258,6 @@ const server = createServer(async (request, response) => {
           resolved.path,
           resolved.contentType,
           method === "HEAD",
-          auth.responseHeaders,
         );
       }
     }
@@ -289,7 +265,7 @@ const server = createServer(async (request, response) => {
     writeJson(response, 404, {
       ok: false,
       error: `No route matched ${method} ${url.pathname}`,
-    }, auth.responseHeaders);
+    });
   } catch (error) {
     if (isBenignConnectionError(error)) {
       return;
@@ -308,10 +284,8 @@ const server = createServer(async (request, response) => {
 });
 
 server.on("upgrade", (request, socket, head) => {
-  const auth = resolveRequestAuth(request);
-
-  if (!isAuthorized(auth.mode)) {
-    writeSocketAuthRequired(socket as Socket, auth.responseHeaders);
+  if (!isAuthorized(request)) {
+    writeSocketAuthRequired(socket as Socket);
     return;
   }
 
@@ -323,11 +297,8 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 server.listen(config.port, config.host, () => {
-  const address = server.address();
-  const listenPort =
-    address && typeof address !== "string" ? address.port : config.port;
   process.stdout.write(
-    `parallaize listening on http://${config.host}:${listenPort} using ${provider.state.kind} provider with ${config.persistenceKind} persistence\n`,
+    `parallaize listening on http://${config.host}:${config.port} using ${provider.state.kind} provider with ${config.persistenceKind} persistence\n`,
   );
   if (config.adminPassword) {
     process.stdout.write(
@@ -338,15 +309,11 @@ server.listen(config.port, config.host, () => {
 
 registerShutdownHandlers();
 
-function handleEvents(
-  response: ServerResponse,
-  headers: Record<string, string> = {},
-): void {
+function handleEvents(response: ServerResponse): void {
   response.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
-    ...headers,
   });
 
   const unsubscribe = manager.subscribe((summary) => {
@@ -377,16 +344,13 @@ async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
 }
 
-function writeAccepted(
-  response: ServerResponse,
-  headers: Record<string, string | string[]> = {},
-): void {
+function writeAccepted(response: ServerResponse): void {
   writeJson(response, 202, {
     ok: true,
     data: {
       accepted: true,
     },
-  }, headers);
+  });
 }
 
 function writeJson<T>(
@@ -407,35 +371,24 @@ function writeJson<T>(
   response.end(`${JSON.stringify(payload)}\n`);
 }
 
-function isAuthorized(mode: AuthStatus["mode"]): boolean {
-  return mode !== "unauthenticated";
+function isAuthorized(request: IncomingMessage): boolean {
+  return resolveAuthMode(request) !== "unauthenticated";
 }
 
-function resolveRequestAuth(request: IncomingMessage): RequestAuthResult {
+function resolveAuthMode(request: IncomingMessage): AuthStatus["mode"] {
   if (!config.adminPassword) {
-    return {
-      mode: "none",
-      responseHeaders: {},
-    };
+    return "none";
   }
 
   const sessionToken = parseCookies(request.headers.cookie)[sessionCookieName];
-  const session = sessionStore.validateSession(sessionToken);
-  const sessionHeaders = buildSessionResponseHeaders(session);
 
-  if (session.mode === "session") {
-    return {
-      mode: "session",
-      responseHeaders: sessionHeaders,
-    };
+  if (sessionToken && activeSessionTokens.has(sessionToken)) {
+    return "session";
   }
 
   const authorization = request.headers.authorization;
   if (!authorization?.startsWith("Basic ")) {
-    return {
-      mode: "unauthenticated",
-      responseHeaders: sessionHeaders,
-    };
+    return "unauthenticated";
   }
 
   let decoded: string;
@@ -443,34 +396,26 @@ function resolveRequestAuth(request: IncomingMessage): RequestAuthResult {
   try {
     decoded = Buffer.from(authorization.slice("Basic ".length), "base64").toString("utf8");
   } catch {
-    return {
-      mode: "unauthenticated",
-      responseHeaders: sessionHeaders,
-    };
+    return "unauthenticated";
   }
 
   const separatorIndex = decoded.indexOf(":");
 
   if (separatorIndex === -1) {
-    return {
-      mode: "unauthenticated",
-      responseHeaders: sessionHeaders,
-    };
+    return "unauthenticated";
   }
 
   const username = decoded.slice(0, separatorIndex);
   const password = decoded.slice(separatorIndex + 1);
 
-  return {
-    mode:
-      safeEqual(username, config.adminUsername) && safeEqual(password, config.adminPassword)
-        ? "basic"
-        : "unauthenticated",
-    responseHeaders: sessionHeaders,
-  };
+  return safeEqual(username, config.adminUsername) && safeEqual(password, config.adminPassword)
+    ? "basic"
+    : "unauthenticated";
 }
 
-function buildAuthStatus(mode: AuthStatus["mode"]): AuthStatus {
+function buildAuthStatus(request: IncomingMessage): AuthStatus {
+  const mode = resolveAuthMode(request);
+
   return {
     authEnabled: Boolean(config.adminPassword),
     authenticated: mode !== "unauthenticated",
@@ -486,7 +431,7 @@ async function handleLogin(
   if (!config.adminPassword) {
     writeJson<AuthStatus>(response, 200, {
       ok: true,
-      data: buildAuthStatus("none"),
+      data: buildAuthStatus(request),
     });
     return;
   }
@@ -497,15 +442,16 @@ async function handleLogin(
     !safeEqual(payload.username ?? "", config.adminUsername) ||
     !safeEqual(payload.password ?? "", config.adminPassword)
   ) {
-    const auth = resolveRequestAuth(request);
     writeJson(response, 401, {
       ok: false,
       error: "Invalid username or password.",
-    }, auth.responseHeaders);
+    });
     return;
   }
 
-  const token = sessionStore.issueSession();
+  const token = createSessionToken();
+  activeSessionTokens.clear();
+  activeSessionTokens.add(token);
 
   writeJson<AuthStatus>(
     response,
@@ -520,11 +466,7 @@ async function handleLogin(
       },
     },
     {
-      "set-cookie": serializeSessionCookie(
-        sessionCookieName,
-        token,
-        sessionStore.maxAgeSeconds,
-      ),
+      "set-cookie": serializeSessionCookie(token),
     },
   );
 }
@@ -535,7 +477,9 @@ function handleLogout(
 ): void {
   const sessionToken = parseCookies(request.headers.cookie)[sessionCookieName];
 
-  sessionStore.revokeSession(sessionToken);
+  if (sessionToken) {
+    activeSessionTokens.delete(sessionToken);
+  }
 
   writeJson<AuthStatus>(
     response,
@@ -550,7 +494,7 @@ function handleLogout(
       },
     },
     {
-      "set-cookie": clearSessionCookie(sessionCookieName),
+      "set-cookie": clearSessionCookie(),
     },
   );
 }
@@ -566,29 +510,16 @@ function safeEqual(left: string, right: string | null): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function writeAuthRequired(
-  response: ServerResponse,
-  headers: Record<string, string | string[]> = {},
-): void {
+function writeAuthRequired(response: ServerResponse): void {
   writeJson(response, 401, {
     ok: false,
     error: "Authentication required.",
-  }, headers);
+  });
 }
 
-function writeSocketAuthRequired(
-  socket: Socket,
-  headers: Record<string, string | string[]> = {},
-): void {
-  const serializedHeaders = Object.entries(headers)
-    .map(([key, value]) =>
-      `${key}: ${Array.isArray(value) ? value.join(", ") : value}\r\n`,
-    )
-    .join("");
-
+function writeSocketAuthRequired(socket: Socket): void {
   socket.write(
     "HTTP/1.1 401 Unauthorized\r\n" +
-      serializedHeaders +
       "Connection: close\r\n" +
       "Content-Length: 0\r\n\r\n",
   );
@@ -609,26 +540,44 @@ function isPublicRoute(method: string, pathname: string): boolean {
   return false;
 }
 
-function buildSessionResponseHeaders(
-  session: SessionValidationResult,
-): Record<string, string> {
-  if (session.shouldClearCookie) {
-    return {
-      "set-cookie": clearSessionCookie(sessionCookieName),
-    };
+function createSessionToken(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+function serializeSessionCookie(token: string): string {
+  return `${sessionCookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionMaxAgeSeconds}`;
+}
+
+function clearSessionCookie(): string {
+  return `${sessionCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  if (!header) {
+    return {};
   }
 
-  if (session.rotated && session.token) {
-    return {
-      "set-cookie": serializeSessionCookie(
-        sessionCookieName,
-        session.token,
-        sessionStore.maxAgeSeconds,
-      ),
-    };
+  const entries = header.split(";").map((part) => part.trim()).filter(Boolean);
+  const cookies: Record<string, string> = {};
+
+  for (const entry of entries) {
+    const separatorIndex = entry.indexOf("=");
+
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const key = entry.slice(0, separatorIndex).trim();
+    const value = entry.slice(separatorIndex + 1).trim();
+
+    if (!key) {
+      continue;
+    }
+
+    cookies[key] = value;
   }
 
-  return {};
+  return cookies;
 }
 
 async function serveFile(
@@ -636,20 +585,18 @@ async function serveFile(
   filePath: string,
   contentType: string,
   headOnly = false,
-  headers: Record<string, string | string[]> = {},
 ): Promise<void> {
   if (!existsSync(filePath)) {
     writeJson(response, 404, {
       ok: false,
       error: `Static asset not found: ${filePath}`,
-    }, headers);
+    });
     return;
   }
 
   response.writeHead(200, {
     "content-type": contentType,
     "cache-control": "no-store",
-    ...headers,
   });
 
   if (headOnly) {

@@ -20,8 +20,6 @@ export interface AppConfig {
   guestVncPort: number;
   adminUsername: string;
   adminPassword: string | null;
-  sessionMaxAgeSeconds: number;
-  sessionRotationWindowSeconds: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -56,14 +54,6 @@ export function loadConfig(): AppConfig {
     guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5901),
     adminUsername: process.env.PARALLAIZE_ADMIN_USERNAME?.trim() || "admin",
     adminPassword,
-    sessionMaxAgeSeconds: parsePositiveInteger(
-      process.env.PARALLAIZE_SESSION_MAX_AGE_SECONDS,
-      60 * 60 * 24 * 7,
-    ),
-    sessionRotationWindowSeconds: parsePositiveInteger(
-      process.env.PARALLAIZE_SESSION_ROTATION_WINDOW_SECONDS,
-      60 * 60 * 24,
-    ),
   };
 }
 
@@ -105,11 +95,6 @@ function parseInteger(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function parsePositiveInteger(value: string | undefined, fallback: number): number {
-  const parsed = parseInteger(value, fallback);
-  return parsed > 0 ? parsed : fallback;
 }
 
 function parseTemplateCompression(value: string | undefined): IncusImageCompression {

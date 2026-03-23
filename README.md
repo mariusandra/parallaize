@@ -19,8 +19,9 @@ Parallaize is a server-first proof of concept for managing many isolated desktop
 
 ## Current Gaps
 
-- PostgreSQL persistence still needs more live Incus validation before it should replace the JSON fallback everywhere
+- PostgreSQL persistence still needs more live Incus validation and backup/recovery docs before it should replace the JSON fallback everywhere
 - Guest VNC/bootstrap steps should be codified more tightly into the documented template workflow
+- Single-admin session expiry and rotation are still basic
 
 Real Incus-backed browser VNC sessions and Caddy guest-service forwarding have now been validated against live Ubuntu desktop VMs on this host.
 
@@ -57,7 +58,6 @@ PARALLAIZE_ADMIN_PASSWORD=change-me
 When `PARALLAIZE_ADMIN_PASSWORD` is set:
 
 - The browser loads the app shell and then signs in through an in-app login form that sets an HttpOnly session cookie.
-- Session cookies expire server-side after 7 days by default and rotate automatically during the final day before expiry.
 - API clients, smoke tests, and scripts can continue sending Basic Auth headers directly.
 - The same authenticated session protects:
 
@@ -65,8 +65,6 @@ When `PARALLAIZE_ADMIN_PASSWORD` is set:
 - Server-sent events
 - Browser VNC websocket upgrades
 - Forwarded guest-service routes
-
-Browser sessions are intentionally invalidated when the control plane restarts. The session registry stays in memory on the server, so an operator must sign in again after a restart, while Basic Auth clients can continue working immediately.
 
 If the password is unset, auth is disabled.
 
@@ -202,8 +200,6 @@ PARALLAIZE_DATABASE_URL=postgresql://parallaize:parallaize@127.0.0.1:5432/parall
 flox activate -d . -- pnpm start
 ```
 
-4. Open `http://127.0.0.1:3000`.
-
 ## Persistence Import And Export
 
 Use the persistence admin CLI to move the singleton app state between JSON files and PostgreSQL without hand-editing the state blob. The CLI normalizes older persisted shapes on read and writes the canonical state on import.
@@ -240,155 +236,7 @@ flox activate -d . -- pnpm persistence:import -- \
 
 The CLI also accepts `PARALLAIZE_DATA_FILE` for JSON paths and `PARALLAIZE_DATABASE_URL` or `DATABASE_URL` for PostgreSQL URLs when you do not want to pass those flags directly.
 
-## PostgreSQL Backup And Recovery
-
-Parallaize keeps the PostgreSQL persistence layout intentionally small. The control plane creates one table and writes one logical row:
-
-```sql
-CREATE TABLE IF NOT EXISTS app_state (
-  store_key TEXT PRIMARY KEY,
-  state JSONB NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-Expected deployed shape:
-
-- `store_key` is always `singleton`
-- `state` is the full canonical `AppState` blob with top-level keys `sequence`, `provider`, `templates`, `vms`, `snapshots`, `jobs`, and `lastUpdated`
-- `updated_at` is the database-side timestamp of the last successful write
-- A healthy deployment normally has exactly one row in `app_state`
-
-Use direct SQL for inspection only. Prefer the persistence CLI for migrations and restores so the state continues to round-trip through the same normalization path the server uses.
-
-Quick inspection examples:
-
-```bash
-psql "$PARALLAIZE_DATABASE_URL" -c "SELECT store_key, updated_at, jsonb_typeof(state) AS state_type FROM app_state;"
-psql "$PARALLAIZE_DATABASE_URL" -c "SELECT jsonb_object_keys(state) FROM app_state WHERE store_key = 'singleton';"
-```
-
-For routine Parallaize backups, prefer an app-state export:
-
-```bash
-mkdir -p backups
-flox activate -d . -- pnpm persistence:export -- \
-  --from postgres \
-  --database-url "$PARALLAIZE_DATABASE_URL" \
-  --output "backups/parallaize-state-$(date +%Y%m%d-%H%M%S).json"
-```
-
-That JSON export is the most useful operator backup because it restores cleanly into either PostgreSQL or the JSON fallback.
-
-If you need a full PostgreSQL logical dump instead of only the Parallaize state row, use `pg_dump`:
-
-```bash
-mkdir -p backups
-pg_dump --format=custom --dbname "$PARALLAIZE_DATABASE_URL" \
-  --file "backups/parallaize-postgres-$(date +%Y%m%d-%H%M%S).dump"
-```
-
-Recovery flow for an app-state JSON backup:
-
-1. Stop the control plane so no writes race the restore.
-2. Import the JSON snapshot back into PostgreSQL.
-3. Start the control plane again and verify `/api/health` reports PostgreSQL persistence as ready.
-
-```bash
-sudo systemctl stop parallaize
-flox activate -d . -- pnpm persistence:import -- \
-  --to postgres \
-  --database-url "$PARALLAIZE_DATABASE_URL" \
-  --input backups/parallaize-state.json
-sudo systemctl start parallaize
-```
-
-Recovery flow for a full PostgreSQL dump:
-
-```bash
-sudo systemctl stop parallaize
-pg_restore --clean --if-exists --dbname "$PARALLAIZE_DATABASE_URL" \
-  backups/parallaize-postgres.dump
-sudo systemctl start parallaize
-```
-
-If PostgreSQL needs to be taken out of service, you can fall back to JSON persistence without editing the state blob by hand:
-
-```bash
-flox activate -d . -- pnpm persistence:export -- \
-  --from postgres \
-  --database-url "$PARALLAIZE_DATABASE_URL" \
-  --output /var/lib/parallaize/state.json
-```
-
-Then set `PARALLAIZE_PERSISTENCE=json` and `PARALLAIZE_DATA_FILE=/var/lib/parallaize/state.json` in the service environment, restart the control plane, and keep the exported JSON file as the fallback state source.
-
-## PostgreSQL Systemd Deployment Flow
-
-The checked-in deployment shape assumes the repo is installed at `/opt/parallaize`, the control plane runs as a dedicated `parallaize` user, the environment file lives at `/etc/parallaize/parallaize.env`, and PostgreSQL is reachable before the service starts.
-
-One workable host flow is:
-
-1. Install the host prerequisites for Incus, QEMU/OVMF helpers, Docker or another PostgreSQL runtime, and the repo Flox environment.
-2. Copy the repository to `/opt/parallaize` and build it with `flox activate -d /opt/parallaize -- pnpm install` plus `flox activate -d /opt/parallaize -- pnpm build`.
-3. Create the runtime user and state directories.
-4. Start PostgreSQL and point the control plane at it with `PARALLAIZE_PERSISTENCE=postgres`.
-5. Install the systemd unit and env file, reload systemd, and enable the service.
-
-Example host commands:
-
-```bash
-sudo useradd --system --create-home --home-dir /var/lib/parallaize --shell /usr/sbin/nologin parallaize
-sudo mkdir -p /etc/parallaize /var/lib/parallaize
-sudo chown -R parallaize:parallaize /etc/parallaize /var/lib/parallaize /opt/parallaize
-
-cd /opt/parallaize
-flox activate -d . -- pnpm install
-flox activate -d . -- pnpm build
-
-sudo docker compose -f /opt/parallaize/infra/docker-compose.postgres.yml up -d
-sudo install -m 0644 /opt/parallaize/infra/parallaize.env.example /etc/parallaize/parallaize.env
-sudo install -m 0644 /opt/parallaize/infra/systemd/parallaize.service /etc/systemd/system/parallaize.service
-sudo install -m 0644 /opt/parallaize/infra/systemd/parallaize-caddy.service /etc/systemd/system/parallaize-caddy.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now parallaize.service
-```
-
-At minimum, update `/etc/parallaize/parallaize.env` with the deployed host values for:
-
-- `HOST` and `PORT`
-- `PARALLAIZE_PROVIDER=incus`
-- `PARALLAIZE_PERSISTENCE=postgres`
-- `PARALLAIZE_DATABASE_URL`
-- `PARALLAIZE_INCUS_BIN`, `PARALLAIZE_INCUS_PROJECT`, and `PARALLAIZE_INCUS_STORAGE_POOL` if the host needs non-default Incus wiring
-- `PARALLAIZE_ADMIN_USERNAME` and `PARALLAIZE_ADMIN_PASSWORD`
-
-The checked-in `parallaize.service` unit already expects that env file and starts the built server through Flox:
-
-```ini
-[Service]
-User=parallaize
-Group=parallaize
-WorkingDirectory=/opt/parallaize
-EnvironmentFile=/etc/parallaize/parallaize.env
-ExecStart=/usr/bin/env bash -lc 'flox activate -d /opt/parallaize -- node dist/apps/control/src/server.js'
-```
-
-After the control plane is healthy, you can optionally front it with the bundled Caddy unit:
-
-```bash
-sudo systemctl enable --now parallaize-caddy.service
-sudo systemctl status parallaize.service parallaize-caddy.service
-```
-
-Recommended first verification on the host:
-
-```bash
-curl http://127.0.0.1:3000/api/health
-curl http://127.0.0.1:3000/api/summary
-```
-
-If you are switching an existing JSON-backed deployment to PostgreSQL, export or copy the persisted state first with the persistence CLI before flipping the env file and restarting systemd.
+4. Open `http://127.0.0.1:3000`.
 
 ## Caddy Front Door
 
@@ -439,8 +287,6 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 - `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5901`
 - `PARALLAIZE_ADMIN_USERNAME`: shared admin username for browser-session login or Basic Auth fallback, default `admin`
 - `PARALLAIZE_ADMIN_PASSWORD`: shared admin password; when unset, auth is disabled
-- `PARALLAIZE_SESSION_MAX_AGE_SECONDS`: absolute server-side browser-session lifetime, default `604800` (7 days)
-- `PARALLAIZE_SESSION_ROTATION_WINDOW_SECONDS`: how close to expiry an active browser session should be rotated and refreshed, default `86400` (1 day)
 
 An example production env file is included at `infra/parallaize.env.example`.
 
