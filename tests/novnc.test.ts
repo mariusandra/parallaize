@@ -4,10 +4,13 @@ import test from "node:test";
 import {
   buildRfbSocketUrls,
   clipboardPasteShortcutLabel,
+  primeClipboardPasteCaptureTarget,
   readBrowserClipboardText,
   readClipboardEventText,
+  readClipboardTransferText,
   readRfbFramebufferSize,
   resolveRfbConstructor,
+  sendGuestText,
   sendGuestPasteShortcut,
   viewportSettingsForMode,
   writeBrowserClipboardText,
@@ -113,6 +116,49 @@ test("writeBrowserClipboardText delegates to the clipboard API", async () => {
   assert.equal(written, "hello from the guest");
 });
 
+test("readClipboardTransferText prefers plain text and falls back cleanly", () => {
+  assert.equal(
+    readClipboardTransferText({
+      getData(format: string) {
+        return format === "text/plain" ? "plain" : "fallback";
+      },
+    }),
+    "plain",
+  );
+
+  assert.equal(
+    readClipboardTransferText({
+      getData(format: string) {
+        return format === "text" ? "fallback" : "";
+      },
+    }),
+    "fallback",
+  );
+
+  assert.equal(readClipboardTransferText(null), "");
+});
+
+test("primeClipboardPasteCaptureTarget focuses and clears the capture field", () => {
+  const calls: string[] = [];
+  const target = {
+    value: "stale",
+    focus() {
+      calls.push("focus");
+    },
+    select() {
+      calls.push("select");
+    },
+    setSelectionRange(start: number, end: number) {
+      calls.push(`range:${start}:${end}`);
+    },
+  };
+
+  assert.equal(primeClipboardPasteCaptureTarget(target), true);
+  assert.equal(target.value, "");
+  assert.deepEqual(calls, ["focus", "select", "range:0:0"]);
+  assert.equal(primeClipboardPasteCaptureTarget(null), false);
+});
+
 test("readClipboardEventText extracts noVNC clipboard payloads", () => {
   assert.equal(
     readClipboardEventText({
@@ -170,6 +216,44 @@ test("sendGuestPasteShortcut emits a Ctrl+V key sequence", () => {
       code: "ControlLeft",
       down: false,
       keysym: 0xffe3,
+    },
+  ]);
+});
+
+test("sendGuestText emits direct text input events", () => {
+  const calls: Array<{ code: string; down: boolean | undefined; keysym: number }> = [];
+  const rfb = {
+    sendKey(keysym: number, code: string, down?: boolean) {
+      calls.push({
+        code,
+        down,
+        keysym,
+      });
+    },
+  } as Pick<FakeRfb, "sendKey"> as Parameters<typeof sendGuestText>[0];
+
+  sendGuestText(rfb, "A\tb\n");
+
+  assert.deepEqual(calls, [
+    {
+      code: "",
+      down: undefined,
+      keysym: 0x41,
+    },
+    {
+      code: "Tab",
+      down: undefined,
+      keysym: 0xff09,
+    },
+    {
+      code: "",
+      down: undefined,
+      keysym: 0x62,
+    },
+    {
+      code: "Enter",
+      down: undefined,
+      keysym: 0xff0d,
     },
   ]);
 });

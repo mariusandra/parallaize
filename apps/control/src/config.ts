@@ -18,6 +18,8 @@ export interface AppConfig {
   incusStoragePool: string | null;
   templateCompression: IncusImageCompression;
   guestVncPort: number;
+  guestInotifyMaxUserWatches: number;
+  guestInotifyMaxUserInstances: number;
   adminUsername: string;
   adminPassword: string | null;
 }
@@ -51,7 +53,15 @@ export function loadConfig(): AppConfig {
     incusProject: parseOptionalString(process.env.PARALLAIZE_INCUS_PROJECT),
     incusStoragePool: parseOptionalString(process.env.PARALLAIZE_INCUS_STORAGE_POOL),
     templateCompression: parseTemplateCompression(process.env.PARALLAIZE_TEMPLATE_COMPRESSION),
-    guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5901),
+    guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5900),
+    guestInotifyMaxUserWatches: parsePositiveInteger(
+      process.env.PARALLAIZE_GUEST_INOTIFY_MAX_USER_WATCHES,
+      1_048_576,
+    ),
+    guestInotifyMaxUserInstances: parsePositiveInteger(
+      process.env.PARALLAIZE_GUEST_INOTIFY_MAX_USER_INSTANCES,
+      2_048,
+    ),
     adminUsername: process.env.PARALLAIZE_ADMIN_USERNAME?.trim() || "admin",
     adminPassword,
   };
@@ -95,6 +105,15 @@ function parseInteger(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseTemplateCompression(value: string | undefined): IncusImageCompression {

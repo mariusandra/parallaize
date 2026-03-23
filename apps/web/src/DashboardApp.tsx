@@ -36,6 +36,7 @@ import type {
   SnapshotLaunchInput,
   SnapshotInput,
   TemplatePortForward,
+  UpdateTemplateInput,
   VmDetail,
   VmInstance,
   VmPortForward,
@@ -56,6 +57,7 @@ import {
   type ResolutionRequest,
   type ViewportBounds,
 } from "./desktopResolution.js";
+import { canUseDeferredIdentifiedCollection } from "./deferredCollections.js";
 import { NoVncViewport } from "./NoVncViewport.js";
 
 interface CreateDraft {
@@ -234,6 +236,9 @@ export function DashboardApp(): JSX.Element {
   const [detail, setDetail] = useState<VmDetail | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  const [dismissedProminentJobIds, setDismissedProminentJobIds] = useState<
+    Record<string, true>
+  >({});
   const [createDraft, setCreateDraft] = useState<CreateDraft>(emptyCreateDraft);
   const [createDirty, setCreateDirty] = useState(false);
   const [resourceDraft, setResourceDraft] = useState<ResourceDraft>(emptyResourceDraft);
@@ -251,6 +256,7 @@ export function DashboardApp(): JSX.Element {
     Record<string, DesktopResolutionPreference>
   >(() => readDesktopResolutionByVm());
   const [openVmMenuId, setOpenVmMenuId] = useState<string | null>(null);
+  const [openTemplateMenuId, setOpenTemplateMenuId] = useState<string | null>(null);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [fullscreenActive, setFullscreenActive] = useState(() => readFullscreenActive());
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
@@ -322,6 +328,18 @@ export function DashboardApp(): JSX.Element {
 
   const deferredVms = useDeferredValue(summary?.vms ?? []);
   const deferredTemplates = useDeferredValue(summary?.templates ?? []);
+  const displayedVms = canUseDeferredIdentifiedCollection(
+    summary?.vms ?? [],
+    deferredVms,
+  )
+    ? deferredVms
+    : summary?.vms ?? [];
+  const displayedTemplates = canUseDeferredIdentifiedCollection(
+    summary?.templates ?? [],
+    deferredTemplates,
+  )
+    ? deferredTemplates
+    : summary?.templates ?? [];
   const selectedVm =
     summary?.vms.find((entry) => entry.id === selectedVmId) ?? detail?.vm ?? null;
   const selectedDesktopResolutionPreference =
@@ -629,6 +647,14 @@ export function DashboardApp(): JSX.Element {
   }, [summary?.templates, createDirty]);
 
   useEffect(() => {
+    if (!openTemplateMenuId || summary?.templates.some((template) => template.id === openTemplateMenuId)) {
+      return;
+    }
+
+    setOpenTemplateMenuId(null);
+  }, [openTemplateMenuId, summary?.templates]);
+
+  useEffect(() => {
     if (!selectedVmId) {
       setDetail(null);
       return;
@@ -730,6 +756,12 @@ export function DashboardApp(): JSX.Element {
       window.clearTimeout(timeout);
     };
   }, [notice]);
+
+  useEffect(() => {
+    setDismissedProminentJobIds((current) =>
+      pruneDismissedProminentJobIds(current, summary?.jobs),
+    );
+  }, [summary?.jobs]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
@@ -1226,6 +1258,7 @@ export function DashboardApp(): JSX.Element {
     setBusyLabel(null);
     setShellMenuOpen(false);
     setOpenVmMenuId(null);
+    setOpenTemplateMenuId(null);
   }
 
   async function handleLogout(): Promise<void> {
@@ -1319,6 +1352,100 @@ export function DashboardApp(): JSX.Element {
 
     setCreateDirty(false);
     setCreateDraft(buildCreateDraft(template, createDraft.name));
+  }
+
+  function openCreateDialog(): void {
+    setOpenTemplateMenuId(null);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+    setShowCreateDialog(true);
+  }
+
+  function openCreateDialogForTemplate(template: EnvironmentTemplate): void {
+    setCreateDirty(false);
+    setCreateDraft(buildCreateDraft(template));
+    setOpenTemplateMenuId(null);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+    setShowCreateDialog(true);
+  }
+
+  async function handleRenameTemplate(template: EnvironmentTemplate): Promise<void> {
+    setOpenTemplateMenuId(null);
+    const name = window.prompt("Template name", template.name)?.trim();
+
+    if (!name || name === template.name) {
+      return;
+    }
+
+    await runMutation(
+      `Renaming ${template.name}`,
+      async () => {
+        await postJson<EnvironmentTemplate>(
+          `/api/templates/${template.id}/update`,
+          {
+            name,
+            description: template.description,
+          } satisfies UpdateTemplateInput,
+        );
+        await refreshSummary();
+      },
+      `Renamed template to ${name}.`,
+    );
+  }
+
+  async function handleEditTemplateDescription(template: EnvironmentTemplate): Promise<void> {
+    setOpenTemplateMenuId(null);
+    const description = window.prompt("Template description", template.description);
+
+    if (description === null || description === template.description) {
+      return;
+    }
+
+    await runMutation(
+      `Updating ${template.name}`,
+      async () => {
+        await postJson<EnvironmentTemplate>(
+          `/api/templates/${template.id}/update`,
+          {
+            name: template.name,
+            description,
+          } satisfies UpdateTemplateInput,
+        );
+        await refreshSummary();
+      },
+      `Updated description for ${template.name}.`,
+    );
+  }
+
+  async function handleDeleteTemplate(template: EnvironmentTemplate): Promise<void> {
+    setOpenTemplateMenuId(null);
+
+    const linkedVmCount =
+      summary?.vms.filter((entry) => entry.templateId === template.id).length ?? 0;
+
+    if (linkedVmCount > 0) {
+      setNotice({
+        tone: "error",
+        message:
+          `${template.name} is still attached to ${linkedVmCount} ` +
+          `VM${linkedVmCount === 1 ? "" : "s"}. Delete those workspaces first.`,
+      });
+      return;
+    }
+
+    if (!window.confirm(`Delete template ${template.name}?`)) {
+      return;
+    }
+
+    await runMutation(
+      `Deleting ${template.name}`,
+      async () => {
+        await postJson(`/api/templates/${template.id}/delete`, {});
+        await refreshSummary();
+      },
+      `Deleted template ${template.name}.`,
+    );
   }
 
   function setVmSidepanelCollapsed(vmId: string, collapsed: boolean): void {
@@ -1440,12 +1567,14 @@ export function DashboardApp(): JSX.Element {
   function selectVm(vmId: string): void {
     setSelectedVmId(vmId);
     setOpenVmMenuId(null);
+    setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
   }
 
   function openHomepage(): void {
     setSelectedVmId(null);
     setOpenVmMenuId(null);
+    setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
   }
 
@@ -1468,6 +1597,7 @@ export function DashboardApp(): JSX.Element {
     setSelectedVmId(vmId);
     setVmSidepanelCollapsed(vmId, false);
     setOpenVmMenuId(null);
+    setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
   }
 
@@ -2174,6 +2304,10 @@ export function DashboardApp(): JSX.Element {
 
   const workspaceFocused = selectedVm !== null;
   const prominentJob = findProminentJob(summary, selectedVmId);
+  const visibleProminentJob =
+    prominentJob && dismissedProminentJobIds[prominentJob.job.id] !== true
+      ? prominentJob
+      : null;
 
   return (
     <>
@@ -2181,10 +2315,11 @@ export function DashboardApp(): JSX.Element {
         className="app-shell"
         onClick={() => {
           setOpenVmMenuId(null);
+          setOpenTemplateMenuId(null);
           setShellMenuOpen(false);
         }}
       >
-        {notice || busyLabel || prominentJob ? (
+        {notice || busyLabel || visibleProminentJob ? (
           <div
             className="app-shell__notice-stack"
             onClick={(event) => event.stopPropagation()}
@@ -2203,26 +2338,44 @@ export function DashboardApp(): JSX.Element {
               </div>
             ) : null}
 
-            {prominentJob ? (
+            {visibleProminentJob ? (
               <div className="notice-bar notice-bar--info">
                 <div className="notice-bar__copy">
                   <strong className="notice-bar__title">
-                    {prominentJob.vmName} · {formatJobKindLabel(prominentJob.job.kind)}
+                    {visibleProminentJob.vmName} · {formatJobKindLabel(visibleProminentJob.job.kind)}
                   </strong>
-                  <span>{prominentJob.job.message || "Action in progress"}</span>
+                  <span>{visibleProminentJob.job.message || "Action in progress"}</span>
                 </div>
 
-                <div className="chip-row">
-                  <span className="surface-pill">{prominentJob.job.status}</span>
-                  {prominentJob.job.progressPercent !== null &&
-                  prominentJob.job.progressPercent !== undefined ? (
-                    <span className="surface-pill">{prominentJob.job.progressPercent}%</span>
-                  ) : null}
-                  {prominentJob.activeCount > 1 ? (
-                    <span className="surface-pill">
-                      {prominentJob.activeCount} active
-                    </span>
-                  ) : null}
+                <div className="notice-bar__actions">
+                  <div className="chip-row">
+                    <span className="surface-pill">{visibleProminentJob.job.status}</span>
+                    {visibleProminentJob.job.progressPercent !== null &&
+                    visibleProminentJob.job.progressPercent !== undefined ? (
+                      <span className="surface-pill">{visibleProminentJob.job.progressPercent}%</span>
+                    ) : null}
+                    {visibleProminentJob.activeCount > 1 ? (
+                      <span className="surface-pill">
+                        {visibleProminentJob.activeCount} active
+                      </span>
+                    ) : null}
+                  </div>
+                  <button
+                    className="button button--ghost notice-bar__dismiss"
+                    type="button"
+                    onClick={() =>
+                      setDismissedProminentJobIds((current) =>
+                        current[visibleProminentJob.job.id]
+                          ? current
+                          : {
+                              ...current,
+                              [visibleProminentJob.job.id]: true,
+                            },
+                      )
+                    }
+                  >
+                    Hide
+                  </button>
                 </div>
               </div>
             ) : null}
@@ -2279,7 +2432,7 @@ export function DashboardApp(): JSX.Element {
                       type="button"
                       aria-label="New VM"
                       title="New VM"
-                      onClick={() => setShowCreateDialog(true)}
+                      onClick={openCreateDialog}
                     >
                       <RailCreateIcon />
                     </button>
@@ -2296,6 +2449,7 @@ export function DashboardApp(): JSX.Element {
                       title="Display and theme options"
                       onClick={() => {
                         setOpenVmMenuId(null);
+                        setOpenTemplateMenuId(null);
                         setShellMenuOpen((current) => !current);
                       }}
                     >
@@ -2336,6 +2490,7 @@ export function DashboardApp(): JSX.Element {
                         aria-label="Display and theme options"
                         onClick={() => {
                           setOpenVmMenuId(null);
+                          setOpenTemplateMenuId(null);
                           setShellMenuOpen((current) => !current);
                         }}
                       >
@@ -2439,7 +2594,7 @@ export function DashboardApp(): JSX.Element {
                 <button
                   className="button button--secondary workspace-rail__create-button"
                   type="button"
-                  onClick={() => setShowCreateDialog(true)}
+                  onClick={openCreateDialog}
                 >
                   New VM
                 </button>
@@ -2447,7 +2602,7 @@ export function DashboardApp(): JSX.Element {
             ) : null}
 
             <div className="vm-strip">
-              {deferredVms.map((vm) => (
+              {displayedVms.map((vm) => (
                 <VmTile
                   key={vm.id}
                   busy={isBusy}
@@ -2464,13 +2619,15 @@ export function DashboardApp(): JSX.Element {
                   onInspect={inspectVm}
                   onSnapshot={handleSnapshot}
                   onStartStop={handleVmAction}
-                  onToggleMenu={(vmId) =>
-                    setOpenVmMenuId((current) => (current === vmId ? null : vmId))
-                  }
+                  onToggleMenu={(vmId) => {
+                    setShellMenuOpen(false);
+                    setOpenTemplateMenuId(null);
+                    setOpenVmMenuId((current) => (current === vmId ? null : vmId));
+                  }}
                 />
               ))}
 
-              {deferredVms.length === 0 && !compactRail ? (
+              {displayedVms.length === 0 && !compactRail ? (
                 <div className="empty-state">
                   <p className="empty-state__eyebrow">No VMs yet</p>
                   <h3 className="empty-state__title">Launch a workspace to populate the rail.</h3>
@@ -2533,20 +2690,12 @@ export function DashboardApp(): JSX.Element {
                     </div>
                   </div>
                 ) : (
-                  <div className="workspace-fallback">
-                    <StaticPatternPreview vm={currentDetail.vm} variant="stage" />
-                    <div className="workspace-fallback__copy">
-                      <span className="surface-pill surface-pill--busy">
-                        {desktopFallbackBadge(currentDetail)}
-                      </span>
-                      <p>{desktopFallbackMessage(currentDetail)}</p>
-                    </div>
-                  </div>
+                  <WorkspaceFallbackSurface detail={currentDetail} />
                 )
               ) : (
                 <EmptyWorkspaceStage
                   summary={summary}
-                  onCreate={() => setShowCreateDialog(true)}
+                  onCreate={openCreateDialog}
                 />
               )}
 
@@ -2604,12 +2753,25 @@ export function DashboardApp(): JSX.Element {
           ) : (
             wideShellLayout || !effectiveSidePanelCollapsed ? (
               <OverviewSidepanel
+                busy={isBusy}
                 collapsed={effectiveSidePanelCollapsed}
+                openTemplateMenuId={openTemplateMenuId}
                 persistence={persistence}
                 summary={summary}
-                onCreate={() => setShowCreateDialog(true)}
+                onCreate={openCreateDialog}
+                onCreateFromTemplate={openCreateDialogForTemplate}
                 onClosedResizeStart={handleSidepanelClosedResizeStart}
+                onDeleteTemplate={handleDeleteTemplate}
+                onEditTemplateDescription={handleEditTemplateDescription}
                 onOpenCollapsed={() => setOverviewSidepanelCollapsed(false)}
+                onRenameTemplate={handleRenameTemplate}
+                onToggleTemplateMenu={(templateId) => {
+                  setOpenVmMenuId(null);
+                  setShellMenuOpen(false);
+                  setOpenTemplateMenuId((current) =>
+                    current === templateId ? null : templateId,
+                  );
+                }}
                 onToggleCollapsed={() => setOverviewSidepanelCollapsed(true)}
                 panelRef={sidepanelRef}
                 resizing={sidepanelResizeActive}
@@ -2628,7 +2790,7 @@ export function DashboardApp(): JSX.Element {
         <CreateVmDialog
           busy={isBusy}
           createDraft={createDraft}
-          templates={deferredTemplates}
+          templates={displayedTemplates}
           onClose={() => setShowCreateDialog(false)}
           onFieldChange={handleCreateField}
           onSubmit={handleCreate}
@@ -4234,11 +4396,158 @@ function WorkspaceBootSurface({ state }: WorkspaceBootSurfaceProps): JSX.Element
   );
 }
 
+function WorkspaceFallbackSurface({ detail }: { detail: VmDetail }): JSX.Element {
+  return (
+    <div className="workspace-fallback">
+      <StaticPatternPreview vm={detail.vm} variant="stage" />
+      <div className="workspace-fallback__copy">
+        <div className="workspace-fallback__panel">
+          <span className="surface-pill surface-pill--busy">
+            {desktopFallbackBadge(detail)}
+          </span>
+          <h2 className="workspace-fallback__title">
+            {workspaceFallbackTitle(detail)}
+          </h2>
+          <p>{desktopFallbackMessage(detail)}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface TemplateCardProps {
+  busy: boolean;
+  linkedVmCount: number;
+  menuOpen: boolean;
+  onCreateVm: (template: EnvironmentTemplate) => void;
+  onDelete: (template: EnvironmentTemplate) => Promise<void>;
+  onEditDescription: (template: EnvironmentTemplate) => Promise<void>;
+  onRename: (template: EnvironmentTemplate) => Promise<void>;
+  onToggleMenu: (templateId: string) => void;
+  template: EnvironmentTemplate;
+}
+
+function TemplateCard({
+  busy,
+  linkedVmCount,
+  menuOpen,
+  onCreateVm,
+  onDelete,
+  onEditDescription,
+  onRename,
+  onToggleMenu,
+  template,
+}: TemplateCardProps): JSX.Element {
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const canDelete = linkedVmCount === 0;
+
+  return (
+    <div className="list-card">
+      <div className="list-card__head">
+        <div className="list-card__title-copy">
+          <strong>{template.name}</strong>
+          <div className="chip-row list-card__chips">
+            <span className="surface-pill">{formatResources(template.defaultResources)}</span>
+            <span
+              className={joinClassNames(
+                "surface-pill",
+                linkedVmCount > 0 ? "surface-pill--warning" : "",
+              )}
+            >
+              {linkedVmCount} VM{linkedVmCount === 1 ? "" : "s"}
+            </span>
+            <span className="surface-pill">
+              {template.snapshotIds.length} snapshot{template.snapshotIds.length === 1 ? "" : "s"}
+            </span>
+          </div>
+        </div>
+
+        <div className="list-card__menu" onClick={(event) => event.stopPropagation()}>
+          <button
+            ref={menuButtonRef}
+            className={joinClassNames("menu-button", menuOpen ? "menu-button--open" : "")}
+            type="button"
+            aria-expanded={menuOpen}
+            aria-label={`Actions for ${template.name}`}
+            onClick={() => onToggleMenu(template.id)}
+          >
+            ...
+          </button>
+
+          {menuOpen ? (
+            <PortalPopover
+              anchorRef={menuButtonRef}
+              className="list-card__popover"
+              open={menuOpen}
+              onClose={() => onToggleMenu(template.id)}
+            >
+              <button
+                className="menu-action"
+                type="button"
+                onClick={() => {
+                  onToggleMenu(template.id);
+                  onCreateVm(template);
+                }}
+                disabled={busy}
+              >
+                Create VM...
+              </button>
+              <button
+                className="menu-action"
+                type="button"
+                onClick={() => {
+                  onToggleMenu(template.id);
+                  void onRename(template);
+                }}
+                disabled={busy}
+              >
+                Rename
+              </button>
+              <button
+                className="menu-action"
+                type="button"
+                onClick={() => {
+                  onToggleMenu(template.id);
+                  void onEditDescription(template);
+                }}
+                disabled={busy}
+              >
+                Edit description
+              </button>
+              <button
+                className="menu-action menu-action--danger"
+                type="button"
+                onClick={() => {
+                  onToggleMenu(template.id);
+                  void onDelete(template);
+                }}
+                disabled={busy || !canDelete}
+                title={!canDelete ? "Delete the linked VMs first." : undefined}
+              >
+                Delete
+              </button>
+            </PortalPopover>
+          ) : null}
+        </div>
+      </div>
+
+      <p>{template.description || "No description yet."}</p>
+    </div>
+  );
+}
+
 function OverviewSidepanel({
+  busy,
   collapsed,
+  openTemplateMenuId,
   onCreate,
+  onCreateFromTemplate,
   onClosedResizeStart,
+  onDeleteTemplate,
+  onEditTemplateDescription,
   onOpenCollapsed,
+  onRenameTemplate,
+  onToggleTemplateMenu,
   onToggleCollapsed,
   persistence,
   summary,
@@ -4250,10 +4559,17 @@ function OverviewSidepanel({
   onResizeKeyDown,
   onResizePointerDown,
 }: {
+  busy: boolean;
   collapsed: boolean;
+  openTemplateMenuId: string | null;
   onCreate: () => void;
+  onCreateFromTemplate: (template: EnvironmentTemplate) => void;
   onClosedResizeStart: (pointerClientX: number, handleCenterX: number) => void;
+  onDeleteTemplate: (template: EnvironmentTemplate) => Promise<void>;
+  onEditTemplateDescription: (template: EnvironmentTemplate) => Promise<void>;
   onOpenCollapsed: () => void;
+  onRenameTemplate: (template: EnvironmentTemplate) => Promise<void>;
+  onToggleTemplateMenu: (templateId: string) => void;
   onToggleCollapsed: () => void;
   persistence: HealthStatus["persistence"] | null;
   summary: DashboardSummary;
@@ -4395,13 +4711,20 @@ function OverviewSidepanel({
               <div className="stack">
                 {summary.templates.length > 0 ? (
                   summary.templates.map((template) => (
-                    <div key={template.id} className="list-card">
-                      <div className="list-card__head">
-                        <strong>{template.name}</strong>
-                        <span className="surface-pill">{formatResources(template.defaultResources)}</span>
-                      </div>
-                      <p>{template.description}</p>
-                    </div>
+                    <TemplateCard
+                      key={template.id}
+                      busy={busy}
+                      linkedVmCount={
+                        summary.vms.filter((entry) => entry.templateId === template.id).length
+                      }
+                      menuOpen={openTemplateMenuId === template.id}
+                      onCreateVm={onCreateFromTemplate}
+                      onDelete={onDeleteTemplate}
+                      onEditDescription={onEditTemplateDescription}
+                      onRename={onRenameTemplate}
+                      onToggleMenu={onToggleTemplateMenu}
+                      template={template}
+                    />
                   ))
                 ) : (
                   <p className="empty-copy">No templates available yet.</p>
@@ -4763,9 +5086,7 @@ function findProminentJob(
   job: DashboardSummary["jobs"][number];
   vmName: string;
 } | null {
-  const activeJobs = summary.jobs.filter(
-    (job) => job.status === "queued" || job.status === "running",
-  );
+  const activeJobs = summary.jobs.filter(isActiveJob);
 
   if (activeJobs.length === 0) {
     return null;
@@ -4782,6 +5103,36 @@ function findProminentJob(
     job,
     vmName,
   };
+}
+
+function isActiveJob(job: DashboardSummary["jobs"][number]): boolean {
+  return job.status === "queued" || job.status === "running";
+}
+
+function pruneDismissedProminentJobIds(
+  dismissedJobIds: Record<string, true>,
+  jobs: DashboardSummary["jobs"] | null | undefined,
+): Record<string, true> {
+  const dismissedIds = Object.keys(dismissedJobIds);
+
+  if (dismissedIds.length === 0) {
+    return dismissedJobIds;
+  }
+
+  const activeJobIds = new Set((jobs ?? []).filter(isActiveJob).map((job) => job.id));
+  let changed = false;
+  const next: Record<string, true> = {};
+
+  for (const jobId of dismissedIds) {
+    if (!activeJobIds.has(jobId)) {
+      changed = true;
+      continue;
+    }
+
+    next[jobId] = true;
+  }
+
+  return changed ? next : dismissedJobIds;
 }
 
 function formatJobKindLabel(kind: DashboardSummary["jobs"][number]["kind"]): string {
@@ -4912,6 +5263,18 @@ function desktopFallbackMessage(detail: VmDetail): string {
   }
 
   return "This VM does not have a browser VNC session yet. The synthetic frame stays here until the guest publishes a reachable desktop endpoint.";
+}
+
+function workspaceFallbackTitle(detail: VmDetail): string {
+  if (detail.provider.desktopTransport === "synthetic" || detail.vm.session?.kind === "synthetic") {
+    return "Synthetic desktop preview";
+  }
+
+  if (detail.vm.status !== "running") {
+    return "Desktop offline";
+  }
+
+  return "Desktop not attached";
 }
 
 function vmTilePreviewLabel(vm: VmInstance, showLivePreview: boolean): string {

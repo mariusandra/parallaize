@@ -16,6 +16,17 @@ export interface ClipboardLike {
   writeText?(text: string): Promise<void>;
 }
 
+export interface ClipboardTransferLike {
+  getData?(format: string): string;
+}
+
+export interface ClipboardPasteCaptureTargetLike {
+  focus(options?: FocusOptions): void;
+  select(): void;
+  setSelectionRange?(start: number, end: number): void;
+  value?: string;
+}
+
 interface RfbClipboardEventLike {
   detail?: {
     text?: unknown;
@@ -60,7 +71,10 @@ interface RfbInternalLike {
   _fbWidth?: unknown;
 }
 
+const x11BackspaceKeysym = 0xff08;
+const x11TabKeysym = 0xff09;
 const x11ControlLeftKeysym = 0xffe3;
+const x11ReturnKeysym = 0xff0d;
 const x11KeyVKeysym = 0x0076;
 
 export function resolveRfbConstructor(module: {
@@ -126,6 +140,37 @@ export async function writeBrowserClipboardText(
   await clipboard.writeText(text);
 }
 
+export function readClipboardTransferText(
+  clipboardData: ClipboardTransferLike | null | undefined,
+): string {
+  const plainText = clipboardData?.getData?.("text/plain") ?? "";
+
+  if (plainText.length > 0) {
+    return plainText;
+  }
+
+  return clipboardData?.getData?.("text") ?? "";
+}
+
+export function primeClipboardPasteCaptureTarget(
+  target: ClipboardPasteCaptureTargetLike | null | undefined,
+): boolean {
+  if (!target) {
+    return false;
+  }
+
+  if (typeof target.value === "string") {
+    target.value = "";
+  }
+
+  target.focus({
+    preventScroll: true,
+  });
+  target.select();
+  target.setSelectionRange?.(0, 0);
+  return true;
+}
+
 export function readClipboardEventText(event: Event): string | null {
   if (!isNestedModule(event)) {
     return null;
@@ -135,6 +180,31 @@ export function readClipboardEventText(event: Event): string | null {
   return typeof clipboardEvent.detail?.text === "string"
     ? clipboardEvent.detail.text
     : null;
+}
+
+export function sendGuestText(rfb: RfbLike, text: string): void {
+  for (const character of text) {
+    switch (character) {
+      case "\r":
+        continue;
+      case "\n":
+        rfb.sendKey(x11ReturnKeysym, "Enter");
+        continue;
+      case "\t":
+        rfb.sendKey(x11TabKeysym, "Tab");
+        continue;
+      case "\b":
+        rfb.sendKey(x11BackspaceKeysym, "Backspace");
+        continue;
+      default: {
+        const keysym = keysymForCharacter(character);
+
+        if (keysym !== null) {
+          rfb.sendKey(keysym, "");
+        }
+      }
+    }
+  }
 }
 
 export function sendGuestPasteShortcut(rfb: RfbLike): void {
@@ -201,4 +271,18 @@ function isNestedModule(value: unknown): value is NestedNoVncModule {
 
 function readPositiveNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function keysymForCharacter(character: string): number | null {
+  const codePoint = character.codePointAt(0);
+
+  if (!codePoint) {
+    return null;
+  }
+
+  if (codePoint >= 0x20 && codePoint <= 0xff) {
+    return codePoint;
+  }
+
+  return 0x01000000 | codePoint;
 }

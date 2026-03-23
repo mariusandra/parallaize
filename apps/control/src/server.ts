@@ -20,6 +20,7 @@ import type {
   SetVmResolutionInput,
   SnapshotLaunchInput,
   SnapshotInput,
+  UpdateTemplateInput,
   UpdateVmForwardedPortsInput,
   VmDetail,
 } from "../../../packages/shared/src/types.js";
@@ -35,6 +36,8 @@ const provider = createProvider(config.providerKind, config.incusBinary, {
   project: config.incusProject ?? undefined,
   storagePool: config.incusStoragePool ?? undefined,
   guestVncPort: config.guestVncPort,
+  guestInotifyMaxUserWatches: config.guestInotifyMaxUserWatches,
+  guestInotifyMaxUserInstances: config.guestInotifyMaxUserInstances,
   templateCompression: config.templateCompression,
 });
 const store = await createStateStore(
@@ -234,6 +237,28 @@ const server = createServer(async (request, response) => {
       }
     }
 
+    const templateActionMatch = url.pathname.match(/^\/api\/templates\/([^/]+)\/(update|delete)$/);
+    if (method === "POST" && templateActionMatch) {
+      const templateId = templateActionMatch[1];
+      const action = templateActionMatch[2];
+
+      switch (action) {
+        case "update": {
+          const payload = await readJsonBody<UpdateTemplateInput>(request);
+          const template = manager.updateTemplate(templateId, payload);
+          return writeJson(response, 200, {
+            ok: true,
+            data: template,
+          });
+        }
+        case "delete":
+          manager.deleteTemplate(templateId);
+          return writeAccepted(response);
+        default:
+          break;
+      }
+    }
+
     if ((method === "GET" || method === "HEAD") && url.pathname === "/") {
       return serveFile(response, htmlPath, "text/html; charset=utf-8", method === "HEAD");
     }
@@ -297,8 +322,13 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 server.listen(config.port, config.host, () => {
+  const boundAddress = server.address();
+  const boundPort =
+    boundAddress && typeof boundAddress === "object"
+      ? boundAddress.port
+      : config.port;
   process.stdout.write(
-    `parallaize listening on http://${config.host}:${config.port} using ${provider.state.kind} provider with ${config.persistenceKind} persistence\n`,
+    `parallaize listening on http://${config.host}:${boundPort} using ${provider.state.kind} provider with ${config.persistenceKind} persistence\n`,
   );
   if (config.adminPassword) {
     process.stdout.write(

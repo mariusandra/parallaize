@@ -87,9 +87,11 @@ When the JSON state file is missing, Parallaize will create a fresh state with s
 
 ## Set an explicit guest VNC port
 
-Set `PARALLAIZE_GUEST_VNC_PORT=5900` explicitly before starting the app.
+Set `PARALLAIZE_GUEST_VNC_PORT=5900` explicitly before starting the app if you want the guest VNC port pinned in your runtime env.
 
-That matches the checked-in env example and the cloud-init VNC service wiring. There is a default mismatch in the codebase between the sample env file and the config fallback, so exporting it removes ambiguity.
+That matches the checked-in env example and the cloud-init VNC service wiring.
+
+If you routinely hit Vite or Node watcher limits inside guests, you can also raise the default guest inotify caps from the control-plane env.
 
 Use admin auth as well:
 
@@ -97,6 +99,8 @@ Use admin auth as well:
 export PARALLAIZE_ADMIN_USERNAME=admin
 export PARALLAIZE_ADMIN_PASSWORD=change-me
 export PARALLAIZE_GUEST_VNC_PORT=5900
+export PARALLAIZE_GUEST_INOTIFY_MAX_USER_WATCHES=1048576
+export PARALLAIZE_GUEST_INOTIFY_MAX_USER_INSTANCES=2048
 ```
 
 Optional Incus tuning:

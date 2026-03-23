@@ -15,6 +15,8 @@ import type {
 } from "../../../packages/shared/src/types.js";
 
 const DEFAULT_GUEST_VNC_PORT = 5900;
+const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
+const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 const DEFAULT_GUEST_WORKSPACE = "/root";
 const DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS = 4000;
 const TEMPLATE_PUBLISH_START_PERCENT = 58;
@@ -29,6 +31,8 @@ export interface CreateProviderOptions {
   project?: string;
   storagePool?: string;
   guestVncPort?: number;
+  guestInotifyMaxUserWatches?: number;
+  guestInotifyMaxUserInstances?: number;
   commandRunner?: IncusCommandRunner;
   guestPortProbe?: GuestPortProbe;
   templatePublishHeartbeatMs?: number;
@@ -411,6 +415,8 @@ class MockProvider implements DesktopProvider {
 class IncusProvider implements DesktopProvider {
   state: ProviderState;
   private readonly guestVncPort: number;
+  private readonly guestInotifyMaxUserWatches: number;
+  private readonly guestInotifyMaxUserInstances: number;
   private readonly runner: IncusCommandRunner;
   private readonly project: string | null;
   private readonly storagePool: string | null;
@@ -426,6 +432,10 @@ class IncusProvider implements DesktopProvider {
     options: CreateProviderOptions,
   ) {
     this.guestVncPort = options.guestVncPort ?? DEFAULT_GUEST_VNC_PORT;
+    this.guestInotifyMaxUserWatches =
+      options.guestInotifyMaxUserWatches ?? DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES;
+    this.guestInotifyMaxUserInstances =
+      options.guestInotifyMaxUserInstances ?? DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES;
     this.project = options.project ?? null;
     this.storagePool = options.storagePool ?? null;
     this.runner =
@@ -530,7 +540,10 @@ class IncusProvider implements DesktopProvider {
       "set",
       vm.providerRef,
       "cloud-init.user-data",
-      buildGuestVncCloudInit(this.guestVncPort),
+      buildGuestVncCloudInit(this.guestVncPort, {
+        maxUserWatches: this.guestInotifyMaxUserWatches,
+        maxUserInstances: this.guestInotifyMaxUserInstances,
+      }),
     ]);
     this.ensureAgentDevice(vm.providerRef);
     this.run(["start", vm.providerRef]);
@@ -652,31 +665,56 @@ class IncusProvider implements DesktopProvider {
     resources: ResourceSpec,
   ): Promise<ProviderMutation> {
     this.assertAvailable();
+    const changedLimitArgs: string[] = [];
+    const changedResources: string[] = [];
 
-    this.run([
-      "config",
-      "set",
-      vm.providerRef,
-      `limits.cpu=${resources.cpu}`,
-      `limits.memory=${formatMemoryLimit(resources.ramMb)}`,
-    ]);
-    this.run([
-      "config",
-      "device",
-      "set",
-      vm.providerRef,
-      "root",
-      `size=${formatDiskSize(resources.diskGb)}`,
-    ]);
+    if (resources.cpu !== vm.resources.cpu) {
+      changedLimitArgs.push(`limits.cpu=${resources.cpu}`);
+      changedResources.push(`cpu=${resources.cpu}`);
+    }
+
+    if (resources.ramMb !== vm.resources.ramMb) {
+      const nextMemoryLimit = formatMemoryLimit(resources.ramMb);
+      changedLimitArgs.push(`limits.memory=${nextMemoryLimit}`);
+      changedResources.push(`ram=${nextMemoryLimit}`);
+    }
+
+    if (changedLimitArgs.length > 0) {
+      this.run(["config", "set", vm.providerRef, ...changedLimitArgs]);
+    }
+
+    if (resources.diskGb !== vm.resources.diskGb) {
+      const nextDiskSize = formatDiskSize(resources.diskGb);
+      this.run([
+        "config",
+        "device",
+        "set",
+        vm.providerRef,
+        "root",
+        `size=${nextDiskSize}`,
+      ]);
+      changedResources.push(`disk=${nextDiskSize}`);
+    }
+
+    if (changedResources.length === 0) {
+      return {
+        lastAction: `Resources already matched ${vm.name}`,
+        activity: [`incus: resource resize skipped for ${vm.providerRef}`],
+        activeWindow: "logs",
+        session: vm.session,
+      };
+    }
 
     return {
       lastAction: `Resources updated for ${vm.name}`,
       activity: [
         `incus: resized ${vm.providerRef}`,
-        `limits: cpu=${resources.cpu} ram=${formatMemoryLimit(resources.ramMb)} disk=${formatDiskSize(resources.diskGb)}`,
+        `limits: ${changedResources.join(" ")}`,
       ],
       activeWindow: "logs",
-      session: vm.status === "running" ? await this.resolveSession(vm.providerRef) : vm.session,
+      // Resource limit changes do not require a fresh VNC probe. Preserve the
+      // current desktop session instead of blocking the job on port polling.
+      session: vm.session,
     };
   }
 
@@ -1680,7 +1718,8 @@ if [ -z "$AUTH_FILE" ]; then
   exit 1
 fi
 export HOME="\${HOME:-/root}"
-exec /usr/bin/x11vnc -display :0 -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noshm -nopw -rfbport ${port} -o /var/log/x11vnc.log`;
+xset r on || true
+exec /usr/bin/x11vnc -display :0 -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noshm -nopw -repeat -rfbport ${port} -o /var/log/x11vnc.log`;
 }
 
 function buildGuestVncServiceUnit(): string {
@@ -1699,7 +1738,21 @@ RestartSec=3
 WantedBy=multi-user.target`;
 }
 
-function buildGuestVncCloudInit(port: number): string {
+interface GuestInotifySettings {
+  maxUserWatches: number;
+  maxUserInstances: number;
+}
+
+function buildGuestInotifySysctlConfig(settings: GuestInotifySettings): string {
+  return `# Raised inotify limits for Node/Vite-style dev watchers inside the guest.
+fs.inotify.max_user_watches=${settings.maxUserWatches}
+fs.inotify.max_user_instances=${settings.maxUserInstances}`;
+}
+
+function buildGuestVncCloudInit(
+  port: number,
+  inotifySettings: GuestInotifySettings,
+): string {
   return `#cloud-config
 package_update: true
 packages:
@@ -1720,7 +1773,12 @@ ${indentBlock(buildGuestVncLauncherScript(port), "      ")}
     permissions: '0644'
     content: |
 ${indentBlock(buildGuestVncServiceUnit(), "      ")}
+  - path: /etc/sysctl.d/60-parallaize-inotify.conf
+    permissions: '0644'
+    content: |
+${indentBlock(buildGuestInotifySysctlConfig(inotifySettings), "      ")}
 runcmd:
+  - sysctl --load /etc/sysctl.d/60-parallaize-inotify.conf || true
   - systemctl daemon-reload
   - systemctl disable --now gnome-remote-desktop.service || true
   - systemctl mask gnome-remote-desktop.service || true

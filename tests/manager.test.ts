@@ -137,6 +137,63 @@ test("template capture jobs expose staged publish progress", async (context) => 
   );
 });
 
+test("templates can be updated and deleted when no VM still uses them", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-actions-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const now = new Date().toISOString();
+
+  store.update((draft) => {
+    draft.templates.unshift({
+      id: "tpl-unused",
+      name: "Unused Template",
+      description: "Free to rename or delete.",
+      launchSource: "mock://templates/unused-template",
+      defaultResources: {
+        cpu: 2,
+        ramMb: 4096,
+        diskGb: 40,
+      },
+      defaultForwardedPorts: [],
+      tags: [],
+      notes: [],
+      snapshotIds: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  const updated = manager.updateTemplate("tpl-unused", {
+    name: "Operator Base",
+    description: "Renamed from the inspector menu.",
+  });
+
+  assert.equal(updated.name, "Operator Base");
+  assert.equal(updated.description, "Renamed from the inspector menu.");
+  assert.equal(
+    manager.getSummary().templates.find((entry) => entry.id === "tpl-unused")?.name,
+    "Operator Base",
+  );
+
+  manager.deleteTemplate("tpl-unused");
+  assert.equal(
+    manager.getSummary().templates.some((entry) => entry.id === "tpl-unused"),
+    false,
+  );
+
+  assert.throws(
+    () => manager.deleteTemplate("tpl-0001"),
+    /Template Ubuntu Agent Forge is still attached to VM alpha-workbench\./,
+  );
+});
+
 test("command output is retained and snapshots can launch or restore VMs", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-command-history-"));
   context.after(() => {
@@ -405,6 +462,8 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
 
   const provider = createProvider("incus", "incus", {
     guestVncPort: 5990,
+    guestInotifyMaxUserWatches: 2_097_152,
+    guestInotifyMaxUserInstances: 4_096,
     commandRunner: runner,
     templateCompression: "zstd",
     guestPortProbe: {
@@ -501,6 +560,11 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-x11vnc/);
   assert.match(configSetCall?.[4] ?? "", /-xrandr newfbsize/);
   assert.match(configSetCall?.[4] ?? "", /-noshm/);
+  assert.match(configSetCall?.[4] ?? "", /xset r on \|\| true/);
+  assert.match(configSetCall?.[4] ?? "", /-repeat/);
+  assert.match(configSetCall?.[4] ?? "", /fs\.inotify\.max_user_watches=2097152/);
+  assert.match(configSetCall?.[4] ?? "", /fs\.inotify\.max_user_instances=4096/);
+  assert.match(configSetCall?.[4] ?? "", /sysctl --load \/etc\/sysctl\.d\/60-parallaize-inotify\.conf/);
   assert.match(configSetCall?.[4] ?? "", /incus-agent\.service/);
   assert.deepEqual(agentDeviceCall, [
     "config",
@@ -693,11 +757,109 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /parallaize-x11vnc\.service/);
   assert.match(execCall?.[5] ?? "", /-xrandr newfbsize/);
   assert.match(execCall?.[5] ?? "", /-noshm/);
+  assert.match(execCall?.[5] ?? "", /xset r on \|\| true/);
+  assert.match(execCall?.[5] ?? "", /-repeat/);
   assert.match(execCall?.[5] ?? "", /TARGET_MODE="1366x768"/);
   assert.match(execCall?.[5] ?? "", /xrandr --query/);
   assert.match(execCall?.[5] ?? "", /cvt "\$WIDTH" "\$HEIGHT" 60/);
   assert.match(execCall?.[5] ?? "", /MODE_TO_APPLY=/);
   assert.match(execCall?.[5] ?? "", /xrandr --output "\$OUTPUT" --mode "\$MODE_TO_APPLY"/);
+});
+
+test("incus provider resource resize only updates changed limits and preserves the current session", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0200-resize-fast";
+  let probed = false;
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        probed = true;
+        return false;
+      },
+    },
+  });
+
+  const currentSession = {
+    kind: "vnc" as const,
+    host: "10.55.0.88",
+    port: 5900,
+    webSocketPath: "/api/vms/vm-0200/vnc",
+    browserPath: "/?vm=vm-0200",
+    display: "10.55.0.88:5900",
+  };
+
+  const vm: VmInstance = {
+    id: "vm-0200",
+    name: "resize-fast",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 42,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: currentSession,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.resizeVm(vm, {
+    cpu: 8,
+    ramMb: 8192,
+    diskGb: 60,
+  });
+
+  const configSetCall = calls.find(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "set" &&
+      args[2] === instanceName,
+  );
+  const deviceSetCall = calls.find(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "device" &&
+      args[2] === "set" &&
+      args[3] === instanceName,
+  );
+
+  assert.deepEqual(configSetCall, [
+    "config",
+    "set",
+    instanceName,
+    "limits.cpu=8",
+  ]);
+  assert.equal(deviceSetCall, undefined);
+  assert.equal(probed, false);
+  assert.deepEqual(mutation.session, currentSession);
+  assert.deepEqual(mutation.activity, [
+    `incus: resized ${instanceName}`,
+    "limits: cpu=8",
+  ]);
 });
 
 test("incus provider targets the configured storage pool for creates and copies", async () => {

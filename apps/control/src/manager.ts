@@ -17,6 +17,7 @@ import type {
   Snapshot,
   SnapshotInput,
   TemplatePortForward,
+  UpdateTemplateInput,
   UpdateVmForwardedPortsInput,
   VmDetail,
   VmCommandResult,
@@ -502,7 +503,7 @@ export class DesktopManager {
       const source = this.requireVm(draft, vmId);
       this.ensureActiveProvider(source);
       const snapshot = requireVmSnapshot(draft, vmId, snapshotId);
-      const template = requireTemplate(draft, snapshot.templateId);
+      const template = resolveTemplateForSnapshot(draft, snapshot);
       const name =
         input.name?.trim() ||
         `${source.name}-${slugify(snapshot.label) || "snapshot"}-${String(draft.sequence).padStart(2, "0")}`;
@@ -551,7 +552,7 @@ export class DesktopManager {
         report("Cloning snapshot", 48);
         const detail = this.getVmDetail(vmId);
         const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
-        const template = requireTemplate(this.store.load(), snapshot.templateId);
+        const template = resolveTemplateForSnapshot(this.store.load(), snapshot);
 
         this.ensureActiveProvider(detail.vm);
 
@@ -734,6 +735,72 @@ export class DesktopManager {
         ? `${captureName} template updated`
         : `${captureName} template created`;
     });
+  }
+
+  updateTemplate(templateId: string, input: UpdateTemplateInput): EnvironmentTemplate {
+    const nextName = input.name.trim();
+
+    if (!nextName) {
+      throw new Error("Template name is required.");
+    }
+
+    let updatedTemplate: EnvironmentTemplate | null = null;
+
+    this.store.update((draft) => {
+      const template = requireTemplate(draft, templateId);
+      const nextDescription =
+        input.description !== undefined ? input.description.trim() : template.description;
+
+      if (template.name === nextName && template.description === nextDescription) {
+        updatedTemplate = template;
+        return false;
+      }
+
+      template.name = nextName;
+      template.description = nextDescription;
+      template.updatedAt = nowIso();
+      updatedTemplate = template;
+      return true;
+    });
+
+    this.publish();
+
+    if (!updatedTemplate) {
+      throw new Error(`Template ${templateId} was not found.`);
+    }
+
+    return updatedTemplate;
+  }
+
+  deleteTemplate(templateId: string): void {
+    let removed = false;
+
+    this.store.update((draft) => {
+      const template = requireTemplate(draft, templateId);
+      const linkedVm = draft.vms.find((entry) => entry.templateId === templateId);
+
+      if (linkedVm) {
+        throw new Error(
+          `Template ${template.name} is still attached to VM ${linkedVm.name}.`,
+        );
+      }
+
+      const nextTemplates = draft.templates.filter((entry) => entry.id !== templateId);
+
+      if (nextTemplates.length === draft.templates.length) {
+        return false;
+      }
+
+      draft.templates = nextTemplates;
+      removed = true;
+      return true;
+    });
+
+    if (!removed) {
+      throw new Error(`Template ${templateId} was not found.`);
+    }
+
+    this.publish();
   }
 
   injectCommand(vmId: string, command: string): void {
@@ -1190,6 +1257,34 @@ function requireTemplate(
   }
 
   return template;
+}
+
+function resolveTemplateForSnapshot(
+  state: AppState,
+  snapshot: Snapshot,
+): EnvironmentTemplate {
+  return (
+    state.templates.find((entry) => entry.id === snapshot.templateId) ??
+    buildOrphanedSnapshotTemplate(snapshot)
+  );
+}
+
+function buildOrphanedSnapshotTemplate(snapshot: Snapshot): EnvironmentTemplate {
+  const now = nowIso();
+
+  return {
+    id: snapshot.templateId,
+    name: "Deleted template",
+    description: "Recovered from snapshot metadata after the template record was removed.",
+    launchSource: DEFAULT_TEMPLATE_LAUNCH_SOURCE,
+    defaultResources: { ...snapshot.resources },
+    defaultForwardedPorts: [],
+    tags: ["orphaned"],
+    notes: ["Recovered from snapshot metadata after template deletion."],
+    snapshotIds: [snapshot.id],
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 function requireVm(state: AppState, vmId: string): VmInstance {

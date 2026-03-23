@@ -234,6 +234,11 @@ export interface CaptureTemplateInput {
   description: string;
 }
 
+export interface UpdateTemplateInput {
+  name: string;
+  description?: string;
+}
+
 export interface InjectCommandInput {
   command: string;
 }

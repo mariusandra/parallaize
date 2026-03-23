@@ -1,6 +1,6 @@
 # Parallaize TODO
 
-Last updated: 2026-03-22
+Last updated: 2026-03-23
 Current focus: validate PostgreSQL persistence on the live Incus path, codify guest template/VNC bootstrap, tighten operator-session hardening, and scope packaging plus host-routed service access.
 
 ## Current State
@@ -26,6 +26,7 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 - [x] Host-backed `pnpm smoke:incus` automation
 - [x] Pluggable persistence backend with PostgreSQL support and JSON fallback
 - [x] Browser-to-guest and guest-to-browser clipboard flow for the main noVNC session, with browser-API fallback handling
+- [x] Configurable guest bootstrap defaults for higher inotify watcher limits in new Incus VMs
 
 ## Priority Backlog
 

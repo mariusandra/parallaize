@@ -284,7 +284,9 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 - `PARALLAIZE_INCUS_PROJECT`: optional Incus project name
 - `PARALLAIZE_INCUS_STORAGE_POOL`: optional Incus storage pool for new VM creates and copies; use this to move Parallaize off a slow `dir` pool
 - `PARALLAIZE_TEMPLATE_COMPRESSION`: image compression for template capture, default `none`; accepted values mirror Incus (`bzip2`, `gzip`, `lz4`, `lzma`, `xz`, `zstd`, `none`)
-- `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5901`
+- `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5900`
+- `PARALLAIZE_GUEST_INOTIFY_MAX_USER_WATCHES`: inotify watch limit written into new guest VMs via cloud-init, default `1048576`
+- `PARALLAIZE_GUEST_INOTIFY_MAX_USER_INSTANCES`: inotify instance limit written into new guest VMs via cloud-init, default `2048`
 - `PARALLAIZE_ADMIN_USERNAME`: shared admin username for browser-session login or Basic Auth fallback, default `admin`
 - `PARALLAIZE_ADMIN_PASSWORD`: shared admin password; when unset, auth is disabled
 
