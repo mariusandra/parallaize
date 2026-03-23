@@ -1031,15 +1031,10 @@ class IncusProvider implements DesktopProvider {
 
   private async resolveSession(instanceName: string): Promise<VmSession | null> {
     let address: string | null = null;
-    let guestVncBootstrapReady = false;
 
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const info = this.inspectInstance(instanceName);
       address = findGlobalGuestAddress(info);
-
-      if (!guestVncBootstrapReady) {
-        guestVncBootstrapReady = this.tryEnsureGuestVncBootstrap(instanceName);
-      }
 
       if (
         address &&
@@ -1056,20 +1051,6 @@ class IncusProvider implements DesktopProvider {
     }
 
     return address ? buildVncSession(address, this.guestVncPort) : null;
-  }
-
-  private tryEnsureGuestVncBootstrap(instanceName: string): boolean {
-    const args = [
-      "exec",
-      instanceName,
-      "--",
-      "sh",
-      "-lc",
-      buildEnsureGuestVncScript(this.guestVncPort),
-    ];
-    const result = this.runner.execute(args);
-
-    return result.status === 0;
   }
 
   private inspectInstance(instanceName: string): IncusListInstance {
@@ -1613,11 +1594,34 @@ function buildSetDisplayResolutionScript(
   height: number,
   port: number,
 ): string {
-  return `${buildEnsureGuestVncScript(port)}
-sleep 1
+  return `set -eu
 WIDTH=${width}
 HEIGHT=${height}
 DISPLAY_NUMBER=":0"
+SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
+LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
+CURRENT_SERVICE="$(cat "$SERVICE_FILE" 2>/dev/null || true)"
+DESIRED_SERVICE="$(cat <<'UNIT'
+${buildGuestVncServiceUnit()}
+UNIT
+)"
+CURRENT_LAUNCHER="$(cat "$LAUNCHER_FILE" 2>/dev/null || true)"
+DESIRED_LAUNCHER="$(cat <<'SCRIPT'
+${buildGuestVncLauncherScript(port)}
+SCRIPT
+)"
+if [ "$CURRENT_SERVICE" != "$DESIRED_SERVICE" ] || [ "$CURRENT_LAUNCHER" != "$DESIRED_LAUNCHER" ]; then
+  cat > "$LAUNCHER_FILE" <<'SCRIPT'
+${buildGuestVncLauncherScript(port)}
+SCRIPT
+  chmod 0755 "$LAUNCHER_FILE"
+  cat > "$SERVICE_FILE" <<'UNIT'
+${buildGuestVncServiceUnit()}
+UNIT
+  systemctl daemon-reload
+  systemctl restart parallaize-x11vnc.service
+  sleep 1
+fi
 AUTH_FILE="$(ps -eo args | sed -n 's/.*x11vnc .* -auth \\([^ ]*\\) .*/\\1/p' | head -n 1)"
 if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
   for candidate in /run/user/*/gdm/Xauthority /run/user/*/Xauthority /home/*/.Xauthority; do
@@ -1659,34 +1663,6 @@ else
   MODE_TO_APPLY="$MODE_NAME"
   xrandr --output "$OUTPUT" --mode "$MODE_TO_APPLY"
 fi`;
-}
-
-function buildEnsureGuestVncScript(port: number): string {
-  return `set -eu
-SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
-LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
-CURRENT_SERVICE="$(cat "$SERVICE_FILE" 2>/dev/null || true)"
-DESIRED_SERVICE="$(cat <<'UNIT'
-${buildGuestVncServiceUnit()}
-UNIT
-)"
-CURRENT_LAUNCHER="$(cat "$LAUNCHER_FILE" 2>/dev/null || true)"
-DESIRED_LAUNCHER="$(cat <<'SCRIPT'
-${buildGuestVncLauncherScript(port)}
-SCRIPT
-)"
-if [ "$CURRENT_SERVICE" != "$DESIRED_SERVICE" ] || [ "$CURRENT_LAUNCHER" != "$DESIRED_LAUNCHER" ]; then
-  cat > "$LAUNCHER_FILE" <<'SCRIPT'
-${buildGuestVncLauncherScript(port)}
-SCRIPT
-  chmod 0755 "$LAUNCHER_FILE"
-  cat > "$SERVICE_FILE" <<'UNIT'
-${buildGuestVncServiceUnit()}
-UNIT
-  systemctl daemon-reload
-fi
-systemctl enable parallaize-x11vnc.service >/dev/null 2>&1 || true
-systemctl restart parallaize-x11vnc.service`;
 }
 
 function buildGuestVncLauncherScript(port: number): string {

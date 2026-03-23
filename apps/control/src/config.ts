@@ -53,7 +53,7 @@ export function loadConfig(): AppConfig {
     incusProject: parseOptionalString(process.env.PARALLAIZE_INCUS_PROJECT),
     incusStoragePool: parseOptionalString(process.env.PARALLAIZE_INCUS_STORAGE_POOL),
     templateCompression: parseTemplateCompression(process.env.PARALLAIZE_TEMPLATE_COMPRESSION),
-    guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5900),
+    guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5901),
     adminUsername: process.env.PARALLAIZE_ADMIN_USERNAME?.trim() || "admin",
     adminPassword,
     sessionMaxAgeSeconds: parsePositiveInteger(

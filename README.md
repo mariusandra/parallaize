@@ -19,9 +19,10 @@ Parallaize is a server-first proof of concept for managing many isolated desktop
 
 ## Current Gaps
 
+- PostgreSQL persistence still needs more live Incus validation before it should replace the JSON fallback everywhere
 - Guest VNC/bootstrap steps should be codified more tightly into the documented template workflow
 
-Real Incus-backed browser VNC sessions, Caddy guest-service forwarding, the PostgreSQL-backed `pnpm smoke:incus` path, and repeated PostgreSQL create/clone/delete churn have now been validated against live Ubuntu desktop VMs on this host.
+Real Incus-backed browser VNC sessions and Caddy guest-service forwarding have now been validated against live Ubuntu desktop VMs on this host.
 
 ## Live Incus Smoke Test
 
@@ -41,27 +42,6 @@ The smoke command:
 
 It assumes the current user can run `sudo` for the temporary guest-disk mount operations.
 If admin auth is enabled, the smoke command will reuse `PARALLAIZE_ADMIN_USERNAME` and `PARALLAIZE_ADMIN_PASSWORD` unless you override them with `PARALLAIZE_SMOKE_ADMIN_USERNAME` and `PARALLAIZE_SMOKE_ADMIN_PASSWORD`.
-
-## PostgreSQL Churn Check
-
-With the control plane already running on PostgreSQL persistence, you can run a repeated create/clone/delete verifier that also polls the singleton `app_state` row directly:
-
-```bash
-PARALLAIZE_DATABASE_URL=postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize \
-flox activate -d . -- pnpm smoke:incus:churn
-```
-
-Useful knobs:
-
-- `PARALLAIZE_CHURN_ITERATIONS`: number of create/clone/delete loops; defaults to `2`
-- `PARALLAIZE_CHURN_VM_PREFIX`: VM name prefix for the churn run; defaults to `churn-incus`
-- `PARALLAIZE_CHURN_KEEP_VMS=1`: keep any churn VMs that still exist when the script exits
-
-The churn command verifies that:
-
-- Newly created and cloned VMs become visible through the API and in PostgreSQL
-- Deleted churn VMs disappear from the API and from the persisted `app_state` row
-- The final persisted VM set returns to the same baseline cardinality it had before the run
 
 ## Authentication
 
@@ -193,8 +173,6 @@ flox activate -d . -- incus list <instance-name> --format json
 nc -vz <guest-ip> 5900
 ```
 
-At runtime, the control plane also repairs `/etc/systemd/system/parallaize-x11vnc.service` plus `/usr/local/bin/parallaize-x11vnc` over `incus exec` before it waits for the browser VNC session. That covers captured templates whose cloud-init override does not rewrite an older `x11vnc -auth guess` service on first boot, but the template itself should still be prepared and validated explicitly.
-
 ## Local Run
 
 1. Install and activate the local environment:
@@ -234,7 +212,7 @@ Copy an existing JSON deployment state into PostgreSQL:
 
 ```bash
 docker compose -f infra/docker-compose.postgres.yml up -d
-flox activate -d . -- pnpm persistence:copy \
+flox activate -d . -- pnpm persistence:copy -- \
   --from json \
   --data-file data/incus-state.json \
   --to postgres \
@@ -245,7 +223,7 @@ Export PostgreSQL state to a backup file:
 
 ```bash
 mkdir -p backups
-flox activate -d . -- pnpm persistence:export \
+flox activate -d . -- pnpm persistence:export -- \
   --from postgres \
   --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize \
   --output backups/parallaize-state.json
@@ -254,7 +232,7 @@ flox activate -d . -- pnpm persistence:export \
 Import a backup file into a JSON state file:
 
 ```bash
-flox activate -d . -- pnpm persistence:import \
+flox activate -d . -- pnpm persistence:import -- \
   --to json \
   --to-data-file data/restored-state.json \
   --input backups/parallaize-state.json
@@ -294,7 +272,7 @@ For routine Parallaize backups, prefer an app-state export:
 
 ```bash
 mkdir -p backups
-flox activate -d . -- pnpm persistence:export \
+flox activate -d . -- pnpm persistence:export -- \
   --from postgres \
   --database-url "$PARALLAIZE_DATABASE_URL" \
   --output "backups/parallaize-state-$(date +%Y%m%d-%H%M%S).json"
@@ -318,7 +296,7 @@ Recovery flow for an app-state JSON backup:
 
 ```bash
 sudo systemctl stop parallaize
-flox activate -d . -- pnpm persistence:import \
+flox activate -d . -- pnpm persistence:import -- \
   --to postgres \
   --database-url "$PARALLAIZE_DATABASE_URL" \
   --input backups/parallaize-state.json
@@ -337,7 +315,7 @@ sudo systemctl start parallaize
 If PostgreSQL needs to be taken out of service, you can fall back to JSON persistence without editing the state blob by hand:
 
 ```bash
-flox activate -d . -- pnpm persistence:export \
+flox activate -d . -- pnpm persistence:export -- \
   --from postgres \
   --database-url "$PARALLAIZE_DATABASE_URL" \
   --output /var/lib/parallaize/state.json
@@ -440,9 +418,8 @@ flox activate -d . -- pnpm build
 flox activate -d . -- pnpm start
 flox activate -d . -- pnpm test
 flox activate -d . -- pnpm smoke:incus
-PARALLAIZE_DATABASE_URL=postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize flox activate -d . -- pnpm smoke:incus:churn
-flox activate -d . -- pnpm persistence:copy --from json --data-file data/incus-state.json --to postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize
-flox activate -d . -- pnpm persistence:export --from postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize --output backups/parallaize-state.json
+flox activate -d . -- pnpm persistence:copy -- --from json --data-file data/incus-state.json --to postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize
+flox activate -d . -- pnpm persistence:export -- --from postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize --output backups/parallaize-state.json
 flox activate -d . -- caddy validate --config infra/Caddyfile
 docker compose -f infra/docker-compose.postgres.yml up -d
 ```
@@ -459,7 +436,7 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 - `PARALLAIZE_INCUS_PROJECT`: optional Incus project name
 - `PARALLAIZE_INCUS_STORAGE_POOL`: optional Incus storage pool for new VM creates and copies; use this to move Parallaize off a slow `dir` pool
 - `PARALLAIZE_TEMPLATE_COMPRESSION`: image compression for template capture, default `none`; accepted values mirror Incus (`bzip2`, `gzip`, `lz4`, `lzma`, `xz`, `zstd`, `none`)
-- `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5900`
+- `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5901`
 - `PARALLAIZE_ADMIN_USERNAME`: shared admin username for browser-session login or Basic Auth fallback, default `admin`
 - `PARALLAIZE_ADMIN_PASSWORD`: shared admin password; when unset, auth is disabled
 - `PARALLAIZE_SESSION_MAX_AGE_SECONDS`: absolute server-side browser-session lifetime, default `604800` (7 days)
