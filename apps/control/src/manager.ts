@@ -679,6 +679,7 @@ export class DesktopManager {
         const captureNotes = buildCaptureNotes(
           current,
           existingTemplate?.notes ?? [],
+          launchSource,
         );
 
         current.snapshotIds.unshift(snapshot.id);
@@ -708,6 +709,8 @@ export class DesktopManager {
             id: reservedTemplateId,
             name: captureName,
             description: captureDescription || `Captured from ${current.name}`,
+            kind: "workspace",
+            catalog: null,
             launchSource,
             defaultResources: { ...current.resources },
             defaultForwardedPorts: current.forwardedPorts.map(copyForwardAsTemplatePort),
@@ -1048,6 +1051,7 @@ function buildVmRecord(
     forwardedPorts: buildVmForwardedPorts(id, forwardedPorts),
     activityLog: [
       `template: ${template.name}`,
+      `launch source: ${template.launchSource}`,
       `status: ${status}`,
     ],
     commandHistory: [],
@@ -1165,14 +1169,24 @@ function trimJobs(state: AppState): void {
 function buildCaptureNotes(
   vm: VmInstance,
   previousNotes: string[],
+  launchSource: string,
 ): string[] {
+  const forwardedServiceNote =
+    vm.forwardedPorts.length > 0
+      ? `Forwarded service defaults: ${vm.forwardedPorts.map((forward) => `${forward.name}:${forward.guestPort}`).join(", ")}.`
+      : "Forwarded service defaults: none.";
   const refreshedNotes = [
     `Captured from VM ${vm.name}.`,
     `Workspace path at capture: ${vm.workspacePath}.`,
+    `Launch source: ${launchSource}.`,
+    forwardedServiceNote,
     ...previousNotes.filter(
       (note) =>
         note !== `Captured from VM ${vm.name}.` &&
-        note !== `Workspace path at capture: ${vm.workspacePath}.`,
+        note !== `Workspace path at capture: ${vm.workspacePath}.` &&
+        note !== `Launch source: ${launchSource}.` &&
+        note !== forwardedServiceNote &&
+        !note.startsWith("Forwarded service defaults: "),
     ),
   ];
 

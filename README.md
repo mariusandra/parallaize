@@ -8,6 +8,7 @@ Parallaize is a server-first proof of concept for managing many isolated desktop
 - Live workspace grid plus an embedded noVNC detail session when a guest VNC server is reachable
 - Create, clone, start, stop, delete, resize, and snapshot flows
 - Capture a running VM as a reusable environment template, or refresh an existing one while preserving snapshot history
+- Separate default-image choices in the launch dialog, with a seeded Ubuntu 24.04 entry and room to add more launch-ready defaults later
 - Real Incus lifecycle command wiring for create, clone, start, stop, delete, resize, snapshot, template publish, and guest command execution
 - Browser-side VNC WebSocket bridge mounted at `/api/vms/:id/vnc`
 - Configurable guest HTTP/WebSocket forwarding mounted at `/vm/:id/forwards/:forwardId/`
@@ -16,10 +17,6 @@ Parallaize is a server-first proof of concept for managing many isolated desktop
 - Import, export, or copy persisted state between JSON and PostgreSQL without manual editing
 - Server-sent event updates for dashboard refresh
 - `flox` environment with `nodejs_24`, `typescript`, `pnpm_10`, `caddy`, `incus`, `attr`, and `qemu_kvm`
-
-## Current Gaps
-
-- Guest VNC/bootstrap steps should be codified more tightly into the documented template workflow
 
 Real Incus-backed browser VNC sessions, Caddy guest-service forwarding, the PostgreSQL-backed `pnpm smoke:incus` path, and repeated PostgreSQL create/clone/delete churn have now been validated against live Ubuntu desktop VMs on this host.
 
@@ -95,6 +92,7 @@ If the password is unset, auth is disabled.
 Current working decision:
 
 - Template images should only bake in the core desktop and VNC bootstrap needed for browser access.
+- Default-image choices in the `+` dialog are intentionally separate from workload templates, so operators can start from a clean distro/release pick before capturing anything workload-specific.
 - Guest HTTP/WebSocket services stay workload-specific and are configured as forwarded-port defaults on templates, not hardcoded into the base image.
 - When you capture or refresh a template from a VM, the VM's forwarded-service defaults are preserved with that template for future launches.
 
@@ -162,38 +160,17 @@ After those rules were added on this machine, fresh Incus VMs immediately starte
 
 ### Guest VNC Setup
 
-Inside the Ubuntu desktop guest template, install and enable a VNC server before capturing the base image. One workable `x11vnc` flow is:
+Use the repeatable prep workflow in [docs/template-prep.md](docs/template-prep.md) before capturing or refreshing a base image.
+
+The shortest supported path from the host is:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y x11vnc
-mkdir -p ~/.config/systemd/user
-x11vnc -storepasswd
-cat > ~/.config/systemd/user/x11vnc.service <<'EOF'
-[Unit]
-Description=Parallaize x11vnc session
-After=graphical-session.target
-
-[Service]
-ExecStart=/usr/bin/x11vnc -display :0 -forever -loop -shared -rfbauth %h/.vnc/passwd -rfbport 5900
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-EOF
-systemctl --user daemon-reload
-systemctl --user enable --now x11vnc.service
+flox activate -d . -- pnpm template:prep -- <instance-name>
 ```
 
-From the host, validate that the guest answers on the configured VNC port after the VM boots:
+After prep, validate the guest VNC port from the host and capture back into the target template entry. The detailed checklist, validation commands, and cleanup path for leftover smoke/churn instances all live in [docs/template-prep.md](docs/template-prep.md).
 
-```bash
-flox activate -d . -- incus list <instance-name> --format json
-nc -vz <guest-ip> 5900
-```
-
-At runtime, the control plane also repairs `/etc/systemd/system/parallaize-x11vnc.service` plus `/usr/local/bin/parallaize-x11vnc` over `incus exec` before it waits for the browser VNC session. That covers captured templates whose cloud-init override does not rewrite an older `x11vnc -auth guess` service on first boot, but the template itself should still be prepared and validated explicitly.
+At runtime, the control plane still repairs `/etc/systemd/system/parallaize-x11vnc.service` plus `/usr/local/bin/parallaize-x11vnc` over `incus exec` before it waits for the browser VNC session. That catches older captured templates whose first-boot cloud-init did not rewrite a stale `x11vnc` service cleanly, but the template itself should still be prepared and validated explicitly.
 
 ## Local Run
 

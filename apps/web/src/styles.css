@@ -827,7 +827,7 @@ textarea {
 .workspace-stage__header-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 0.45rem;
 }
 
@@ -1701,10 +1701,23 @@ section.workspace-shell {
   min-width: 0;
 }
 
+.notice-bar__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 .notice-bar__title {
   font-size: 0.78rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.notice-bar__dismiss {
+  min-height: 1.9rem;
+  padding-inline: 0.75rem;
 }
 
 .notice-bar--error {
@@ -2642,7 +2655,7 @@ section.workspace-shell {
 .workspace-stage__header-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 0.55rem;
   pointer-events: auto;
 }

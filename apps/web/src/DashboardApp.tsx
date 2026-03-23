@@ -59,7 +59,10 @@ import {
 import { NoVncViewport } from "./NoVncViewport.js";
 
 interface CreateDraft {
+  mode: CreateSourceMode;
   templateId: string;
+  defaultDistribution: string;
+  defaultRelease: string;
   name: string;
   cpu: string;
   ramMb: string;
@@ -110,6 +113,7 @@ interface LoginDraft {
 }
 
 type ThemeMode = "light" | "dark";
+type CreateSourceMode = "template" | "default-image";
 type DesktopResolutionMode = "viewport" | "fixed";
 type ResolutionControlOwner = "none" | "self" | "other";
 
@@ -143,7 +147,10 @@ interface ResolutionRetryState {
 }
 
 const emptyCreateDraft: CreateDraft = {
+  mode: "template",
   templateId: "",
+  defaultDistribution: "",
+  defaultRelease: "",
   name: "",
   cpu: "",
   ramMb: "",
@@ -233,6 +240,8 @@ export function DashboardApp(): JSX.Element {
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
   const [detail, setDetail] = useState<VmDetail | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [hiddenProminentJobKey, setHiddenProminentJobKey] = useState<string | null>(null);
+  const [hiddenProminentJobHint, setHiddenProminentJobHint] = useState<string | null>(null);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [createDraft, setCreateDraft] = useState<CreateDraft>(emptyCreateDraft);
   const [createDirty, setCreateDirty] = useState(false);
@@ -730,6 +739,22 @@ export function DashboardApp(): JSX.Element {
       window.clearTimeout(timeout);
     };
   }, [notice]);
+
+  useEffect(() => {
+    if (!hiddenProminentJobHint) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setHiddenProminentJobHint((current) =>
+        current === hiddenProminentJobHint ? null : current,
+      );
+    }, 3_600);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [hiddenProminentJobHint]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
@@ -1306,12 +1331,80 @@ export function DashboardApp(): JSX.Element {
     }));
   }
 
+  function handleCreateModeChange(mode: CreateSourceMode): void {
+    if (!summary) {
+      return;
+    }
+
+    const template = resolveCreateTemplate(
+      {
+        ...createDraft,
+        mode,
+      },
+      summary.templates,
+    );
+
+    if (!template) {
+      return;
+    }
+
+    setCreateDirty(false);
+    setCreateDraft(buildCreateDraft(template, createDraft.name));
+  }
+
   function handleTemplateChange(event: ChangeEvent<HTMLSelectElement>): void {
     if (!summary) {
       return;
     }
 
-    const template = summary.templates.find((entry) => entry.id === event.target.value);
+    const template = getWorkspaceTemplates(summary.templates).find(
+      (entry) => entry.id === event.target.value,
+    );
+
+    if (!template) {
+      return;
+    }
+
+    setCreateDirty(false);
+    setCreateDraft(buildCreateDraft(template, createDraft.name));
+  }
+
+  function handleDefaultDistributionChange(value: string): void {
+    if (!summary) {
+      return;
+    }
+
+    const template =
+      getDefaultImageTemplates(summary.templates).find(
+        (entry) =>
+          entry.catalog?.distribution === value &&
+          entry.catalog?.release === createDraft.defaultRelease,
+      ) ??
+      getDefaultImageTemplates(summary.templates).find(
+        (entry) => entry.catalog?.distribution === value,
+      ) ??
+      null;
+
+    if (!template) {
+      return;
+    }
+
+    setCreateDirty(false);
+    setCreateDraft(buildCreateDraft(template, createDraft.name));
+  }
+
+  function handleDefaultReleaseChange(value: string): void {
+    if (!summary) {
+      return;
+    }
+
+    const template =
+      getDefaultImageTemplates(summary.templates).find(
+        (entry) =>
+          entry.catalog?.distribution === createDraft.defaultDistribution &&
+          entry.catalog?.release === value,
+      ) ??
+      null;
 
     if (!template) {
       return;
@@ -2174,6 +2267,10 @@ export function DashboardApp(): JSX.Element {
 
   const workspaceFocused = selectedVm !== null;
   const prominentJob = findProminentJob(summary, selectedVmId);
+  const visibleProminentJob =
+    prominentJob && buildProminentJobKey(prominentJob) !== hiddenProminentJobKey
+      ? prominentJob
+      : null;
 
   return (
     <>
@@ -2184,7 +2281,7 @@ export function DashboardApp(): JSX.Element {
           setShellMenuOpen(false);
         }}
       >
-        {notice || busyLabel || prominentJob ? (
+        {notice || busyLabel || visibleProminentJob || hiddenProminentJobHint ? (
           <div
             className="app-shell__notice-stack"
             onClick={(event) => event.stopPropagation()}
@@ -2203,26 +2300,49 @@ export function DashboardApp(): JSX.Element {
               </div>
             ) : null}
 
-            {prominentJob ? (
+            {visibleProminentJob ? (
               <div className="notice-bar notice-bar--info">
                 <div className="notice-bar__copy">
                   <strong className="notice-bar__title">
-                    {prominentJob.vmName} · {formatJobKindLabel(prominentJob.job.kind)}
+                    {visibleProminentJob.vmName} · {formatJobKindLabel(visibleProminentJob.job.kind)}
                   </strong>
-                  <span>{prominentJob.job.message || "Action in progress"}</span>
+                  <span>{visibleProminentJob.job.message || "Action in progress"}</span>
                 </div>
 
-                <div className="chip-row">
-                  <span className="surface-pill">{prominentJob.job.status}</span>
-                  {prominentJob.job.progressPercent !== null &&
-                  prominentJob.job.progressPercent !== undefined ? (
-                    <span className="surface-pill">{prominentJob.job.progressPercent}%</span>
-                  ) : null}
-                  {prominentJob.activeCount > 1 ? (
-                    <span className="surface-pill">
-                      {prominentJob.activeCount} active
-                    </span>
-                  ) : null}
+                <div className="notice-bar__actions">
+                  <div className="chip-row">
+                    <span className="surface-pill">{visibleProminentJob.job.status}</span>
+                    {visibleProminentJob.job.progressPercent !== null &&
+                    visibleProminentJob.job.progressPercent !== undefined ? (
+                      <span className="surface-pill">{visibleProminentJob.job.progressPercent}%</span>
+                    ) : null}
+                    {visibleProminentJob.activeCount > 1 ? (
+                      <span className="surface-pill">
+                        {visibleProminentJob.activeCount} active
+                      </span>
+                    ) : null}
+                  </div>
+                  <button
+                    className="button button--ghost notice-bar__dismiss"
+                    type="button"
+                    onClick={() => {
+                      setHiddenProminentJobKey(buildProminentJobKey(visibleProminentJob));
+                      setHiddenProminentJobHint(
+                        "Find the current status under Activity in the inspector.",
+                      );
+                    }}
+                  >
+                    Hide
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {hiddenProminentJobHint ? (
+              <div className="notice-bar notice-bar--info">
+                <div className="notice-bar__copy">
+                  <strong className="notice-bar__title">Job notice hidden</strong>
+                  <span>{hiddenProminentJobHint}</span>
                 </div>
               </div>
             ) : null}
@@ -2630,7 +2750,10 @@ export function DashboardApp(): JSX.Element {
           createDraft={createDraft}
           templates={deferredTemplates}
           onClose={() => setShowCreateDialog(false)}
+          onDefaultDistributionChange={handleDefaultDistributionChange}
+          onDefaultReleaseChange={handleDefaultReleaseChange}
           onFieldChange={handleCreateField}
+          onModeChange={handleCreateModeChange}
           onSubmit={handleCreate}
           onTemplateChange={handleTemplateChange}
         />
@@ -2644,7 +2767,10 @@ interface CreateVmDialogProps {
   createDraft: CreateDraft;
   templates: EnvironmentTemplate[];
   onClose: () => void;
+  onDefaultDistributionChange: (value: string) => void;
+  onDefaultReleaseChange: (value: string) => void;
   onFieldChange: (field: keyof CreateDraft, value: string) => void;
+  onModeChange: (mode: CreateSourceMode) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onTemplateChange: (event: ChangeEvent<HTMLSelectElement>) => void;
 }
@@ -2654,12 +2780,33 @@ function CreateVmDialog({
   createDraft,
   templates,
   onClose,
+  onDefaultDistributionChange,
+  onDefaultReleaseChange,
   onFieldChange,
+  onModeChange,
   onSubmit,
   onTemplateChange,
 }: CreateVmDialogProps): JSX.Element {
-  const selectedTemplate =
-    templates.find((entry) => entry.id === createDraft.templateId) ?? templates[0] ?? null;
+  const workspaceTemplates = getWorkspaceTemplates(templates);
+  const defaultImageTemplates = getDefaultImageTemplates(templates);
+  const selectedTemplate = resolveCreateTemplate(createDraft, templates);
+  const availableDistributions = Array.from(
+    new Set(
+      defaultImageTemplates
+        .map((template) => template.catalog?.distribution ?? "")
+        .filter(Boolean),
+    ),
+  );
+  const availableReleases = Array.from(
+    new Set(
+      defaultImageTemplates
+        .filter(
+          (template) => template.catalog?.distribution === createDraft.defaultDistribution,
+        )
+        .map((template) => template.catalog?.release ?? "")
+        .filter(Boolean),
+    ),
+  );
 
   return (
     <div className="dialog-backdrop" onClick={onClose}>
@@ -2679,6 +2826,70 @@ function CreateVmDialog({
         </div>
 
         <form className="dialog-panel__form" onSubmit={onSubmit}>
+          {workspaceTemplates.length > 0 && defaultImageTemplates.length > 0 ? (
+            <div className="chip-row">
+              <button
+                className={
+                  createDraft.mode === "template"
+                    ? "button button--secondary"
+                    : "button button--ghost"
+                }
+                type="button"
+                onClick={() => onModeChange("template")}
+                disabled={busy}
+              >
+                Templates
+              </button>
+              <button
+                className={
+                  createDraft.mode === "default-image"
+                    ? "button button--secondary"
+                    : "button button--ghost"
+                }
+                type="button"
+                onClick={() => onModeChange("default-image")}
+                disabled={busy}
+              >
+                Default images
+              </button>
+            </div>
+          ) : null}
+
+          {createDraft.mode === "default-image" && defaultImageTemplates.length > 0 ? (
+            <>
+              <label className="field-shell">
+                <span>Distribution</span>
+                <select
+                  className="field-input"
+                  value={createDraft.defaultDistribution}
+                  onChange={(event) => onDefaultDistributionChange(event.target.value)}
+                  disabled={busy}
+                >
+                  {availableDistributions.map((distribution) => (
+                    <option key={distribution} value={distribution}>
+                      {distribution}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field-shell">
+                <span>Release</span>
+                <select
+                  className="field-input"
+                  value={createDraft.defaultRelease}
+                  onChange={(event) => onDefaultReleaseChange(event.target.value)}
+                  disabled={busy}
+                >
+                  {availableReleases.map((release) => (
+                    <option key={release} value={release}>
+                      {release}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : (
           <label className="field-shell">
             <span>Template</span>
             <select
@@ -2687,13 +2898,14 @@ function CreateVmDialog({
               onChange={onTemplateChange}
               disabled={busy}
             >
-              {templates.map((template) => (
+              {workspaceTemplates.map((template) => (
                 <option key={template.id} value={template.id}>
                   {template.name}
                 </option>
               ))}
             </select>
           </label>
+          )}
 
           <label className="field-shell">
             <span>Name</span>
@@ -2733,7 +2945,27 @@ function CreateVmDialog({
                 <strong>{selectedTemplate.name}</strong>
                 <span className="surface-pill">{formatResources(selectedTemplate.defaultResources)}</span>
               </div>
+              <div className="chip-row">
+                <span className="surface-pill">
+                  {selectedTemplate.kind === "default-image" ? "Default image" : "Template"}
+                </span>
+                {selectedTemplate.catalog ? (
+                  <span className="surface-pill">
+                    {selectedTemplate.catalog.distribution} {selectedTemplate.catalog.release}
+                  </span>
+                ) : null}
+                {selectedTemplate.catalog?.prepRequired ? (
+                  <span className="surface-pill surface-pill--warning">Prep required</span>
+                ) : null}
+                <span className="surface-pill">
+                  {selectedTemplate.snapshotIds.length} snapshot
+                  {selectedTemplate.snapshotIds.length === 1 ? "" : "s"}
+                </span>
+              </div>
               <p>{selectedTemplate.description}</p>
+              <div className="chip-row">
+                <span className="surface-pill mono-font">{selectedTemplate.launchSource}</span>
+              </div>
               {selectedTemplate.defaultForwardedPorts.length > 0 ? (
                 <div className="chip-row">
                   {selectedTemplate.defaultForwardedPorts.map((port) => (
@@ -2742,6 +2974,9 @@ function CreateVmDialog({
                     </span>
                   ))}
                 </div>
+              ) : null}
+              {selectedTemplate.notes.length > 0 ? (
+                <p className="empty-copy">{selectedTemplate.notes.slice(0, 2).join(" ")}</p>
               ) : null}
             </div>
           ) : null}
@@ -3550,6 +3785,14 @@ function WorkspaceSidepanel({
   onResizeKeyDown,
   onResizePointerDown,
 }: WorkspaceSidepanelProps): JSX.Element {
+  const captureTargetTemplate =
+    detail && captureDraft.mode === "existing"
+      ? summary.templates.find((entry) => entry.id === captureDraft.templateId) ??
+        detail.template ??
+        summary.templates[0] ??
+        null
+      : null;
+
   return (
     <aside
       ref={panelRef}
@@ -3602,7 +3845,26 @@ function WorkspaceSidepanel({
 
               <div className="chip-row">
                 <span className="surface-pill">{detail.template?.name ?? "Unlinked template"}</span>
+                {detail.template?.catalog ? (
+                  <span className="surface-pill">
+                    {detail.template.catalog.distribution} {detail.template.catalog.release}
+                  </span>
+                ) : null}
+                {detail.template ? (
+                  <span className="surface-pill">
+                    {detail.template.snapshotIds.length} snapshot
+                    {detail.template.snapshotIds.length === 1 ? "" : "s"}
+                  </span>
+                ) : null}
               </div>
+              {detail.template ? (
+                <div className="chip-row">
+                  <span className="surface-pill mono-font">{detail.template.launchSource}</span>
+                </div>
+              ) : null}
+              {detail.template?.notes.length ? (
+                <p className="empty-copy">{detail.template.notes.slice(0, 2).join(" ")}</p>
+              ) : null}
             </section>
 
             <SidepanelSection title="Actions" defaultOpen>
@@ -4041,6 +4303,37 @@ function WorkspaceSidepanel({
                     </label>
                   ) : null}
 
+                  {captureTargetTemplate ? (
+                    <div className="dialog-panel__template">
+                      <div className="dialog-panel__template-head">
+                        <strong>{captureTargetTemplate.name}</strong>
+                        <span className="surface-pill">
+                          {captureTargetTemplate.kind === "default-image" ? "Default image" : "Template"}
+                        </span>
+                      </div>
+                      <div className="chip-row">
+                        {captureTargetTemplate.catalog ? (
+                          <span className="surface-pill">
+                            {captureTargetTemplate.catalog.distribution} {captureTargetTemplate.catalog.release}
+                          </span>
+                        ) : null}
+                        <span className="surface-pill">
+                          {captureTargetTemplate.snapshotIds.length} snapshot
+                          {captureTargetTemplate.snapshotIds.length === 1 ? "" : "s"}
+                        </span>
+                        {captureTargetTemplate.catalog?.prepRequired ? (
+                          <span className="surface-pill surface-pill--warning">Prep-based source</span>
+                        ) : null}
+                      </div>
+                      <div className="chip-row">
+                        <span className="surface-pill mono-font">{captureTargetTemplate.launchSource}</span>
+                      </div>
+                      {captureTargetTemplate.notes.length > 0 ? (
+                        <p className="empty-copy">{captureTargetTemplate.notes.slice(0, 2).join(" ")}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+
                   <label className="field-shell">
                     <span>Name</span>
                     <input
@@ -4076,6 +4369,12 @@ function WorkspaceSidepanel({
                       ? `This capture will keep ${detail.vm.forwardedPorts.length} forwarded service default${detail.vm.forwardedPorts.length === 1 ? "" : "s"} with the template.`
                       : "This capture will not add any forwarded service defaults to the template."}
                   </p>
+
+                  {captureTargetTemplate?.kind === "default-image" ? (
+                    <p className="empty-copy">
+                      Updating a default image keeps it in the default picker. Keep it workload-neutral and avoid carrying service-specific ports into the shared base unless that is intentional.
+                    </p>
+                  ) : null}
 
                   <button className="button button--secondary button--full" type="submit" disabled={busy}>
                     Queue capture
@@ -4193,7 +4492,7 @@ function EmptyWorkspaceStage({
         </h2>
         <p className="workspace-stage__copy">
           {hasWorkspaces
-            ? "The middle column is reserved for the VM itself. Keep switching on the left and leave the inspector on the right for operational detail."
+            ? "The middle column is reserved for the VM itself. Keep switching on the left and use the inspector on the right."
             : "Once a VM is running, its live desktop takes over this full-height stage while the rails stay available for switching and inspection."}
         </p>
         <div className="workspace-stage__header-actions">
@@ -4267,6 +4566,8 @@ function OverviewSidepanel({
 }): JSX.Element {
   const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
   const recentJobs = summary.jobs.slice().reverse().slice(0, 5);
+  const workspaceTemplates = getWorkspaceTemplates(summary.templates);
+  const defaultImageTemplates = getDefaultImageTemplates(summary.templates);
 
   return (
     <aside
@@ -4393,19 +4694,61 @@ function OverviewSidepanel({
 
             <SidepanelSection title="Templates">
               <div className="stack">
-                {summary.templates.length > 0 ? (
-                  summary.templates.map((template) => (
+                {workspaceTemplates.length > 0 ? (
+                  workspaceTemplates.map((template) => (
                     <div key={template.id} className="list-card">
                       <div className="list-card__head">
                         <strong>{template.name}</strong>
                         <span className="surface-pill">{formatResources(template.defaultResources)}</span>
                       </div>
+                      <div className="chip-row">
+                        <span className="surface-pill">Template</span>
+                        <span className="surface-pill">
+                          {template.snapshotIds.length} snapshot
+                          {template.snapshotIds.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
                       <p>{template.description}</p>
+                      <div className="chip-row">
+                        <span className="surface-pill mono-font">{template.launchSource}</span>
+                      </div>
                     </div>
                   ))
                 ) : (
                   <p className="empty-copy">No templates available yet.</p>
                 )}
+
+                {defaultImageTemplates.length > 0 ? (
+                  <>
+                    <p className="empty-copy">
+                      Default image choices stay separate from workload templates.
+                    </p>
+                    {defaultImageTemplates.map((template) => (
+                      <div key={template.id} className="list-card">
+                        <div className="list-card__head">
+                          <strong>{template.name}</strong>
+                          <span className="surface-pill">
+                            {template.catalog?.distribution ?? "Default image"}
+                          </span>
+                        </div>
+                        <div className="chip-row">
+                          {template.catalog?.release ? (
+                            <span className="surface-pill">{template.catalog.release}</span>
+                          ) : null}
+                          {template.catalog?.prepRequired ? (
+                            <span className="surface-pill surface-pill--warning">Prep required</span>
+                          ) : (
+                            <span className="surface-pill surface-pill--success">Launch ready</span>
+                          )}
+                        </div>
+                        <p>{template.description}</p>
+                        <div className="chip-row">
+                          <span className="surface-pill mono-font">{template.launchSource}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                ) : null}
               </div>
             </SidepanelSection>
 
@@ -4645,14 +4988,13 @@ function syncCreateDraft(
   templates: EnvironmentTemplate[],
   preserveInput: boolean,
 ): CreateDraft {
-  const template =
-    templates.find((entry) => entry.id === current.templateId) ?? templates[0] ?? null;
+  const template = resolveCreateTemplate(current, templates);
 
   if (!template) {
     return current;
   }
 
-  if (preserveInput && current.templateId) {
+  if (preserveInput && resolveCreateTemplate(current, templates)) {
     return current;
   }
 
@@ -4664,12 +5006,63 @@ function buildCreateDraft(
   name = "",
 ): CreateDraft {
   return {
+    mode: inferCreateMode(template),
     templateId: template.id,
+    defaultDistribution: template.catalog?.distribution ?? "",
+    defaultRelease: template.catalog?.release ?? "",
     name,
     cpu: String(template.defaultResources.cpu),
     ramMb: String(template.defaultResources.ramMb),
     diskGb: String(template.defaultResources.diskGb),
   };
+}
+
+function resolveCreateTemplate(
+  draft: CreateDraft,
+  templates: EnvironmentTemplate[],
+): EnvironmentTemplate | null {
+  const workspaceTemplates = getWorkspaceTemplates(templates);
+  const defaultImageTemplates = getDefaultImageTemplates(templates);
+
+  if (draft.mode === "default-image" && defaultImageTemplates.length > 0) {
+    return (
+      defaultImageTemplates.find((entry) => entry.id === draft.templateId) ??
+      defaultImageTemplates.find(
+        (entry) =>
+          entry.catalog?.distribution === draft.defaultDistribution &&
+          entry.catalog?.release === draft.defaultRelease,
+      ) ??
+      defaultImageTemplates.find(
+        (entry) => entry.catalog?.distribution === draft.defaultDistribution,
+      ) ??
+      defaultImageTemplates[0] ??
+      workspaceTemplates[0] ??
+      null
+    );
+  }
+
+  return (
+    workspaceTemplates.find((entry) => entry.id === draft.templateId) ??
+    workspaceTemplates[0] ??
+    defaultImageTemplates[0] ??
+    null
+  );
+}
+
+function inferCreateMode(template: EnvironmentTemplate): CreateSourceMode {
+  return template.kind === "default-image" ? "default-image" : "template";
+}
+
+function getWorkspaceTemplates(
+  templates: EnvironmentTemplate[],
+): EnvironmentTemplate[] {
+  return templates.filter((template) => template.kind !== "default-image");
+}
+
+function getDefaultImageTemplates(
+  templates: EnvironmentTemplate[],
+): EnvironmentTemplate[] {
+  return templates.filter((template) => template.kind === "default-image");
 }
 
 function buildCaptureDraft(
@@ -4782,6 +5175,12 @@ function findProminentJob(
     job,
     vmName,
   };
+}
+
+function buildProminentJobKey(
+  prominentJob: NonNullable<ReturnType<typeof findProminentJob>>,
+): string {
+  return prominentJob.job.id;
 }
 
 function formatJobKindLabel(kind: DashboardSummary["jobs"][number]["kind"]): string {
