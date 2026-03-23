@@ -326,6 +326,8 @@ Then set `PARALLAIZE_PERSISTENCE=json` and `PARALLAIZE_DATA_FILE=/var/lib/parall
 
 The checked-in deployment shape assumes the repo is installed at `/opt/parallaize`, the control plane runs as a dedicated `parallaize` user, the environment file lives at `/etc/parallaize/parallaize.env`, and PostgreSQL is reachable before the service starts.
 
+For the packaging/deployment decision that separates this source-checkout flow from the future packaged-host path, see [docs/packaging-decision.md](docs/packaging-decision.md).
+
 One workable host flow is:
 
 1. Install the host prerequisites for Incus, QEMU/OVMF helpers, Docker or another PostgreSQL runtime, and the repo Flox environment.
@@ -449,6 +451,7 @@ An example production env file is included at `infra/parallaize.env.example`.
 - `infra/systemd/parallaize.service`: control-plane unit that runs the built Node server through Flox
 - `infra/systemd/parallaize-caddy.service`: companion Caddy unit for the front door
 - `infra/docker-compose.postgres.yml`: local PostgreSQL stack for the PostgreSQL-backed control-plane store
+- `docs/packaging-decision.md`: packaging choice, dependency inventory, first supported target, and upgrade model for deployed hosts
 
 ## Repo Layout
 
