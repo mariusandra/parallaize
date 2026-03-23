@@ -19,6 +19,7 @@ import {
   formatRam,
   formatResources,
   formatTimestamp,
+  minimumCreateDiskGb,
 } from "../../../packages/shared/src/helpers.js";
 import type {
   AuthStatus,
@@ -37,6 +38,7 @@ import type {
   SnapshotInput,
   TemplatePortForward,
   UpdateTemplateInput,
+  UpdateVmInput,
   VmDetail,
   VmInstance,
   VmPortForward,
@@ -64,13 +66,13 @@ interface CreateDraft {
   templateId: string;
   name: string;
   cpu: string;
-  ramMb: string;
+  ramGb: string;
   diskGb: string;
 }
 
 interface ResourceDraft {
   cpu: string;
-  ramMb: string;
+  ramGb: string;
   diskGb: string;
 }
 
@@ -148,13 +150,13 @@ const emptyCreateDraft: CreateDraft = {
   templateId: "",
   name: "",
   cpu: "",
-  ramMb: "",
+  ramGb: "",
   diskGb: "",
 };
 
 const emptyResourceDraft: ResourceDraft = {
   cpu: "",
-  ramMb: "",
+  ramGb: "",
   diskGb: "",
 };
 
@@ -697,7 +699,7 @@ export function DashboardApp(): JSX.Element {
 
     setResourceDraft({
       cpu: String(detail.vm.resources.cpu),
-      ramMb: String(detail.vm.resources.ramMb),
+      ramGb: formatRamDraftValue(detail.vm.resources.ramMb),
       diskGb: String(detail.vm.resources.diskGb),
     });
   }, [
@@ -1302,12 +1304,27 @@ export function DashboardApp(): JSX.Element {
   async function handleCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
+    const selectedTemplate =
+      summary?.templates.find((entry) => entry.id === createDraft.templateId) ?? null;
+    const createValidationError = buildCreateDiskValidationError(
+      selectedTemplate,
+      createDraft.diskGb,
+    );
+
+    if (createValidationError) {
+      setNotice({
+        tone: "error",
+        message: createValidationError,
+      });
+      return;
+    }
+
     const payload: CreateVmInput = {
       templateId: createDraft.templateId,
       name: createDraft.name.trim(),
       resources: {
         cpu: Number(createDraft.cpu),
-        ramMb: Number(createDraft.ramMb),
+        ramMb: parseRamDraftValue(createDraft.ramGb),
         diskGb: Number(createDraft.diskGb),
       },
     };
@@ -1368,6 +1385,29 @@ export function DashboardApp(): JSX.Element {
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
     setShowCreateDialog(true);
+  }
+
+  async function handleRenameVm(vm: VmInstance): Promise<void> {
+    const name = window.prompt("Workspace name", vm.name)?.trim();
+
+    if (!name || name === vm.name) {
+      return;
+    }
+
+    await runMutation(
+      `Renaming ${vm.name}`,
+      async () => {
+        await postJson<VmInstance>(
+          `/api/vms/${vm.id}/update`,
+          {
+            name,
+          } satisfies UpdateVmInput,
+        );
+        await refreshSummary();
+        await refreshDetail(vm.id);
+      },
+      `Renamed workspace to ${name}.`,
+    );
   }
 
   async function handleRenameTemplate(template: EnvironmentTemplate): Promise<void> {
@@ -2008,7 +2048,7 @@ export function DashboardApp(): JSX.Element {
     const payload: ResizeVmInput = {
       resources: {
         cpu: Number(resourceDraft.cpu),
-        ramMb: Number(resourceDraft.ramMb),
+        ramMb: parseRamDraftValue(resourceDraft.ramGb),
         diskGb: Number(resourceDraft.diskGb),
       },
     };
@@ -2308,6 +2348,9 @@ export function DashboardApp(): JSX.Element {
     prominentJob && dismissedProminentJobIds[prominentJob.job.id] !== true
       ? prominentJob
       : null;
+  const visibleProminentJobTiming = visibleProminentJob
+    ? formatActiveJobTiming(visibleProminentJob.job)
+    : null;
 
   return (
     <>
@@ -2345,6 +2388,9 @@ export function DashboardApp(): JSX.Element {
                     {visibleProminentJob.vmName} · {formatJobKindLabel(visibleProminentJob.job.kind)}
                   </strong>
                   <span>{visibleProminentJob.job.message || "Action in progress"}</span>
+                  {visibleProminentJobTiming ? (
+                    <span className="notice-bar__meta">{visibleProminentJobTiming}</span>
+                  ) : null}
                 </div>
 
                 <div className="notice-bar__actions">
@@ -2729,6 +2775,7 @@ export function DashboardApp(): JSX.Element {
                   applyViewportScalePreference(selectedVm.id, scale)}
                 onRemoveForward={handleRemoveForward}
                 onResourceDraftChange={setResourceDraft}
+                onRename={handleRenameVm}
                 onApplyResolution={handleApplyResolution}
                 onResize={handleResize}
                 onSaveForward={handleAddForward}
@@ -2791,6 +2838,10 @@ export function DashboardApp(): JSX.Element {
           busy={isBusy}
           createDraft={createDraft}
           templates={displayedTemplates}
+          validationError={buildCreateDiskValidationError(
+            displayedTemplates.find((entry) => entry.id === createDraft.templateId) ?? null,
+            createDraft.diskGb,
+          )}
           onClose={() => setShowCreateDialog(false)}
           onFieldChange={handleCreateField}
           onSubmit={handleCreate}
@@ -2805,6 +2856,7 @@ interface CreateVmDialogProps {
   busy: boolean;
   createDraft: CreateDraft;
   templates: EnvironmentTemplate[];
+  validationError: string | null;
   onClose: () => void;
   onFieldChange: (field: keyof CreateDraft, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
@@ -2815,6 +2867,7 @@ function CreateVmDialog({
   busy,
   createDraft,
   templates,
+  validationError,
   onClose,
   onFieldChange,
   onSubmit,
@@ -2877,9 +2930,10 @@ function CreateVmDialog({
             />
             <NumberField
               disabled={busy}
-              label="RAM MB"
-              value={createDraft.ramMb}
-              onChange={(value) => onFieldChange("ramMb", value)}
+              allowDecimal
+              label="RAM GB"
+              value={createDraft.ramGb}
+              onChange={(value) => onFieldChange("ramGb", value)}
             />
             <NumberField
               disabled={busy}
@@ -2888,6 +2942,13 @@ function CreateVmDialog({
               onChange={(value) => onFieldChange("diskGb", value)}
             />
           </div>
+
+          {validationError ? (
+            <div className="inline-note">
+              <strong>Launch blocked</strong>
+              <p>{validationError}</p>
+            </div>
+          ) : null}
 
           {selectedTemplate ? (
             <div className="dialog-panel__template">
@@ -2908,7 +2969,11 @@ function CreateVmDialog({
             </div>
           ) : null}
 
-          <button className="button button--primary button--full" type="submit" disabled={busy}>
+          <button
+            className="button button--primary button--full"
+            type="submit"
+            disabled={busy || validationError !== null}
+          >
             Queue workspace
           </button>
         </form>
@@ -3495,6 +3560,7 @@ interface WorkspaceSidepanelProps {
   onCommandDraftChange: (value: string) => void;
   onDelete: (vm: VmInstance) => Promise<void>;
   onForwardDraftChange: (draft: ForwardDraft) => void;
+  onRename: (vm: VmInstance) => Promise<void>;
   onResolutionModeChange: (mode: DesktopResolutionMode) => void;
   onResolutionDraftChange: (draft: ResolutionDraft) => void;
   onViewportScaleChange: (scale: number) => void;
@@ -3688,6 +3754,7 @@ function WorkspaceSidepanel({
   onCommandDraftChange,
   onDelete,
   onForwardDraftChange,
+  onRename,
   onResolutionModeChange,
   onResolutionDraftChange,
   onViewportScaleChange,
@@ -3764,6 +3831,16 @@ function WorkspaceSidepanel({
 
               <div className="chip-row">
                 <span className="surface-pill">{detail.template?.name ?? "Unlinked template"}</span>
+              </div>
+              <div className="sidepanel-summary__toolbar">
+                <button
+                  className="button button--ghost"
+                  type="button"
+                  onClick={() => void onRename(vm)}
+                  disabled={busy}
+                >
+                  Rename
+                </button>
               </div>
             </section>
 
@@ -3962,12 +4039,13 @@ function WorkspaceSidepanel({
                     />
                     <NumberField
                       disabled={busy}
-                      label="RAM MB"
-                      value={resourceDraft.ramMb}
+                      allowDecimal
+                      label="RAM GB"
+                      value={resourceDraft.ramGb}
                       onChange={(value) =>
                         onResourceDraftChange({
                           ...resourceDraft,
-                          ramMb: value,
+                          ramGb: value,
                         })
                       }
                     />
@@ -4390,6 +4468,9 @@ function WorkspaceBootSurface({ state }: WorkspaceBootSurfaceProps): JSX.Element
         <h2 className="workspace-boot__title">
           {state.progressPercent !== null ? `${state.progressPercent}%` : state.label}
         </h2>
+        {state.timingCopy ? (
+          <p className="workspace-boot__meta">{state.timingCopy}</p>
+        ) : null}
         <p className="workspace-boot__message">{state.message}</p>
       </div>
     </div>
@@ -4900,11 +4981,13 @@ function StaticPatternPreview({
 }
 
 function NumberField({
+  allowDecimal = false,
   disabled,
   label,
   onChange,
   value,
 }: {
+  allowDecimal?: boolean;
   disabled?: boolean;
   label: string;
   onChange: (value: string) => void;
@@ -4915,8 +4998,8 @@ function NumberField({
       <span>{label}</span>
       <input
         className="field-input"
-        inputMode="numeric"
-        pattern="[0-9]*"
+        inputMode={allowDecimal ? "decimal" : "numeric"}
+        pattern={allowDecimal ? "[0-9]*[.]?[0-9]*" : "[0-9]*"}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
@@ -4990,9 +5073,46 @@ function buildCreateDraft(
     templateId: template.id,
     name,
     cpu: String(template.defaultResources.cpu),
-    ramMb: String(template.defaultResources.ramMb),
+    ramGb: formatRamDraftValue(template.defaultResources.ramMb),
     diskGb: String(template.defaultResources.diskGb),
   };
+}
+
+function buildCreateDiskValidationError(
+  template: EnvironmentTemplate | null,
+  diskGbInput: string,
+): string | null {
+  if (!template) {
+    return null;
+  }
+
+  const minimumDiskGb = minimumCreateDiskGb(template);
+  const requestedDiskGb = Number(diskGbInput);
+
+  if (
+    minimumDiskGb === null ||
+    !Number.isFinite(requestedDiskGb) ||
+    requestedDiskGb >= minimumDiskGb
+  ) {
+    return null;
+  }
+
+  return `${template.name} was captured from a ${minimumDiskGb} GB workspace and needs at least ${minimumDiskGb} GB disk to launch cleanly.`;
+}
+
+function formatRamDraftValue(ramMb: number): string {
+  return trimTrailingZeros((ramMb / 1024).toFixed(3));
+}
+
+function parseRamDraftValue(ramGb: string): number {
+  const parsed = Number(ramGb);
+  return Number.isFinite(parsed)
+    ? Math.round(parsed * 1024)
+    : Number.NaN;
+}
+
+function trimTrailingZeros(value: string): string {
+  return value.replace(/(?:\.0+|(\.\d*?[1-9])0+)$/, "$1");
 }
 
 function buildCaptureDraft(
@@ -5150,10 +5270,73 @@ function formatJobKindLabel(kind: DashboardSummary["jobs"][number]["kind"]): str
   }
 }
 
+function formatActiveJobTiming(
+  job: Pick<DashboardSummary["jobs"][number], "createdAt" | "progressPercent">,
+): string | null {
+  const createdAt = Date.parse(job.createdAt);
+
+  if (!Number.isFinite(createdAt)) {
+    return null;
+  }
+
+  const elapsedMs = Math.max(0, Date.now() - createdAt);
+  const timingParts = [`Elapsed ${formatDurationShort(elapsedMs)}`];
+  const remainingMs = estimateRemainingDurationMs(elapsedMs, job.progressPercent ?? null);
+
+  if (remainingMs !== null) {
+    timingParts.push(`About ${formatDurationShort(remainingMs)} left`);
+  }
+
+  return timingParts.join(" • ");
+}
+
+function estimateRemainingDurationMs(
+  elapsedMs: number,
+  progressPercent: number | null,
+): number | null {
+  if (
+    progressPercent === null ||
+    !Number.isFinite(progressPercent) ||
+    progressPercent < 10 ||
+    progressPercent >= 100
+  ) {
+    return null;
+  }
+
+  const totalEstimateMs = (elapsedMs / progressPercent) * 100;
+  const remainingMs = Math.max(0, totalEstimateMs - elapsedMs);
+
+  return Number.isFinite(remainingMs) && remainingMs >= 1_000
+    ? remainingMs
+    : null;
+}
+
+function formatDurationShort(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return minutes > 0
+      ? `${hours}h ${minutes}m`
+      : `${hours}h`;
+  }
+
+  if (minutes > 0) {
+    return seconds > 0
+      ? `${minutes}m ${seconds}s`
+      : `${minutes}m`;
+  }
+
+  return `${seconds}s`;
+}
+
 interface DesktopBootState {
   label: string;
   message: string;
   progressPercent: number | null;
+  timingCopy: string | null;
 }
 
 function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
@@ -5188,6 +5371,7 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
       label: "Booting workspace",
       message: activeJob.message || "Starting the VM and waiting for the desktop.",
       progressPercent: activeJob.progressPercent ?? null,
+      timingCopy: formatActiveJobTiming(activeJob),
     };
   }
 
@@ -5196,6 +5380,7 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
       label: "Cloning workspace",
       message: activeJob.message || "Cloning the workspace and preparing the desktop.",
       progressPercent: activeJob.progressPercent ?? null,
+      timingCopy: formatActiveJobTiming(activeJob),
     };
   }
 
@@ -5205,6 +5390,7 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
       message:
         activeJob.message || "Launching the workspace from a snapshot and waiting for the desktop.",
       progressPercent: activeJob.progressPercent ?? null,
+      timingCopy: formatActiveJobTiming(activeJob),
     };
   }
 
@@ -5212,6 +5398,7 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
     label: "Creating workspace",
     message: activeJob?.message || "Provisioning the VM and waiting for the desktop.",
     progressPercent: activeJob?.progressPercent ?? null,
+    timingCopy: activeJob ? formatActiveJobTiming(activeJob) : null,
   };
 }
 

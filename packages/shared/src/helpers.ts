@@ -1,5 +1,6 @@
 import type {
   DashboardMetrics,
+  EnvironmentTemplate,
   ResourceSpec,
   VmInstance,
 } from "./types.js";
@@ -14,6 +15,14 @@ export function formatRam(ramMb: number): string {
   }
 
   return `${ramMb} MB`;
+}
+
+export function minimumCreateDiskGb(
+  template: Pick<EnvironmentTemplate, "launchSource" | "defaultResources">,
+): number | null {
+  return template.launchSource.startsWith("parallaize-template-")
+    ? template.defaultResources.diskGb
+    : null;
 }
 
 export function formatTimestamp(iso: string): string {

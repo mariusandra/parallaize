@@ -279,6 +279,80 @@ test("templates can be updated and deleted when no VM still uses them", (context
   );
 });
 
+test("captured templates reject create requests that undersize the source disk", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-create-disk-guard-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const now = new Date().toISOString();
+
+  store.update((draft) => {
+    draft.templates.unshift({
+      id: "tpl-captured-100g",
+      name: "Captured 100G Template",
+      description: "Captured from a 100 GB workspace.",
+      launchSource: "parallaize-template-tpl-captured-100g",
+      defaultResources: {
+        cpu: 8,
+        ramMb: 16384,
+        diskGb: 100,
+      },
+      defaultForwardedPorts: [],
+      tags: ["captured"],
+      notes: [],
+      snapshotIds: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  assert.throws(
+    () =>
+      manager.createVm({
+        templateId: "tpl-captured-100g",
+        name: "too-small-disk",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 50,
+        },
+      }),
+    /requires at least 100 GB disk/,
+  );
+});
+
+test("vms can be renamed without changing their provider identity", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-rename-vm-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const originalProviderRef = manager.getVmDetail("vm-0001").vm.providerRef;
+
+  const updated = manager.updateVm("vm-0001", {
+    name: "alpha-renamed",
+  });
+
+  assert.equal(updated.name, "alpha-renamed");
+  assert.equal(updated.providerRef, originalProviderRef);
+  assert.equal(manager.getVmDetail("vm-0001").vm.name, "alpha-renamed");
+  assert.equal(
+    manager.getVmDetail("vm-0001").vm.lastAction,
+    "Renamed workspace to alpha-renamed",
+  );
+});
+
 test("command output is retained and snapshots can launch or restore VMs", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-command-history-"));
   context.after(() => {
@@ -666,14 +740,20 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     templateId: "tpl-0099",
     name: "Captured Incus Template",
   });
+  const snapshotCreateCall = calls.find(
+    (args) => args[0] === "snapshot" && args[1] === "create" && args[2] === instanceName,
+  );
+  const publishCall = calls.find(
+    (args) => args[0] === "publish" && args[1]?.startsWith(`${instanceName}/`),
+  );
 
   assert.equal(snapshot.launchSource, "parallaize-template-tpl-0099");
-  assert.equal(calls.at(-2)?.[0], "snapshot");
-  assert.equal(calls.at(-2)?.[1], "create");
-  assert.match(calls.at(-2)?.[3] ?? "", /^parallaize-template-tpl-0099-/);
-  assert.deepEqual(calls.at(-1), [
+  assert.equal(snapshotCreateCall?.[0], "snapshot");
+  assert.equal(snapshotCreateCall?.[1], "create");
+  assert.match(snapshotCreateCall?.[3] ?? "", /^parallaize-template-tpl-0099-/);
+  assert.deepEqual(publishCall, [
     "publish",
-    `${instanceName}/${calls.at(-2)?.[3] ?? ""}`,
+    `${instanceName}/${snapshotCreateCall?.[3] ?? ""}`,
     "--alias",
     "parallaize-template-tpl-0099",
     "--reuse",
@@ -682,9 +762,11 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   ]);
 });
 
-test("incus provider emits heartbeat progress while publishing a silent template export", async () => {
+test("incus provider reads staged publish progress from the operations API", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0100-publish-heartbeat";
+  const operationId = "8fba0d4b-1d58-4c30-9551-0c2734f0e100";
+  let operationQueryCount = 0;
   const runner = {
     execute(args: string[]) {
       calls.push(args);
@@ -693,11 +775,61 @@ test("incus provider emits heartbeat progress while publishing a silent template
         return ok("[]", args);
       }
 
+      if (args[0] === "query" && args[1] === "/1.0/operations?recursion=1") {
+        operationQueryCount += 1;
+
+        if (operationQueryCount === 1) {
+          return ok(JSON.stringify({ running: [] }), args);
+        }
+
+        if (operationQueryCount < 4) {
+          return ok(
+            JSON.stringify({
+              running: [
+                {
+                  id: operationId,
+                  created_at: new Date().toISOString(),
+                  metadata: {
+                    create_image_from_container_pack_progress: "Exporting: 62%",
+                    progress: {
+                      percent: "62",
+                      speed: "0",
+                      stage: "create_image_from_container_pack",
+                    },
+                  },
+                },
+              ],
+            }),
+            args,
+          );
+        }
+
+        return ok(
+          JSON.stringify({
+            running: [
+              {
+                id: operationId,
+                created_at: new Date().toISOString(),
+                metadata: {
+                  create_image_from_container_pack_progress: "Image pack: 50.00GiB (20.00MiB/s)",
+                  progress: {
+                    processed: String(50 * 1024 * 1024 * 1024),
+                    speed: String(20 * 1024 * 1024),
+                    stage: "create_image_from_container_pack",
+                  },
+                },
+              },
+            ],
+          }),
+          args,
+        );
+      }
+
       return ok("", args);
     },
     async executeStreaming(args: string[]) {
       calls.push(args);
-      await wait(130);
+      await wait(220);
       return ok("", args);
     },
   };
@@ -717,7 +849,7 @@ test("incus provider emits heartbeat progress while publishing a silent template
     resources: {
       cpu: 4,
       ramMb: 8192,
-      diskGb: 60,
+      diskGb: 100,
     },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -758,19 +890,115 @@ test("incus provider emits heartbeat progress while publishing a silent template
   assert.ok(
     reports.some(
       (entry) =>
-        entry.message.includes("uncompressed export in progress") &&
+        entry.message.includes("Exporting: 62%") &&
         (entry.progressPercent ?? 0) > 58,
     ),
   );
+  const packReport = reports.find((entry) => entry.message.includes("Image pack: 50.00GiB"));
+  assert.ok(packReport);
+  assert.ok((packReport?.progressPercent ?? 0) > 78);
+  assert.ok((packReport?.progressPercent ?? 100) < 90);
   assert.equal(reports.at(-1)?.message, "Template image published");
   assert.equal(reports.at(-1)?.progressPercent, 92);
-  assert.deepEqual(calls.at(-1), [
+  const publishCall = calls.find(
+    (args) => args[0] === "publish" && args[1]?.startsWith(`${instanceName}/`),
+  );
+  const snapshotCreateCall = calls.find(
+    (args) => args[0] === "snapshot" && args[1] === "create" && args[2] === instanceName,
+  );
+  assert.deepEqual(publishCall, [
     "publish",
-    `${instanceName}/${calls.at(-2)?.[3] ?? ""}`,
+    `${instanceName}/${snapshotCreateCall?.[3] ?? ""}`,
     "--alias",
     "parallaize-template-tpl-0100",
     "--reuse",
   ]);
+});
+
+test("incus provider parses image-pack output when publish streaming reports bytes instead of percent", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0100-publish-pack-output";
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (args[0] === "query" && args[1] === "/1.0/operations?recursion=1") {
+        return ok(JSON.stringify({ running: [] }), args);
+      }
+
+      return ok("", args);
+    },
+    async executeStreaming(args: string[], listeners?: { onStdout?(chunk: string): void }) {
+      calls.push(args);
+      listeners?.onStdout?.("Publishing instance: Exporting: 100%\r");
+      await wait(25);
+      listeners?.onStdout?.("Publishing instance: Image pack: 50.00GiB (20.00MiB/s)\r");
+      await wait(25);
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+    templatePublishHeartbeatMs: 40,
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0101",
+    name: "publish-pack-output",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 100,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 101,
+    activeWindow: "editor",
+    workspacePath: "/root",
+    session: {
+      kind: "vnc",
+      host: "10.55.0.101",
+      port: 5901,
+      webSocketPath: "/api/vms/vm-0101/vnc",
+      browserPath: "/?vm=vm-0101",
+      display: "10.55.0.101:5901",
+    },
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const reports: Array<{ message: string; progressPercent: number | null }> = [];
+  await provider.captureTemplate(
+    vm,
+    {
+      templateId: "tpl-0101",
+      name: "Pack Output Capture",
+    },
+    (message, progressPercent) => {
+      reports.push({
+        message,
+        progressPercent,
+      });
+    },
+  );
+
+  const packReport = reports.find((entry) => entry.message.includes("Image pack: 50.0 GiB"));
+  assert.ok(packReport);
+  assert.ok((packReport?.progressPercent ?? 0) > 78);
+  assert.ok((packReport?.progressPercent ?? 100) < 90);
 });
 
 test("incus provider applies guest display resolution through xrandr", async () => {

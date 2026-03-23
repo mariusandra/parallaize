@@ -21,6 +21,7 @@ import type {
   SnapshotLaunchInput,
   SnapshotInput,
   UpdateTemplateInput,
+  UpdateVmInput,
   UpdateVmForwardedPortsInput,
   VmDetail,
 } from "../../../packages/shared/src/types.js";
@@ -124,6 +125,16 @@ const server = createServer(async (request, response) => {
       return writeJson<VmDetail>(response, 200, {
         ok: true,
         data: manager.getVmDetail(vmMatch[1]),
+      });
+    }
+
+    const vmUpdateMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/update$/);
+    if (method === "POST" && vmUpdateMatch) {
+      const payload = await readJsonBody<UpdateVmInput>(request);
+      const vm = manager.updateVm(vmUpdateMatch[1], payload);
+      return writeJson(response, 200, {
+        ok: true,
+        data: vm,
       });
     }
 

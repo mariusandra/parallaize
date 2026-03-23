@@ -1701,6 +1701,11 @@ section.workspace-shell {
   min-width: 0;
 }
 
+.notice-bar__meta {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+}
+
 .notice-bar__title {
   font-size: 0.78rem;
   letter-spacing: 0.08em;
@@ -2823,6 +2828,14 @@ section.workspace-shell {
   color: #f4f7fa;
 }
 
+.workspace-boot__meta {
+  margin: 0;
+  color: rgba(244, 247, 250, 0.68);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .workspace-boot__message {
   margin: 0;
   color: rgba(244, 247, 250, 0.78);
@@ -2991,6 +3004,11 @@ section.workspace-shell {
 .sidepanel-summary__title {
   font-size: 1.35rem;
   line-height: 1.2;
+}
+
+.sidepanel-summary__toolbar {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .sidepanel-section {

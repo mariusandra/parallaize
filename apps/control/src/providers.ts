@@ -20,7 +20,9 @@ const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 const DEFAULT_GUEST_WORKSPACE = "/root";
 const DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS = 4000;
 const TEMPLATE_PUBLISH_START_PERCENT = 58;
+const TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT = 78;
 const TEMPLATE_PUBLISH_COMPLETE_PERCENT = 92;
+const BYTES_PER_GIB = 1024 ** 3;
 
 export interface CaptureTemplateTarget {
   templateId: string;
@@ -182,6 +184,39 @@ interface IncusListInstance {
     };
   };
 }
+
+interface IncusOperationProgressMetadata {
+  percent?: string;
+  processed?: string;
+  speed?: string;
+  stage?: string;
+}
+
+interface IncusOperation {
+  id?: string;
+  created_at?: string;
+  metadata?: {
+    create_image_from_container_pack_progress?: string;
+    progress?: IncusOperationProgressMetadata;
+  };
+}
+
+interface IncusOperationListResponse {
+  running?: IncusOperation[];
+}
+
+type TemplatePublishProgressSample =
+  | {
+      kind: "export";
+      percent: number;
+      detail: string;
+    }
+  | {
+      kind: "pack";
+      processedBytes: number;
+      speedBytesPerSecond: number | null;
+      detail: string;
+    };
 
 export function createProvider(
   kind: ProviderKind,
@@ -888,8 +923,34 @@ class IncusProvider implements DesktopProvider {
     report?.("Publishing template image", TEMPLATE_PUBLISH_START_PERCENT);
 
     const publishStartedAt = Date.now();
+    const knownPublishOperationIds = this.listTemplatePublishOperationIds();
+    let publishOperationId: string | null = null;
     let lastReportedPercent = TEMPLATE_PUBLISH_START_PERCENT;
     let lastPublishDetail: string | undefined;
+    let lastPublishSample: TemplatePublishProgressSample | null = null;
+    const applyPublishSample = (sample: TemplatePublishProgressSample | null) => {
+      if (!sample) {
+        return;
+      }
+
+      lastPublishSample = sample;
+      lastPublishDetail = sample.detail;
+      lastReportedPercent = mapTemplatePublishProgress(sample, vm.resources.diskGb);
+    };
+    const pollOperationProgress = () => {
+      const operationProgress = this.inspectTemplatePublishOperationProgress(
+        publishStartedAt,
+        knownPublishOperationIds,
+        publishOperationId,
+      );
+
+      if (!operationProgress) {
+        return;
+      }
+
+      publishOperationId = operationProgress.operationId;
+      applyPublishSample(operationProgress.sample);
+    };
     const reportPublishProgress = (percent: number | null, detail?: string) => {
       const elapsedSeconds = Math.max(
         1,
@@ -901,11 +962,15 @@ class IncusProvider implements DesktopProvider {
       report?.(message, percent);
     };
     const heartbeat = setInterval(() => {
-      if (!lastPublishDetail) {
+      pollOperationProgress();
+
+      if (!lastPublishSample) {
         lastReportedPercent = estimateTemplatePublishProgress(
           publishStartedAt,
           this.templatePublishHeartbeatMs,
+          vm.resources.diskGb,
         );
+        lastPublishDetail = undefined;
       }
 
       reportPublishProgress(lastReportedPercent, lastPublishDetail);
@@ -928,25 +993,11 @@ class IncusProvider implements DesktopProvider {
         publishArgs,
         {
           onStdout: (chunk) => {
-            const parsedPercent = parseTemplatePublishPercent(chunk);
-
-            if (parsedPercent === null) {
-              return;
-            }
-
-            lastReportedPercent = mapTemplatePublishPercent(parsedPercent);
-            lastPublishDetail = `${parsedPercent}% exported`;
+            applyPublishSample(parseTemplatePublishProgressChunk(chunk));
             reportPublishProgress(lastReportedPercent, lastPublishDetail);
           },
           onStderr: (chunk) => {
-            const parsedPercent = parseTemplatePublishPercent(chunk);
-
-            if (parsedPercent === null) {
-              return;
-            }
-
-            lastReportedPercent = mapTemplatePublishPercent(parsedPercent);
-            lastPublishDetail = `${parsedPercent}% exported`;
+            applyPublishSample(parseTemplatePublishProgressChunk(chunk));
             reportPublishProgress(lastReportedPercent, lastPublishDetail);
           },
         },
@@ -1167,6 +1218,44 @@ class IncusProvider implements DesktopProvider {
     return this.telemetryInstances.get(instanceName) ?? null;
   }
 
+  private listTemplatePublishOperationIds(): Set<string> {
+    return new Set(
+      this.listRunningOperations()
+        .map((operation) => operation.id)
+        .filter((operationId): operationId is string => typeof operationId === "string"),
+    );
+  }
+
+  private inspectTemplatePublishOperationProgress(
+    publishStartedAt: number,
+    knownOperationIds: Set<string>,
+    activeOperationId: string | null,
+  ): { operationId: string; sample: TemplatePublishProgressSample } | null {
+    const operations = this.listRunningOperations();
+    const activeOperation =
+      activeOperationId
+        ? operations.find((operation) => operation.id === activeOperationId) ?? null
+        : null;
+    const operation =
+      activeOperation ??
+      pickTemplatePublishOperation(operations, publishStartedAt, knownOperationIds);
+
+    if (!operation?.id) {
+      return null;
+    }
+
+    const sample = parseTemplatePublishOperation(operation);
+
+    if (!sample) {
+      return null;
+    }
+
+    return {
+      operationId: operation.id,
+      sample,
+    };
+  }
+
   private captureTelemetrySnapshot(rawInstances: string, capturedAt = Date.now()): void {
     const instances = parseJson<IncusListInstance[]>(rawInstances);
     this.telemetryInstances = new Map(
@@ -1175,6 +1264,23 @@ class IncusProvider implements DesktopProvider {
         .map((entry) => [entry.name, entry]),
     );
     this.telemetrySnapshotAt = capturedAt;
+  }
+
+  private listRunningOperations(): IncusOperation[] {
+    const result = this.runner.execute(["query", "/1.0/operations?recursion=1"]);
+
+    if (result.status !== 0) {
+      return [];
+    }
+
+    try {
+      const response = parseJson<IncusOperationListResponse>(result.stdout);
+      return Array.isArray(response.running)
+        ? response.running
+        : [];
+    } catch {
+      return [];
+    }
   }
 
   private instanceMatchesStatus(
@@ -1940,18 +2046,55 @@ function describeTemplatePublishActivity(
 function estimateTemplatePublishProgress(
   startedAt: number,
   heartbeatMs: number,
+  diskGb: number,
 ): number {
   const elapsedMs = Date.now() - startedAt;
-  const elapsedBeats = Math.max(Math.floor(elapsedMs / Math.max(heartbeatMs, 1)), 0);
-  const estimated = TEMPLATE_PUBLISH_START_PERCENT + elapsedBeats * 4;
+  const durationMs = estimateTemplatePublishDurationMs(diskGb);
+  const span = TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT - TEMPLATE_PUBLISH_START_PERCENT;
+  const estimatedByDuration = Math.round((elapsedMs / Math.max(durationMs, 1)) * span);
+  const heartbeatFloor =
+    elapsedMs >= heartbeatMs
+      ? 1
+      : 0;
 
-  return Math.min(estimated, TEMPLATE_PUBLISH_COMPLETE_PERCENT - 2);
+  return Math.min(
+    TEMPLATE_PUBLISH_START_PERCENT + Math.max(estimatedByDuration, heartbeatFloor),
+    TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT - 1,
+  );
 }
 
-function parseTemplatePublishPercent(chunk: string): number | null {
+function estimateTemplatePublishDurationMs(diskGb: number): number {
+  const safeDiskGb = Math.max(diskGb, 1);
+  return 15_000 + safeDiskGb * 2_000;
+}
+
+function parseTemplatePublishProgressChunk(chunk: string): TemplatePublishProgressSample | null {
   const normalized = stripAnsi(chunk).replace(/\r/g, "\n");
-  const matches = [...normalized.matchAll(/\b(\d{1,3})%\b/g)];
-  const rawValue = matches.at(-1)?.[1];
+  const packMatches = [...normalized.matchAll(
+    /Image pack:\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]i?B)(?:\s*\(([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]i?B)\/s\))?/gi,
+  )];
+  const packMatch = packMatches.at(-1);
+
+  if (packMatch) {
+    const processedBytes = parseByteSize(packMatch[1], packMatch[2]);
+
+    if (processedBytes !== null) {
+      const speedBytesPerSecond =
+        packMatch[3] && packMatch[4]
+          ? parseByteSize(packMatch[3], packMatch[4])
+          : null;
+
+      return {
+        kind: "pack",
+        processedBytes,
+        speedBytesPerSecond,
+        detail: buildTemplatePackDetail(processedBytes, speedBytesPerSecond),
+      };
+    }
+  }
+
+  const exportMatches = [...normalized.matchAll(/Exporting:\s*(\d{1,3})%/gi)];
+  const rawValue = exportMatches.at(-1)?.[1];
 
   if (!rawValue) {
     return null;
@@ -1963,13 +2106,192 @@ function parseTemplatePublishPercent(chunk: string): number | null {
     return null;
   }
 
-  return Math.min(Math.max(percent, 0), 100);
+  return {
+    kind: "export",
+    percent: Math.min(Math.max(percent, 0), 100),
+    detail: `Exporting: ${Math.min(Math.max(percent, 0), 100)}%`,
+  };
 }
 
-function mapTemplatePublishPercent(percent: number): number {
+function mapTemplatePublishProgress(
+  sample: TemplatePublishProgressSample,
+  diskGb: number,
+): number {
+  if (sample.kind === "export") {
+    return mapTemplatePublishExportPercent(sample.percent);
+  }
+
+  return mapTemplatePublishPackProgress(sample.processedBytes, diskGb);
+}
+
+function mapTemplatePublishExportPercent(percent: number): number {
   const bounded = Math.min(Math.max(percent, 0), 100);
-  const span = TEMPLATE_PUBLISH_COMPLETE_PERCENT - TEMPLATE_PUBLISH_START_PERCENT;
+  const span = TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT - TEMPLATE_PUBLISH_START_PERCENT;
   return TEMPLATE_PUBLISH_START_PERCENT + Math.round((bounded / 100) * span);
+}
+
+function mapTemplatePublishPackProgress(processedBytes: number, diskGb: number): number {
+  const estimatedTotalBytes = Math.max(Math.round(Math.max(diskGb, 1) * BYTES_PER_GIB), 1);
+  const completedFraction = Math.min(Math.max(processedBytes / estimatedTotalBytes, 0), 0.95);
+  const span = TEMPLATE_PUBLISH_COMPLETE_PERCENT - TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT;
+  return TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT + Math.round(completedFraction * span);
+}
+
+function buildTemplatePackDetail(
+  processedBytes: number,
+  speedBytesPerSecond: number | null,
+): string {
+  const processedLabel = formatByteCount(processedBytes);
+
+  if (speedBytesPerSecond && speedBytesPerSecond > 0) {
+    return `Image pack: ${processedLabel} (${formatByteCount(speedBytesPerSecond)}/s)`;
+  }
+
+  return `Image pack: ${processedLabel}`;
+}
+
+function formatByteCount(bytes: number): string {
+  const absBytes = Math.max(bytes, 0);
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let unitIndex = 0;
+  let value = absBytes;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const fractionDigits = value >= 100 || unitIndex === 0
+    ? 0
+    : value >= 10
+      ? 1
+      : 2;
+
+  return `${value.toFixed(fractionDigits)} ${units[unitIndex]}`;
+}
+
+function parseByteSize(rawValue: string, rawUnit: string): number | null {
+  const value = Number.parseFloat(rawValue);
+
+  if (!Number.isFinite(value) || value < 0) {
+    return null;
+  }
+
+  const normalizedUnit = rawUnit.trim().toUpperCase();
+  const multipliers: Record<string, number> = {
+    B: 1,
+    KB: 1000,
+    MB: 1000 ** 2,
+    GB: 1000 ** 3,
+    TB: 1000 ** 4,
+    PB: 1000 ** 5,
+    KIB: 1024,
+    MIB: 1024 ** 2,
+    GIB: 1024 ** 3,
+    TIB: 1024 ** 4,
+    PIB: 1024 ** 5,
+  };
+  const multiplier = multipliers[normalizedUnit];
+
+  if (!multiplier) {
+    return null;
+  }
+
+  return Math.round(value * multiplier);
+}
+
+function pickTemplatePublishOperation(
+  operations: IncusOperation[],
+  publishStartedAt: number,
+  knownOperationIds: Set<string>,
+): IncusOperation | null {
+  const candidates = operations
+    .filter((operation) => {
+      if (!operation.id || knownOperationIds.has(operation.id)) {
+        return false;
+      }
+
+      if (!parseTemplatePublishOperation(operation)) {
+        return false;
+      }
+
+      const createdAt = parseTimestamp(operation.created_at);
+
+      if (createdAt === null) {
+        return true;
+      }
+
+      return createdAt >= publishStartedAt - 5_000;
+    })
+    .sort((left, right) => {
+      const leftCreatedAt = parseTimestamp(left.created_at) ?? Number.POSITIVE_INFINITY;
+      const rightCreatedAt = parseTimestamp(right.created_at) ?? Number.POSITIVE_INFINITY;
+      return Math.abs(leftCreatedAt - publishStartedAt) - Math.abs(rightCreatedAt - publishStartedAt);
+    });
+
+  return candidates[0] ?? null;
+}
+
+function parseTemplatePublishOperation(
+  operation: IncusOperation,
+): TemplatePublishProgressSample | null {
+  const progress = operation.metadata?.progress;
+  const detail = operation.metadata?.create_image_from_container_pack_progress;
+
+  if (progress?.stage !== "create_image_from_container_pack") {
+    return null;
+  }
+
+  const percent = parseInteger(progress.percent);
+
+  if (percent !== null) {
+    return {
+      kind: "export",
+      percent: Math.min(Math.max(percent, 0), 100),
+      detail: typeof detail === "string" && detail.trim().length > 0
+        ? detail.trim()
+        : `Exporting: ${Math.min(Math.max(percent, 0), 100)}%`,
+    };
+  }
+
+  const processedBytes = parseInteger(progress.processed);
+
+  if (processedBytes === null) {
+    return null;
+  }
+
+  const speedBytesPerSecond = parseInteger(progress.speed);
+
+  return {
+    kind: "pack",
+    processedBytes,
+    speedBytesPerSecond,
+    detail: typeof detail === "string" && detail.trim().length > 0
+      ? detail.trim()
+      : buildTemplatePackDetail(processedBytes, speedBytesPerSecond),
+  };
+}
+
+function parseInteger(value: string | undefined): number | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed)
+    ? parsed
+    : null;
+}
+
+function parseTimestamp(value: string | undefined): number | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed)
+    ? parsed
+    : null;
 }
 
 function stripAnsi(value: string): string {

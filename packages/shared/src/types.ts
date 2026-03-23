@@ -239,6 +239,10 @@ export interface UpdateTemplateInput {
   description?: string;
 }
 
+export interface UpdateVmInput {
+  name: string;
+}
+
 export interface InjectCommandInput {
   command: string;
 }

@@ -1,4 +1,8 @@
-import { collectMetrics, slugify } from "../../../packages/shared/src/helpers.js";
+import {
+  collectMetrics,
+  minimumCreateDiskGb,
+  slugify,
+} from "../../../packages/shared/src/helpers.js";
 import { statfsSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import type {
@@ -18,6 +22,7 @@ import type {
   SnapshotInput,
   TemplatePortForward,
   UpdateTemplateInput,
+  UpdateVmInput,
   UpdateVmForwardedPortsInput,
   VmDetail,
   VmCommandResult,
@@ -229,6 +234,7 @@ export class DesktopManager {
     const { state } = this.store.update((draft) => {
       const template = requireTemplate(draft, input.templateId);
       validateResources(input.resources);
+      validateTemplateCreateResources(template, input.resources);
       validateForwardedPorts(input.forwardedPorts ?? template.defaultForwardedPorts);
       const name = input.name.trim();
 
@@ -770,6 +776,41 @@ export class DesktopManager {
     }
 
     return updatedTemplate;
+  }
+
+  updateVm(vmId: string, input: UpdateVmInput): VmInstance {
+    const nextName = input.name.trim();
+
+    if (!nextName) {
+      throw new Error("VM name is required.");
+    }
+
+    let updatedVm: VmInstance | null = null;
+
+    this.store.update((draft) => {
+      const vm = requireVm(draft, vmId);
+
+      if (vm.name === nextName) {
+        updatedVm = vm;
+        return false;
+      }
+
+      const previousName = vm.name;
+      vm.name = nextName;
+      vm.lastAction = `Renamed workspace to ${nextName}`;
+      vm.updatedAt = nowIso();
+      appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+      updatedVm = vm;
+      return true;
+    });
+
+    this.publish();
+
+    if (!updatedVm) {
+      throw new Error(`VM ${vmId} was not found.`);
+    }
+
+    return updatedVm;
   }
 
   deleteTemplate(templateId: string): void {
@@ -1366,7 +1407,20 @@ function validateResources(resources: CreateVmInput["resources"]): void {
     resources.diskGb > 4096
   ) {
     throw new Error(
-      "Resources must be within sane ranges: cpu 1-96, ram 1024-262144 MB, disk 10-4096 GB.",
+      "Resources must be within sane ranges: cpu 1-96, ram 1-256 GB, disk 10-4096 GB.",
+    );
+  }
+}
+
+function validateTemplateCreateResources(
+  template: EnvironmentTemplate,
+  resources: CreateVmInput["resources"],
+): void {
+  const minimumDiskGb = minimumCreateDiskGb(template);
+
+  if (minimumDiskGb !== null && resources.diskGb < minimumDiskGb) {
+    throw new Error(
+      `Template ${template.name} requires at least ${minimumDiskGb} GB disk because it was captured from a ${minimumDiskGb} GB workspace.`,
     );
   }
 }
