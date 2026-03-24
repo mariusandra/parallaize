@@ -978,6 +978,24 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   ]);
 });
 
+test("incus provider treats a timed-out readiness probe as daemon-unreachable", () => {
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return timedOut(args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+
+  assert.equal(provider.state.available, false);
+  assert.equal(provider.state.hostStatus, "daemon-unreachable");
+  assert.match(provider.state.detail, /readiness probe timed out/i);
+});
+
 test("incus provider reads staged publish progress from the operations API", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0100-publish-heartbeat";
@@ -2664,6 +2682,19 @@ function ok(stdout: string, args: string[]) {
     status: 0,
     stdout,
     stderr: "",
+  };
+}
+
+function timedOut(args: string[]) {
+  const error = new Error("spawnSync incus ETIMEDOUT") as Error & { code?: string };
+  error.code = "ETIMEDOUT";
+
+  return {
+    args,
+    status: null,
+    stdout: "",
+    stderr: "",
+    error,
   };
 }
 

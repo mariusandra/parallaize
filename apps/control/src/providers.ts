@@ -31,6 +31,7 @@ const TEMPLATE_PUBLISH_START_PERCENT = 58;
 const TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT = 78;
 const TEMPLATE_PUBLISH_COMPLETE_PERCENT = 92;
 const BYTES_PER_GIB = 1024 ** 3;
+const INCUS_PROBE_TIMEOUT_MS = 1_000;
 
 export interface CaptureTemplateTarget {
   templateId: string;
@@ -149,7 +150,7 @@ export interface ProviderVmPowerState {
 }
 
 interface IncusCommandRunner {
-  execute(args: string[]): CommandResult;
+  execute(args: string[], options?: CommandExecutionOptions): CommandResult;
   executeStreaming?(
     args: string[],
     listeners?: CommandStreamListeners,
@@ -162,6 +163,10 @@ interface CommandResult {
   stdout: string;
   stderr: string;
   error?: Error;
+}
+
+interface CommandExecutionOptions {
+  timeoutMs?: number;
 }
 
 interface CommandStreamListeners {
@@ -1185,7 +1190,9 @@ class IncusProvider implements DesktopProvider {
   }
 
   private probeState(): ProviderState {
-    const probe = this.runner.execute(["list", "--format", "json"]);
+    const probe = this.runner.execute(["list", "--format", "json"], {
+      timeoutMs: INCUS_PROBE_TIMEOUT_MS,
+    });
 
     if (probe.status === 0) {
       this.captureTelemetrySnapshot(probe.stdout);
@@ -1500,12 +1507,13 @@ class SpawnIncusCommandRunner implements IncusCommandRunner {
     private readonly project?: string,
   ) {}
 
-  execute(args: string[]): CommandResult {
+  execute(args: string[], options?: CommandExecutionOptions): CommandResult {
     const fullArgs = this.project
       ? ["--project", this.project, ...args]
       : args;
     const result = spawnSync(this.incusBinary, fullArgs, {
       encoding: "utf8",
+      timeout: options?.timeoutMs,
     });
 
     return {
@@ -2564,6 +2572,10 @@ function describeProbeFailure(result: CommandResult): string {
     return "Incus mode requested, but the incus CLI was not found on this host.";
   }
 
+  if (isCommandTimeout(result)) {
+    return "Incus CLI was found, but the daemon did not answer before the readiness probe timed out.";
+  }
+
   const detail = result.stderr.trim() || result.error?.message || "Unknown Incus error.";
   return `Incus CLI was found, but the daemon is unavailable: ${detail}`;
 }
@@ -2571,6 +2583,10 @@ function describeProbeFailure(result: CommandResult): string {
 function classifyProbeFailure(result: CommandResult): ProviderState["hostStatus"] {
   if (result.error?.message.includes("ENOENT")) {
     return "missing-cli";
+  }
+
+  if (isCommandTimeout(result)) {
+    return "daemon-unreachable";
   }
 
   const detail = `${result.stderr} ${result.stdout}`.trim().toLowerCase();
@@ -2616,12 +2632,21 @@ function formatCommandFailure(args: string[], result: CommandResult): string {
     return "Incus mode requested, but the incus CLI was not found on this host.";
   }
 
+  if (isCommandTimeout(result)) {
+    return `incus ${args.join(" ")} timed out before the host daemon answered.`;
+  }
+
   const detail =
     result.stderr.trim() ||
     result.error?.message ||
     `Command exited with status ${result.status ?? "unknown"}.`;
 
   return `incus ${args.join(" ")} failed: ${detail}`;
+}
+
+function isCommandTimeout(result: CommandResult): boolean {
+  const errorWithCode = result.error as (Error & { code?: string }) | undefined;
+  return errorWithCode?.code === "ETIMEDOUT";
 }
 
 function isMissingInstanceFailure(message: string): boolean {

@@ -63,7 +63,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` 
 - [x] Inventory packaged-install dependencies explicitly: bundled Node runtime, Incus CLI/socket access, optional Caddy, `attr`, VM-capable QEMU/OVMF helpers, optional PostgreSQL, and the systemd/env-file layout.
 - [x] Decide first supported package targets: Ubuntu 24.04 LTS `amd64` `.deb` first, while `.deb` `arm64` plus `.rpm` `x86_64` and `aarch64` remain experimental until they are validated on live hosts.
 - [x] Design an upgrade path for packaged installs: preflight checks, state backup/export, service restart ordering, rollback expectations, and current persistence/schema expectations.
-- [ ] Install the generated Ubuntu 24.04 `amd64` `.deb` on the live Incus host and verify the packaged service units against real Incus, optional Caddy, and the packaged env file.
+- [ ] Install the generated Ubuntu 24.04 `amd64` `.deb` on a live host that uses a clean distro-managed Incus daemon and verify the packaged service units against real Incus, optional Caddy, and the packaged env file.
 - [ ] Decide whether the RPM output should stay generic or target a specific RPM family with concrete dependency metadata once a live RPM host is available.
 - [ ] Validate the generated `arm64` packages on a real `arm64` Incus/QEMU host before promoting them beyond experimental.
 - [ ] Add package-signing and tagged-release publishing once the package formats and support matrix settle.
@@ -85,12 +85,13 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` 
 
 After each completed todo step, create a commit. Use a brief commit message that summarizes what was just done in the same style as the rewritten history.
 
-1. Install and validate the generated Ubuntu 24.04 `amd64` `.deb` on the live Incus host.
+1. Install and validate the generated Ubuntu 24.04 `amd64` `.deb` on a live host with a clean distro-managed Incus daemon.
 2. Decide whether the RPM output should target a specific RPM family or stay generic for now.
 3. Validate the generated `arm64` packages on a real `arm64` Incus/QEMU host.
 
 ## Decision Log
 
+- 2026-03-24: Installed the Ubuntu 24.04 `amd64` `.deb` on the live host, confirmed the packaged systemd units boot, and found two follow-ups: the package must add `parallaize` to `incus-admin` on Ubuntu, and full Incus-path validation should happen on a clean distro-managed Incus host because this machine already had a manual Flox `incusd` bound to the same socket path.
 - 2026-03-24: Chose packaged host installs over npm-only deploys for real deployments, bundled the Node 24 runtime into the package, and made Ubuntu 24.04 `amd64` `.deb` the first supported package target while keeping `.rpm` and `arm64` outputs experimental.
 - 2026-03-22: Verified the real `incus` server boots cleanly against both JSON and PostgreSQL persistence; the PostgreSQL backend seeded and served state from the local Docker PostgreSQL stack.
 - 2026-03-22: Added a persistence admin CLI for JSON/PostgreSQL export, import, and direct copy so deployment state can be migrated without manual edits.
