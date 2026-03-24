@@ -18,6 +18,14 @@ const DEFAULT_GUEST_VNC_PORT = 5900;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 const DEFAULT_GUEST_WORKSPACE = "/root";
+const DEFAULT_VM_CREATE_HEARTBEAT_MS = 4000;
+const VM_CREATE_ALLOCATION_START_PERCENT = 18;
+const VM_CREATE_ALLOCATION_COMPLETE_PERCENT = 58;
+const VM_CREATE_CONFIGURE_PERCENT = 64;
+const VM_CREATE_GUEST_AGENT_PERCENT = 70;
+const VM_CREATE_BOOT_START_PERCENT = 76;
+const VM_CREATE_DESKTOP_WAIT_START_PERCENT = 84;
+const VM_CREATE_READY_PERCENT = 96;
 const DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS = 4000;
 const TEMPLATE_PUBLISH_START_PERCENT = 58;
 const TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT = 78;
@@ -46,6 +54,11 @@ export type CaptureTemplateProgressReporter = (
   progressPercent: number | null,
 ) => void;
 
+export type ProviderProgressReporter = (
+  message: string,
+  progressPercent: number | null,
+) => void;
+
 export type IncusImageCompression =
   | "bzip2"
   | "gzip"
@@ -64,6 +77,7 @@ export interface DesktopProvider {
   createVm(
     vm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation>;
   cloneVm(
     sourceVm: VmInstance,
@@ -267,7 +281,14 @@ class MockProvider implements DesktopProvider {
   async createVm(
     vm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation> {
+    report?.("Allocating workspace", VM_CREATE_ALLOCATION_START_PERCENT);
+    await sleep(40);
+    report?.("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
+    await sleep(40);
+    report?.("Waiting for desktop", VM_CREATE_READY_PERCENT);
+
     return {
       lastAction: `Provisioned from ${template.name}`,
       activity: [
@@ -586,6 +607,7 @@ class IncusProvider implements DesktopProvider {
   async createVm(
     vm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation> {
     this.assertAvailable();
     this.assertLaunchSource(template);
@@ -610,8 +632,56 @@ class IncusProvider implements DesktopProvider {
       `root,size=${formatDiskSize(vm.resources.diskGb)}`,
     );
 
-    this.run(initArgs);
-    this.run([
+    const emitCreateProgress = buildProgressEmitter(report);
+    const allocationStartedAt = Date.now();
+    let sawAllocationSample = false;
+    const allocationHeartbeat = setInterval(() => {
+      if (sawAllocationSample) {
+        return;
+      }
+
+      emitCreateProgress(
+        "Allocating workspace",
+        estimateVmCreateAllocationProgress(allocationStartedAt, vm.resources.diskGb),
+      );
+    }, DEFAULT_VM_CREATE_HEARTBEAT_MS);
+
+    emitCreateProgress("Allocating workspace", VM_CREATE_ALLOCATION_START_PERCENT);
+
+    const handleCreateStreamChunk = (chunk: string) => {
+      const sample = parseVmCreateProgressChunk(chunk);
+
+      if (!sample) {
+        return;
+      }
+
+      if (sample.percent !== null) {
+        sawAllocationSample = true;
+      }
+
+      emitCreateProgress(
+        sample.detail ? `Allocating workspace (${sample.detail})` : "Allocating workspace",
+        sample.percent === null
+          ? estimateVmCreateAllocationProgress(allocationStartedAt, vm.resources.diskGb)
+          : mapPercentToRange(
+              sample.percent,
+              VM_CREATE_ALLOCATION_START_PERCENT,
+              VM_CREATE_ALLOCATION_COMPLETE_PERCENT,
+            ),
+      );
+    };
+
+    try {
+      await this.runAsync(initArgs, {
+        onStdout: handleCreateStreamChunk,
+        onStderr: handleCreateStreamChunk,
+      });
+    } finally {
+      clearInterval(allocationHeartbeat);
+    }
+
+    emitCreateProgress("Configuring guest", VM_CREATE_CONFIGURE_PERCENT);
+    await this.runAsync([
       "config",
       "set",
       vm.providerRef,
@@ -621,10 +691,12 @@ class IncusProvider implements DesktopProvider {
         maxUserInstances: this.guestInotifyMaxUserInstances,
       }),
     ]);
-    this.ensureAgentDevice(vm.providerRef);
-    this.run(["start", vm.providerRef]);
+    emitCreateProgress("Preparing guest agent", VM_CREATE_GUEST_AGENT_PERCENT);
+    await this.ensureAgentDeviceAsync(vm.providerRef);
+    emitCreateProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
+    await this.runAsync(["start", vm.providerRef]);
 
-    const session = await this.resolveSession(vm.providerRef);
+    const session = await this.resolveSession(vm.providerRef, emitCreateProgress);
 
     return {
       lastAction: `Provisioned from ${template.name}`,
@@ -666,9 +738,9 @@ class IncusProvider implements DesktopProvider {
       `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
     );
 
-    this.run(copyArgs);
-    this.ensureAgentDevice(targetVm.providerRef);
-    this.run(["start", targetVm.providerRef]);
+    await this.runAsync(copyArgs);
+    await this.ensureAgentDeviceAsync(targetVm.providerRef);
+    await this.runAsync(["start", targetVm.providerRef]);
 
     const session = await this.resolveSession(targetVm.providerRef);
 
@@ -687,8 +759,8 @@ class IncusProvider implements DesktopProvider {
 
   async startVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
-    this.ensureAgentDevice(vm.providerRef);
-    this.run(["start", vm.providerRef]);
+    await this.ensureAgentDeviceAsync(vm.providerRef);
+    await this.runAsync(["start", vm.providerRef]);
     const session = await this.resolveSession(vm.providerRef);
 
     return {
@@ -851,9 +923,9 @@ class IncusProvider implements DesktopProvider {
       `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
     );
 
-    this.run(copyArgs);
-    this.ensureAgentDevice(targetVm.providerRef);
-    this.run(["start", targetVm.providerRef]);
+    await this.runAsync(copyArgs);
+    await this.ensureAgentDeviceAsync(targetVm.providerRef);
+    await this.runAsync(["start", targetVm.providerRef]);
 
     const session = await this.resolveSession(targetVm.providerRef);
 
@@ -883,13 +955,13 @@ class IncusProvider implements DesktopProvider {
       this.stopInstance(vm.providerRef);
     }
 
-    this.run(["snapshot", "restore", vm.providerRef, snapshotName]);
-    this.ensureAgentDevice(vm.providerRef);
+    await this.runAsync(["snapshot", "restore", vm.providerRef, snapshotName]);
+    await this.ensureAgentDeviceAsync(vm.providerRef);
 
     let session: VmSession | null = null;
 
     if (wasRunning) {
-      this.run(["start", vm.providerRef]);
+      await this.runAsync(["start", vm.providerRef]);
       session = await this.resolveSession(vm.providerRef);
     }
 
@@ -1146,6 +1218,32 @@ class IncusProvider implements DesktopProvider {
     this.run(addArgs);
   }
 
+  private async ensureAgentDeviceAsync(instanceName: string): Promise<void> {
+    const addArgs = [
+      "config",
+      "device",
+      "add",
+      instanceName,
+      "agent",
+      "disk",
+      "source=agent:config",
+    ];
+    const result = await this.executeAsync(addArgs);
+
+    if (result.status === 0) {
+      return;
+    }
+
+    const detail = `${result.stderr}\n${result.stdout}`;
+
+    if (!detail.includes("already exists")) {
+      throw new Error(formatCommandFailure(addArgs, result));
+    }
+
+    await this.runAsync(["config", "device", "remove", instanceName, "agent"]);
+    await this.runAsync(addArgs);
+  }
+
   private stopInstance(instanceName: string): void {
     const stopArgs = ["stop", instanceName, "--timeout", "30"];
     const stopResult = this.runner.execute(stopArgs);
@@ -1164,17 +1262,23 @@ class IncusProvider implements DesktopProvider {
     }
   }
 
-  private async resolveSession(instanceName: string): Promise<VmSession | null> {
+  private async resolveSession(
+    instanceName: string,
+    report?: ProviderProgressReporter,
+  ): Promise<VmSession | null> {
     let address: string | null = null;
+    const waitStartedAt = Date.now();
+    const emitProgress = report;
 
     for (let attempt = 0; attempt < 60; attempt += 1) {
-      const info = this.inspectInstance(instanceName);
+      const info = await this.inspectInstanceAsync(instanceName);
       address = findGlobalGuestAddress(info);
 
       if (
         address &&
         (await this.guestPortProbe.probe(address, this.guestVncPort))
       ) {
+        emitProgress?.("Desktop session ready", VM_CREATE_READY_PERCENT);
         return buildVncSession(address, this.guestVncPort);
       }
 
@@ -1182,6 +1286,10 @@ class IncusProvider implements DesktopProvider {
         break;
       }
 
+      emitProgress?.(
+        address ? "Waiting for desktop" : "Waiting for guest network",
+        estimateVmCreateDesktopWaitProgress(waitStartedAt),
+      );
       await sleep(5000);
     }
 
@@ -1200,6 +1308,25 @@ class IncusProvider implements DesktopProvider {
 
   private inspectInstanceSafe(instanceName: string): IncusListInstance | null {
     const result = this.run(["list", instanceName, "--format", "json"]);
+    const instances = parseJson<IncusListInstance[]>(result.stdout);
+    const match =
+      instances.find((entry) => entry.name === instanceName) ?? instances[0] ?? null;
+
+    return match;
+  }
+
+  private async inspectInstanceAsync(instanceName: string): Promise<IncusListInstance> {
+    const match = await this.inspectInstanceSafeAsync(instanceName);
+
+    if (!match) {
+      throw new Error(`Incus did not return instance metadata for ${instanceName}.`);
+    }
+
+    return match;
+  }
+
+  private async inspectInstanceSafeAsync(instanceName: string): Promise<IncusListInstance | null> {
+    const result = await this.runAsync(["list", instanceName, "--format", "json"]);
     const instances = parseJson<IncusListInstance[]>(result.stdout);
     const match =
       instances.find((entry) => entry.name === instanceName) ?? instances[0] ?? null;
@@ -1293,6 +1420,28 @@ class IncusProvider implements DesktopProvider {
 
   private run(args: string[]): CommandResult {
     const result = this.runner.execute(args);
+
+    if (result.status === 0) {
+      return result;
+    }
+
+    throw new Error(formatCommandFailure(args, result));
+  }
+
+  private async executeAsync(
+    args: string[],
+    listeners?: CommandStreamListeners,
+  ): Promise<CommandResult> {
+    return this.runner.executeStreaming
+      ? this.runner.executeStreaming(args, listeners)
+      : this.runner.execute(args);
+  }
+
+  private async runAsync(
+    args: string[],
+    listeners?: CommandStreamListeners,
+  ): Promise<CommandResult> {
+    const result = await this.executeAsync(args, listeners);
 
     if (result.status === 0) {
       return result;
@@ -2198,6 +2347,82 @@ function parseByteSize(rawValue: string, rawUnit: string): number | null {
   }
 
   return Math.round(value * multiplier);
+}
+
+function buildProgressEmitter(
+  report?: ProviderProgressReporter,
+): ProviderProgressReporter {
+  let lastKey = "";
+
+  return (message, progressPercent) => {
+    if (!report) {
+      return;
+    }
+
+    const normalizedPercent =
+      progressPercent === null || !Number.isFinite(progressPercent)
+        ? null
+        : Math.min(Math.max(Math.round(progressPercent), 0), 100);
+    const key = `${message}\u0000${normalizedPercent ?? "null"}`;
+
+    if (key === lastKey) {
+      return;
+    }
+
+    lastKey = key;
+    report(message, normalizedPercent);
+  };
+}
+
+function parseVmCreateProgressChunk(
+  chunk: string,
+): { detail: string | null; percent: number | null } | null {
+  const detail = stripAnsi(chunk)
+    .split(/[\r\n]+/u)
+    .map((line) => line.trim().replace(/\s+/gu, " "))
+    .filter((line) => line.length > 0)
+    .at(-1);
+
+  if (!detail) {
+    return null;
+  }
+
+  const percentMatch = detail.match(/(\d{1,3})%/u);
+
+  return {
+    detail,
+    percent:
+      percentMatch && Number.isFinite(Number(percentMatch[1]))
+        ? Math.min(Math.max(Number(percentMatch[1]), 0), 100)
+        : null,
+  };
+}
+
+function estimateVmCreateAllocationProgress(
+  startedAt: number,
+  diskGb: number,
+): number {
+  const elapsedMs = Math.max(0, Date.now() - startedAt);
+  const estimatedDurationMs = Math.max(45_000, 15_000 + diskGb * 2_250);
+  const fraction = Math.min(elapsedMs / estimatedDurationMs, 0.92);
+
+  return VM_CREATE_ALLOCATION_START_PERCENT + (
+    fraction * (VM_CREATE_ALLOCATION_COMPLETE_PERCENT - VM_CREATE_ALLOCATION_START_PERCENT)
+  );
+}
+
+function estimateVmCreateDesktopWaitProgress(startedAt: number): number {
+  const elapsedMs = Math.max(0, Date.now() - startedAt);
+  const fraction = Math.min(elapsedMs / (60 * 5_000), 0.96);
+
+  return VM_CREATE_DESKTOP_WAIT_START_PERCENT + (
+    fraction * (VM_CREATE_READY_PERCENT - VM_CREATE_DESKTOP_WAIT_START_PERCENT)
+  );
+}
+
+function mapPercentToRange(percent: number, start: number, end: number): number {
+  const clampedPercent = Math.min(Math.max(percent, 0), 100);
+  return start + (((end - start) * clampedPercent) / 100);
 }
 
 function pickTemplatePublishOperation(

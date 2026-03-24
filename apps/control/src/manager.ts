@@ -272,12 +272,8 @@ export class DesktopManager {
 
     void this.runJob(jobRecord.id, async (report) => {
       try {
-        report("Allocating workspace", 18);
-        await sleep(550);
-        report("Provisioning VM", 42);
         const template = requireTemplate(state, vmRecord.templateId);
-        const mutation = await this.provider.createVm(vmRecord, template);
-        report("Booting desktop", 86);
+        const mutation = await this.provider.createVm(vmRecord, template, report);
 
         this.store.update((draft) => {
           const vm = this.requireVm(draft, vmRecord.id);

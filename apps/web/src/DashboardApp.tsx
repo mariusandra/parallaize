@@ -295,6 +295,7 @@ export function DashboardApp(): JSX.Element {
       owner: "none",
       vmId: null,
     });
+  const [jobTimingNowMs, setJobTimingNowMs] = useState(() => Date.now());
   const [railResizeActive, setRailResizeActive] = useState(false);
   const [sidepanelResizeActive, setSidepanelResizeActive] = useState(false);
   const selectedVmIdRef = useRef<string | null>(null);
@@ -639,6 +640,24 @@ export function DashboardApp(): JSX.Element {
       window.clearInterval(interval);
     };
   }, [authState]);
+
+  useEffect(() => {
+    const hasActiveJobs =
+      summary?.jobs.some((job) => job.status === "queued" || job.status === "running") ?? false;
+
+    if (!hasActiveJobs) {
+      return;
+    }
+
+    setJobTimingNowMs(Date.now());
+    const interval = window.setInterval(() => {
+      setJobTimingNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [summary?.jobs]);
 
   useEffect(() => {
     if (!summary?.templates.length) {
@@ -2349,7 +2368,7 @@ export function DashboardApp(): JSX.Element {
       ? prominentJob
       : null;
   const visibleProminentJobTiming = visibleProminentJob
-    ? formatActiveJobTiming(visibleProminentJob.job)
+    ? formatActiveJobTiming(visibleProminentJob.job, jobTimingNowMs)
     : null;
 
   return (
@@ -2663,6 +2682,7 @@ export function DashboardApp(): JSX.Element {
                   onHideInspector={() => setVmSidepanelCollapsed(vm.id, true)}
                   onOpen={selectVm}
                   onInspect={inspectVm}
+                  onRename={handleRenameVm}
                   onSnapshot={handleSnapshot}
                   onStartStop={handleVmAction}
                   onToggleMenu={(vmId) => {
@@ -2698,8 +2718,8 @@ export function DashboardApp(): JSX.Element {
                   <div className="workspace-stage__placeholder">
                     <div className="workspace-stage__placeholder-block skeleton-shell" />
                   </div>
-                ) : getVmDesktopBootState(currentDetail) ? (
-                  <WorkspaceBootSurface state={getVmDesktopBootState(currentDetail)!} />
+                ) : getVmDesktopBootState(currentDetail, jobTimingNowMs) ? (
+                  <WorkspaceBootSurface state={getVmDesktopBootState(currentDetail, jobTimingNowMs)!} />
                 ) : currentDetail.vm.session?.kind === "vnc" &&
                   currentDetail.vm.session.webSocketPath ? (
                   <div
@@ -2995,6 +3015,7 @@ interface VmTileProps {
   onHideInspector: () => void;
   onInspect: (vmId: string) => void;
   onOpen: (vmId: string) => void;
+  onRename: (vm: VmInstance) => Promise<void>;
   onSnapshot: (vm: VmInstance) => Promise<void>;
   onStartStop: (vmId: string, action: "start" | "stop") => Promise<void>;
   onToggleMenu: (vmId: string) => void;
@@ -3071,6 +3092,7 @@ function VmTile({
   onHideInspector,
   onInspect,
   onOpen,
+  onRename,
   onSnapshot,
   onStartStop,
   onToggleMenu,
@@ -3156,6 +3178,17 @@ function VmTile({
             disabled={busy}
           >
             Clone
+          </button>
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              void onRename(vm);
+            }}
+            disabled={busy}
+          >
+            Rename
           </button>
           <button
             className="menu-action"
@@ -5272,6 +5305,7 @@ function formatJobKindLabel(kind: DashboardSummary["jobs"][number]["kind"]): str
 
 function formatActiveJobTiming(
   job: Pick<DashboardSummary["jobs"][number], "createdAt" | "progressPercent">,
+  nowMs = Date.now(),
 ): string | null {
   const createdAt = Date.parse(job.createdAt);
 
@@ -5279,7 +5313,7 @@ function formatActiveJobTiming(
     return null;
   }
 
-  const elapsedMs = Math.max(0, Date.now() - createdAt);
+  const elapsedMs = Math.max(0, nowMs - createdAt);
   const timingParts = [`Elapsed ${formatDurationShort(elapsedMs)}`];
   const remainingMs = estimateRemainingDurationMs(elapsedMs, job.progressPercent ?? null);
 
@@ -5339,7 +5373,10 @@ interface DesktopBootState {
   timingCopy: string | null;
 }
 
-function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
+function getVmDesktopBootState(
+  detail: VmDetail,
+  nowMs = Date.now(),
+): DesktopBootState | null {
   const failedBootJob = detail.recentJobs.find(
     (job) =>
       (job.kind === "create" ||
@@ -5371,7 +5408,7 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
       label: "Booting workspace",
       message: activeJob.message || "Starting the VM and waiting for the desktop.",
       progressPercent: activeJob.progressPercent ?? null,
-      timingCopy: formatActiveJobTiming(activeJob),
+      timingCopy: formatActiveJobTiming(activeJob, nowMs),
     };
   }
 
@@ -5380,7 +5417,7 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
       label: "Cloning workspace",
       message: activeJob.message || "Cloning the workspace and preparing the desktop.",
       progressPercent: activeJob.progressPercent ?? null,
-      timingCopy: formatActiveJobTiming(activeJob),
+      timingCopy: formatActiveJobTiming(activeJob, nowMs),
     };
   }
 
@@ -5390,7 +5427,7 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
       message:
         activeJob.message || "Launching the workspace from a snapshot and waiting for the desktop.",
       progressPercent: activeJob.progressPercent ?? null,
-      timingCopy: formatActiveJobTiming(activeJob),
+      timingCopy: formatActiveJobTiming(activeJob, nowMs),
     };
   }
 
@@ -5398,7 +5435,7 @@ function getVmDesktopBootState(detail: VmDetail): DesktopBootState | null {
     label: "Creating workspace",
     message: activeJob?.message || "Provisioning the VM and waiting for the desktop.",
     progressPercent: activeJob?.progressPercent ?? null,
-    timingCopy: activeJob ? formatActiveJobTiming(activeJob) : null,
+    timingCopy: activeJob ? formatActiveJobTiming(activeJob, nowMs) : null,
   };
 }
 

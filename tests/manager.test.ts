@@ -581,41 +581,57 @@ test("frame renderer emits SVG markup for a seeded VM", () => {
 test("incus provider builds real lifecycle commands and VNC metadata", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0099-delta-lab";
-  const runner = {
-    execute(args: string[]) {
-      calls.push(args);
+  const reports: Array<{ message: string; progressPercent: number | null }> = [];
+  const executeResult = (args: string[]) => {
+    if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+      return ok("[]", args);
+    }
 
-      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
-        return ok("[]", args);
-      }
-
-      if (args[0] === "list" && args[1] === instanceName) {
-        return ok(
-          JSON.stringify([
-            {
-              name: instanceName,
+    if (args[0] === "list" && args[1] === instanceName) {
+      return ok(
+        JSON.stringify([
+          {
+            name: instanceName,
+            status: "Running",
+            state: {
               status: "Running",
-              state: {
-                status: "Running",
-                network: {
-                  enp5s0: {
-                    addresses: [
-                      {
-                        family: "inet",
-                        scope: "global",
-                        address: "10.55.0.12",
-                      },
-                    ],
-                  },
+              network: {
+                enp5s0: {
+                  addresses: [
+                    {
+                      family: "inet",
+                      scope: "global",
+                      address: "10.55.0.12",
+                    },
+                  ],
                 },
               },
             },
-          ]),
-          args,
-        );
+          },
+        ]),
+        args,
+      );
+    }
+
+    return ok("", args);
+  };
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+      return executeResult(args);
+    },
+    async executeStreaming(
+      args: string[],
+      listeners?: { onStdout?(chunk: string): void; onStderr?(chunk: string): void },
+    ) {
+      calls.push(args);
+
+      if (args[0] === "init") {
+        listeners?.onStderr?.("Allocating image: 20%\r");
+        listeners?.onStderr?.("Allocating image: 80%\r");
       }
 
-      return ok("", args);
+      return executeResult(args);
     },
   };
 
@@ -680,7 +696,12 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     activityLog: [],
   };
 
-  const createMutation = await provider.createVm(vm, template);
+  const createMutation = await provider.createVm(vm, template, (message, progressPercent) => {
+    reports.push({
+      message,
+      progressPercent,
+    });
+  });
   const initCall = calls.find((args) => args[0] === "init");
   const configSetCall = calls.find(
     (args) =>
@@ -735,6 +756,21 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     "source=agent:config",
   ]);
   assert.deepEqual(startCall, ["start", instanceName]);
+  assert.ok(
+    reports.some(
+      (entry) =>
+        entry.message.startsWith("Allocating workspace") &&
+        (entry.progressPercent ?? 0) > 20 &&
+        (entry.progressPercent ?? 100) < 58,
+    ),
+  );
+  assert.ok(
+    reports.some(
+      (entry) =>
+        entry.message === "Desktop session ready" &&
+        (entry.progressPercent ?? 0) >= 96,
+    ),
+  );
 
   const snapshot = await provider.captureTemplate(vm, {
     templateId: "tpl-0099",
