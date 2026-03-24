@@ -181,6 +181,8 @@ interface GuestPortProbe {
 interface IncusListInstance {
   name?: string;
   status?: string;
+  devices?: Record<string, IncusInstanceDevice>;
+  expanded_devices?: Record<string, IncusInstanceDevice>;
   state?: {
     status?: string;
     network?: Record<
@@ -202,6 +204,13 @@ interface IncusListInstance {
       allocated_time?: number;
     };
   };
+}
+
+interface IncusInstanceDevice {
+  path?: string;
+  pool?: string;
+  source?: string;
+  type?: string;
 }
 
 interface IncusOperationProgressMetadata {
@@ -633,8 +642,6 @@ class IncusProvider implements DesktopProvider {
       `limits.cpu=${vm.resources.cpu}`,
       "-c",
       `limits.memory=${formatMemoryLimit(vm.resources.ramMb)}`,
-      "-d",
-      `root,size=${formatDiskSize(vm.resources.diskGb)}`,
     );
 
     const emitCreateProgress = buildProgressEmitter(report);
@@ -685,6 +692,7 @@ class IncusProvider implements DesktopProvider {
       clearInterval(allocationHeartbeat);
     }
 
+    await this.setRootDiskSizeAsync(vm.providerRef, vm.resources.diskGb);
     emitCreateProgress("Configuring guest", VM_CREATE_CONFIGURE_PERCENT);
     await this.runAsync([
       "config",
@@ -739,11 +747,10 @@ class IncusProvider implements DesktopProvider {
       `limits.cpu=${targetVm.resources.cpu}`,
       "-c",
       `limits.memory=${formatMemoryLimit(targetVm.resources.ramMb)}`,
-      "-d",
-      `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
     );
 
     await this.runAsync(copyArgs);
+    await this.setRootDiskSizeAsync(targetVm.providerRef, targetVm.resources.diskGb);
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
     await this.runAsync(["start", targetVm.providerRef]);
 
@@ -848,14 +855,7 @@ class IncusProvider implements DesktopProvider {
 
     if (resources.diskGb !== vm.resources.diskGb) {
       const nextDiskSize = formatDiskSize(resources.diskGb);
-      await this.runAsync([
-        "config",
-        "device",
-        "set",
-        vm.providerRef,
-        "root",
-        `size=${nextDiskSize}`,
-      ]);
+      await this.setRootDiskSizeAsync(vm.providerRef, resources.diskGb);
       changedResources.push(`disk=${nextDiskSize}`);
     }
 
@@ -934,11 +934,10 @@ class IncusProvider implements DesktopProvider {
       `limits.cpu=${targetVm.resources.cpu}`,
       "-c",
       `limits.memory=${formatMemoryLimit(targetVm.resources.ramMb)}`,
-      "-d",
-      `root,size=${formatDiskSize(targetVm.resources.diskGb)}`,
     );
 
     await this.runAsync(copyArgs);
+    await this.setRootDiskSizeAsync(targetVm.providerRef, targetVm.resources.diskGb);
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
     await this.runAsync(["start", targetVm.providerRef]);
 
@@ -1367,6 +1366,69 @@ class IncusProvider implements DesktopProvider {
       instances.find((entry) => entry.name === instanceName) ?? instances[0] ?? null;
 
     return match;
+  }
+
+  private async inspectInstanceExpandedDevicesAsync(
+    instanceName: string,
+  ): Promise<Record<string, IncusInstanceDevice>> {
+    const result = await this.runAsync([
+      "query",
+      `/1.0/instances/${encodeURIComponent(instanceName)}`,
+    ]);
+    const instance = parseJson<IncusListInstance>(result.stdout);
+    const devices = instance.expanded_devices ?? instance.devices ?? null;
+
+    if (!devices || Object.keys(devices).length === 0) {
+      throw new Error(`Incus did not expose expanded devices for ${instanceName}.`);
+    }
+
+    return devices;
+  }
+
+  private async resolveRootDiskDeviceNameAsync(instanceName: string): Promise<string> {
+    const devices = await this.inspectInstanceExpandedDevicesAsync(instanceName);
+    const match = Object.entries(devices).find(
+      ([, device]) => device.type === "disk" && device.path === "/",
+    );
+
+    if (!match) {
+      throw new Error(`Incus did not expose a root disk device for ${instanceName}.`);
+    }
+
+    return match[0];
+  }
+
+  private async setRootDiskSizeAsync(instanceName: string, diskGb: number): Promise<void> {
+    const rootDeviceName = await this.resolveRootDiskDeviceNameAsync(instanceName);
+    const sizeArg = `size=${formatDiskSize(diskGb)}`;
+    const overrideArgs = [
+      "config",
+      "device",
+      "override",
+      instanceName,
+      rootDeviceName,
+      sizeArg,
+    ];
+    const result = await this.executeAsync(overrideArgs);
+
+    if (result.status === 0) {
+      return;
+    }
+
+    const detail = `${result.stderr}\n${result.stdout}`;
+
+    if (!detail.includes("already exists")) {
+      throw new Error(formatCommandFailure(overrideArgs, result));
+    }
+
+    await this.runAsync([
+      "config",
+      "device",
+      "set",
+      instanceName,
+      rootDeviceName,
+      sizeArg,
+    ]);
   }
 
   private getTelemetryInstanceInfo(instanceName: string): IncusListInstance | null {

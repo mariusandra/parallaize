@@ -767,6 +767,10 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
       return ok("[]", args);
     }
 
+    if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+      return expandedRootDevice(args, "osdisk");
+    }
+
     if (args[0] === "list" && args[1] === instanceName) {
       return ok(
         JSON.stringify([
@@ -898,6 +902,13 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
       args[3] === instanceName &&
       args[4] === "agent",
   );
+  const rootDiskOverrideCall = calls.find(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "device" &&
+      args[2] === "override" &&
+      args[3] === instanceName,
+  );
   const startCall = calls.find(
     (args) => args[0] === "start" && args[1] === instanceName,
   );
@@ -912,8 +923,14 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     "limits.cpu=4",
     "-c",
     "limits.memory=8192MiB",
-    "-d",
-    "root,size=60GiB",
+  ]);
+  assert.deepEqual(rootDiskOverrideCall, [
+    "config",
+    "device",
+    "override",
+    instanceName,
+    "osdisk",
+    "size=60GiB",
   ]);
   assert.ok(configSetCall);
   assert.match(configSetCall?.[4] ?? "", /x11vnc/);
@@ -1409,6 +1426,104 @@ test("incus provider resource resize only updates changed limits and preserves t
   ]);
 });
 
+test("incus provider resizes the expanded root disk device even when it is not named root", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0200-resize-disk";
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args, "osdisk");
+      }
+
+      if (
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "override" &&
+        args[3] === instanceName &&
+        args[4] === "osdisk"
+      ) {
+        return {
+          args,
+          status: 1,
+          stdout: "",
+          stderr: "Error: The device already exists",
+        };
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0200",
+    name: "resize-disk",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 42,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.resizeVm(vm, {
+    cpu: 4,
+    ramMb: 8192,
+    diskGb: 90,
+  });
+
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "override" &&
+        args[3] === instanceName &&
+        args[4] === "osdisk" &&
+        args[5] === "size=90GiB",
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "set" &&
+        args[3] === instanceName &&
+        args[4] === "osdisk" &&
+        args[5] === "size=90GiB",
+    ),
+  );
+  assert.deepEqual(mutation.activity, [
+    `incus: resized ${instanceName}`,
+    "limits: disk=90GiB",
+  ]);
+});
+
 test("incus provider targets the configured storage pool for creates and copies", async () => {
   const calls: string[][] = [];
   const sourceInstanceName = "parallaize-vm-0200-storage-origin";
@@ -1457,6 +1572,17 @@ test("incus provider targets the configured storage pool for creates and copies"
           ]),
           args,
         );
+      }
+
+      if (
+        args[0] === "query" &&
+        [
+          `/1.0/instances/${sourceInstanceName}`,
+          `/1.0/instances/${targetInstanceName}`,
+          `/1.0/instances/${snapshotTargetInstanceName}`,
+        ].includes(args[1])
+      ) {
+        return expandedRootDevice(args);
       }
 
       return ok("", args);
@@ -1592,6 +1718,36 @@ test("incus provider targets the configured storage pool for creates and copies"
         args.includes("fastpool"),
     ),
   );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "override" &&
+        args[3] === sourceInstanceName &&
+        args[5] === "size=60GiB",
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "override" &&
+        args[3] === targetInstanceName &&
+        args[5] === "size=60GiB",
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "override" &&
+        args[3] === snapshotTargetInstanceName &&
+        args[5] === "size=60GiB",
+    ),
+  );
 });
 
 test("incus provider launches and restores snapshots with VM commands", async () => {
@@ -1641,6 +1797,10 @@ test("incus provider launches and restores snapshots with VM commands", async ()
           ]),
           args,
         );
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${targetInstanceName}`) {
+        return expandedRootDevice(args, "disk0");
       }
 
       if (
@@ -1767,6 +1927,17 @@ test("incus provider launches and restores snapshots with VM commands", async ()
   );
   assert.ok(copyCall);
   assert.ok(!copyCall?.includes("--instance-only"));
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "config" &&
+        args[1] === "device" &&
+        args[2] === "override" &&
+        args[3] === targetInstanceName &&
+        args[4] === "disk0" &&
+        args[5] === "size=60GiB",
+    ),
+  );
 
   const restoreMutation = await provider.restoreVmToSnapshot(sourceVm, snapshot);
   assert.equal(restoreMutation.session?.display, "10.55.0.21:5901");
@@ -1797,6 +1968,10 @@ test("incus provider falls back to IPv6 guest metadata when IPv4 is absent", asy
     execute(args: string[]) {
       if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
         return ok("[]", args);
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args);
       }
 
       if (args[0] === "list" && args[1] === instanceName) {
@@ -1917,6 +2092,10 @@ test("incus provider only marks a guest VNC session ready after an RFB handshake
     execute(args: string[]) {
       if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
         return ok("[]", args);
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args);
       }
 
       if (args[0] === "list" && args[1] === instanceName) {
@@ -2178,6 +2357,14 @@ test("manager derives browser VNC and forwarded service routes for incus VMs", a
         return ok("[]", args);
       }
 
+      if (
+        args[0] === "query" &&
+        typeof args[1] === "string" &&
+        args[1].startsWith("/1.0/instances/parallaize-vm-")
+      ) {
+        return expandedRootDevice(args);
+      }
+
       if (args[0] === "list" && typeof args[1] === "string" && args[1].startsWith("parallaize-vm-")) {
         return ok(
           JSON.stringify([
@@ -2283,6 +2470,15 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
 
       if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
         return ok("[]", args);
+      }
+
+      if (
+        args[0] === "query" &&
+        [sourceInstanceName, cloneInstanceName].some(
+          (instanceName) => args[1] === `/1.0/instances/${instanceName}`,
+        )
+      ) {
+        return expandedRootDevice(args);
       }
 
       if (args[0] === "list" && args[2] === "--format" && args[3] === "json") {
@@ -2683,6 +2879,21 @@ function ok(stdout: string, args: string[]) {
     stdout,
     stderr: "",
   };
+}
+
+function expandedRootDevice(args: string[], deviceName = "root") {
+  return ok(
+    JSON.stringify({
+      expanded_devices: {
+        [deviceName]: {
+          type: "disk",
+          path: "/",
+          pool: "default",
+        },
+      },
+    }),
+    args,
+  );
 }
 
 function timedOut(args: string[]) {
