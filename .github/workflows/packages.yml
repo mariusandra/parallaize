@@ -1,0 +1,52 @@
+name: packages
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        format:
+          - deb
+          - rpm
+        arch:
+          - amd64
+          - arm64
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.13.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare package artifacts
+        run: pnpm package:prepare
+
+      - name: Build package
+        run: node scripts/build-packages.mjs --format ${{ matrix.format }} --arch ${{ matrix.arch }}
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: parallaize-${{ matrix.format }}-${{ matrix.arch }}
+          path: artifacts/packages/
+          if-no-files-found: error

@@ -16,7 +16,13 @@
     "persistence:import": "pnpm build && node dist/apps/control/src/persistence-cli.js import",
     "persistence:copy": "pnpm build && node dist/apps/control/src/persistence-cli.js copy",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm build && node --test dist/tests/*.test.js"
+    "test": "pnpm build && node --test dist/tests/*.test.js",
+    "package:prepare": "pnpm build && node scripts/build-package-runtime.mjs",
+    "package:deb": "pnpm package:prepare && node scripts/build-packages.mjs --format deb --arch amd64",
+    "package:deb:arm64": "pnpm package:prepare && node scripts/build-packages.mjs --format deb --arch arm64",
+    "package:rpm": "pnpm package:prepare && node scripts/build-packages.mjs --format rpm --arch amd64",
+    "package:rpm:arm64": "pnpm package:prepare && node scripts/build-packages.mjs --format rpm --arch arm64",
+    "package:release": "pnpm package:prepare && node scripts/build-packages.mjs --format deb,rpm --arch amd64,arm64"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.13",

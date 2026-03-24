@@ -1,0 +1,22 @@
+[Unit]
+Description=Parallaize control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=parallaize
+Group=parallaize
+Environment=HOME=/var/lib/parallaize
+EnvironmentFile=/etc/parallaize/parallaize.env
+WorkingDirectory=/usr/lib/parallaize
+ExecStart=/usr/bin/parallaize
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+StateDirectory=parallaize
+
+[Install]
+WantedBy=multi-user.target

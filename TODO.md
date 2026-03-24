@@ -1,7 +1,7 @@
 # Parallaize TODO
 
-Last updated: 2026-03-23
-Current focus: validate PostgreSQL persistence on the live Incus path, codify guest template/VNC bootstrap, tighten operator-session hardening, and scope packaging plus host-routed service access.
+Last updated: 2026-03-24
+Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` and `arm64` artifacts buildable from the same flow, and then validate the packaged install on a live Incus host.
 
 ## Current State
 
@@ -27,6 +27,7 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 - [x] Pluggable persistence backend with PostgreSQL support and JSON fallback
 - [x] Browser-to-guest and guest-to-browser clipboard flow for the main noVNC session, with browser-API fallback handling
 - [x] Configurable guest bootstrap defaults for higher inotify watcher limits in new Incus VMs
+- [x] Packaged-install foundation with bundled Node runtime, staged `.deb` and `.rpm` builders, packaged systemd/Caddy assets, and a packaging decision note
 
 ## Priority Backlog
 
@@ -58,10 +59,14 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 
 ### P2: Packaging And Upgrades
 
-- [ ] Write a packaging decision note comparing Ubuntu `.deb` installs against an npm-only install path; npm should likely remain the dev/operator source path, while deployed installs probably need a real system package because Incus, Caddy, systemd, and host QEMU helpers live outside Node.
-- [ ] Inventory packaged-install dependencies explicitly: Node runtime or bundled binary, Incus CLI/socket access, Caddy, `attr`, VM-capable QEMU/OVMF helpers, optional PostgreSQL, and the systemd/env-file layout.
-- [ ] Decide first supported package targets, likely Ubuntu 24.04 LTS `amd64` first, then add `arm64` only after the live Incus/QEMU path is verified on that architecture.
-- [ ] Design an upgrade path for packaged installs: preflight checks, state backup/export, service restart ordering, rollback expectations, and how persistence/schema changes are handled safely.
+- [x] Write a packaging decision note comparing Ubuntu `.deb` installs against an npm-only install path; npm should remain the dev/operator source path, while deployed installs need a real system package because systemd, Incus access, QEMU helpers, and optional Caddy live outside Node.
+- [x] Inventory packaged-install dependencies explicitly: bundled Node runtime, Incus CLI/socket access, optional Caddy, `attr`, VM-capable QEMU/OVMF helpers, optional PostgreSQL, and the systemd/env-file layout.
+- [x] Decide first supported package targets: Ubuntu 24.04 LTS `amd64` `.deb` first, while `.deb` `arm64` plus `.rpm` `x86_64` and `aarch64` remain experimental until they are validated on live hosts.
+- [x] Design an upgrade path for packaged installs: preflight checks, state backup/export, service restart ordering, rollback expectations, and current persistence/schema expectations.
+- [ ] Install the generated Ubuntu 24.04 `amd64` `.deb` on the live Incus host and verify the packaged service units against real Incus, optional Caddy, and the packaged env file.
+- [ ] Decide whether the RPM output should stay generic or target a specific RPM family with concrete dependency metadata once a live RPM host is available.
+- [ ] Validate the generated `arm64` packages on a real `arm64` Incus/QEMU host before promoting them beyond experimental.
+- [ ] Add package-signing and tagged-release publishing once the package formats and support matrix settle.
 
 ### P2: Forwarded Service Routing
 
@@ -78,12 +83,15 @@ Current focus: validate PostgreSQL persistence on the live Incus path, codify gu
 
 ## Next Up
 
-1. Validate PostgreSQL-backed persistence against the real Incus smoke path.
-2. Document PostgreSQL backup/recovery and the expected table shape for deployed hosts.
-3. Codify the guest template/VNC bootstrap workflow so new base images are repeatable.
+After each completed todo step, create a commit. Use a brief commit message that summarizes what was just done in the same style as the rewritten history.
+
+1. Install and validate the generated Ubuntu 24.04 `amd64` `.deb` on the live Incus host.
+2. Decide whether the RPM output should target a specific RPM family or stay generic for now.
+3. Validate the generated `arm64` packages on a real `arm64` Incus/QEMU host.
 
 ## Decision Log
 
+- 2026-03-24: Chose packaged host installs over npm-only deploys for real deployments, bundled the Node 24 runtime into the package, and made Ubuntu 24.04 `amd64` `.deb` the first supported package target while keeping `.rpm` and `arm64` outputs experimental.
 - 2026-03-22: Verified the real `incus` server boots cleanly against both JSON and PostgreSQL persistence; the PostgreSQL backend seeded and served state from the local Docker PostgreSQL stack.
 - 2026-03-22: Added a persistence admin CLI for JSON/PostgreSQL export, import, and direct copy so deployment state can be migrated without manual edits.
 - 2026-03-22: Added persistence diagnostics to the store boundary, exposed them through `/api/health`, and surfaced backend/degraded-state status in the operator UI.

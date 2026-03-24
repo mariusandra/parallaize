@@ -54,8 +54,7 @@ const manager = new DesktopManager(store, provider);
 const networkBridge = new VmNetworkBridge(manager);
 manager.start();
 
-const distRoot = process.cwd();
-const staticRoot = join(distRoot, "dist", "apps", "web", "static");
+const staticRoot = join(config.appHome, "dist", "apps", "web", "static");
 const htmlPath = join(staticRoot, "index.html");
 const faviconPath = join(staticRoot, "favicon.svg");
 const sessionCookieName = "parallaize_session";

@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import process from "node:process";
 
 import type { ProviderKind } from "../../../packages/shared/src/types.js";
@@ -7,6 +7,7 @@ import type { IncusImageCompression } from "./providers.js";
 export type PersistenceKind = "json" | "postgres";
 
 export interface AppConfig {
+  appHome: string;
   host: string;
   port: number;
   persistenceKind: PersistenceKind;
@@ -25,6 +26,7 @@ export interface AppConfig {
 }
 
 export function loadConfig(): AppConfig {
+  const appHome = resolveAppHome();
   const adminPassword = parseOptionalString(process.env.PARALLAIZE_ADMIN_PASSWORD);
   const databaseUrl = parseOptionalString(
     process.env.PARALLAIZE_DATABASE_URL ?? process.env.DATABASE_URL,
@@ -41,12 +43,13 @@ export function loadConfig(): AppConfig {
   }
 
   return {
+    appHome,
     host: process.env.HOST ?? "0.0.0.0",
     port: parseInteger(process.env.PORT, 3000),
     persistenceKind,
     dataFile:
       process.env.PARALLAIZE_DATA_FILE ??
-      join(process.cwd(), "data", "state.json"),
+      join(appHome, "data", "state.json"),
     databaseUrl,
     providerKind: parseProviderKind(process.env.PARALLAIZE_PROVIDER),
     incusBinary: process.env.PARALLAIZE_INCUS_BIN ?? "incus",
@@ -65,6 +68,11 @@ export function loadConfig(): AppConfig {
     adminUsername: process.env.PARALLAIZE_ADMIN_USERNAME?.trim() || "admin",
     adminPassword,
   };
+}
+
+function resolveAppHome(): string {
+  const configuredHome = parseOptionalString(process.env.PARALLAIZE_APP_HOME);
+  return configuredHome ? resolve(configuredHome) : process.cwd();
 }
 
 function parseProviderKind(value: string | undefined): ProviderKind {

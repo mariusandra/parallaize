@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+
+PARALLAIZE_APP_HOME="${PARALLAIZE_APP_HOME:-/usr/lib/parallaize}"
+export PARALLAIZE_APP_HOME
+
+cd "$PARALLAIZE_APP_HOME"
+exec "$PARALLAIZE_APP_HOME/runtime/bin/node" "$PARALLAIZE_APP_HOME/dist/package/server.mjs" "$@"

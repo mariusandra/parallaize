@@ -266,16 +266,27 @@ flox activate -d . -- pnpm build
 flox activate -d . -- pnpm start
 flox activate -d . -- pnpm test
 flox activate -d . -- pnpm smoke:incus
+flox activate -d . -- pnpm package:deb
+flox activate -d . -- pnpm package:rpm
+flox activate -d . -- pnpm package:release
 flox activate -d . -- pnpm persistence:copy -- --from json --data-file data/incus-state.json --to postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize
 flox activate -d . -- pnpm persistence:export -- --from postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize --output backups/parallaize-state.json
 flox activate -d . -- caddy validate --config infra/Caddyfile
 docker compose -f infra/docker-compose.postgres.yml up -d
 ```
 
+## Packaging
+
+Parallaize now has a staged package builder for host installs. The first supported target is Ubuntu 24.04 `amd64` as a `.deb`, with experimental `.deb` `arm64` and `.rpm` outputs emitted from the same workflow.
+
+The package build path bundles Node 24 into the package, stages systemd and Caddy assets, and writes artifacts into `artifacts/packages/`. The detailed packaging note is in [`docs/packaging.md`](/home/marius/Projects/Parralaize/parallaize/docs/packaging.md).
+
 ## Configuration
 
+- `PARALLAIZE_APP_HOME`: packaged app root, default `process.cwd()`
 - `HOST`: HTTP bind host, default `0.0.0.0`
 - `PORT`: HTTP bind port, default `3000`
+- `PARALLAIZE_CADDY_PORT`: packaged Caddy bind port, default `8080`
 - `PARALLAIZE_PERSISTENCE`: persistence backend, `json` or `postgres`; defaults to `postgres` when a database URL is set, otherwise `json`
 - `PARALLAIZE_DATABASE_URL`: PostgreSQL connection string; `DATABASE_URL` is also accepted
 - `PARALLAIZE_DATA_FILE`: JSON state path for the file-backed store, default `data/state.json`
@@ -290,12 +301,16 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 - `PARALLAIZE_ADMIN_USERNAME`: shared admin username for browser-session login or Basic Auth fallback, default `admin`
 - `PARALLAIZE_ADMIN_PASSWORD`: shared admin password; when unset, auth is disabled
 
-An example production env file is included at `infra/parallaize.env.example`.
+An example source-install env file is included at `infra/parallaize.env.example`. The package build ships its own install-time defaults at `packaging/config/parallaize.env`.
 
 ## Deployment Assets
 
-- `infra/systemd/parallaize.service`: control-plane unit that runs the built Node server through Flox
-- `infra/systemd/parallaize-caddy.service`: companion Caddy unit for the front door
+- `packaging/systemd/parallaize.service`: packaged control-plane unit that runs `/usr/bin/parallaize`
+- `packaging/systemd/parallaize-caddy.service`: packaged companion Caddy unit
+- `packaging/config/parallaize.env`: packaged runtime env template
+- `packaging/config/Caddyfile`: packaged Caddy config
+- `infra/systemd/parallaize.service`: source-checkout unit that runs the built Node server through Flox
+- `infra/systemd/parallaize-caddy.service`: source-checkout companion Caddy unit
 - `infra/docker-compose.postgres.yml`: local PostgreSQL stack for the PostgreSQL-backed control-plane store
 
 ## Repo Layout

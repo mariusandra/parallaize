@@ -1,0 +1,22 @@
+[Unit]
+Description=Parallaize Caddy front door
+After=network-online.target parallaize.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=parallaize
+Group=parallaize
+Environment=HOME=/var/lib/parallaize
+EnvironmentFile=/etc/parallaize/parallaize.env
+ExecStart=/usr/bin/caddy run --config /etc/parallaize/Caddyfile --adapter caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/parallaize/Caddyfile --adapter caddyfile
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+StateDirectory=parallaize
+
+[Install]
+WantedBy=multi-user.target
