@@ -353,6 +353,30 @@ test("vms can be renamed without changing their provider identity", (context) =>
   );
 });
 
+test("vms can be reordered and the new order is reflected in summary output", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-reorder-vms-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const initialVmIds = manager.getSummary().vms.map((vm) => vm.id);
+  const reorderedVmIds = initialVmIds.slice().reverse();
+
+  const reorderedSummary = manager.reorderVms({
+    vmIds: reorderedVmIds,
+  });
+
+  assert.deepEqual(
+    reorderedSummary.vms.map((vm) => vm.id),
+    reorderedVmIds,
+  );
+});
+
 test("command output is retained and snapshots can launch or restore VMs", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-command-history-"));
   context.after(() => {

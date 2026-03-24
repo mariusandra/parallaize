@@ -777,7 +777,7 @@ class IncusProvider implements DesktopProvider {
 
   async stopVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
-    this.stopInstance(vm.providerRef);
+    await this.stopInstanceAsync(vm.providerRef);
 
     return {
       lastAction: "Workspace stopped",
@@ -790,7 +790,7 @@ class IncusProvider implements DesktopProvider {
   async deleteVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
     const deleteArgs = ["delete", vm.providerRef, "--force"];
-    const deleteResult = this.runner.execute(deleteArgs);
+    const deleteResult = await this.executeAsync(deleteArgs);
 
     if (deleteResult.status !== 0) {
       const failure = formatCommandFailure(deleteArgs, deleteResult);
@@ -828,12 +828,12 @@ class IncusProvider implements DesktopProvider {
     }
 
     if (changedLimitArgs.length > 0) {
-      this.run(["config", "set", vm.providerRef, ...changedLimitArgs]);
+      await this.runAsync(["config", "set", vm.providerRef, ...changedLimitArgs]);
     }
 
     if (resources.diskGb !== vm.resources.diskGb) {
       const nextDiskSize = formatDiskSize(resources.diskGb);
-      this.run([
+      await this.runAsync([
         "config",
         "device",
         "set",
@@ -874,7 +874,7 @@ class IncusProvider implements DesktopProvider {
     this.assertAvailable();
     validateDisplayResolution(width, height);
 
-    this.run([
+    await this.runAsync([
       "exec",
       vm.providerRef,
       "--",
@@ -888,7 +888,7 @@ class IncusProvider implements DesktopProvider {
     this.assertAvailable();
     const snapshotName = buildSnapshotName(label);
 
-    this.run(["snapshot", "create", vm.providerRef, snapshotName]);
+    await this.runAsync(["snapshot", "create", vm.providerRef, snapshotName]);
 
     return {
       providerRef: `${vm.providerRef}/${snapshotName}`,
@@ -952,7 +952,7 @@ class IncusProvider implements DesktopProvider {
     const wasRunning = vm.status === "running";
 
     if (wasRunning) {
-      this.stopInstance(vm.providerRef);
+      await this.stopInstanceAsync(vm.providerRef);
     }
 
     await this.runAsync(["snapshot", "restore", vm.providerRef, snapshotName]);
@@ -991,7 +991,7 @@ class IncusProvider implements DesktopProvider {
     const alias = buildTemplateAlias(target.templateId);
 
     report?.("Creating source snapshot", 34);
-    this.run(["snapshot", "create", vm.providerRef, snapshotName]);
+    await this.runAsync(["snapshot", "create", vm.providerRef, snapshotName]);
     report?.("Publishing template image", TEMPLATE_PUBLISH_START_PERCENT);
 
     const publishStartedAt = Date.now();
@@ -1096,7 +1096,7 @@ class IncusProvider implements DesktopProvider {
     const cdMatch = command.match(/^cd(?:\s+(.+))?$/);
 
     if (cdMatch) {
-      const result = this.run([
+      const result = await this.runAsync([
         "exec",
         vm.providerRef,
         "--cwd",
@@ -1122,7 +1122,7 @@ class IncusProvider implements DesktopProvider {
       };
     }
 
-    const result = this.run([
+    const result = await this.runAsync([
       "exec",
       vm.providerRef,
       "--cwd",
@@ -1251,6 +1251,24 @@ class IncusProvider implements DesktopProvider {
     if (stopResult.status !== 0 && !this.instanceMatchesStatus(instanceName, "stopped")) {
       const forceArgs = ["stop", instanceName, "--force"];
       const forceResult = this.runner.execute(forceArgs);
+
+      if (forceResult.status !== 0 && !this.instanceMatchesStatus(instanceName, "stopped")) {
+        throw new Error(
+          [formatCommandFailure(stopArgs, stopResult), formatCommandFailure(forceArgs, forceResult)]
+            .filter(Boolean)
+            .join("\n"),
+        );
+      }
+    }
+  }
+
+  private async stopInstanceAsync(instanceName: string): Promise<void> {
+    const stopArgs = ["stop", instanceName, "--timeout", "30"];
+    const stopResult = await this.executeAsync(stopArgs);
+
+    if (stopResult.status !== 0 && !this.instanceMatchesStatus(instanceName, "stopped")) {
+      const forceArgs = ["stop", instanceName, "--force"];
+      const forceResult = await this.executeAsync(forceArgs);
 
       if (forceResult.status !== 0 && !this.instanceMatchesStatus(instanceName, "stopped")) {
         throw new Error(

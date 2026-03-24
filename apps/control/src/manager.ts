@@ -15,6 +15,7 @@ import type {
   EnvironmentTemplate,
   JobKind,
   ProviderState,
+  ReorderVmsInput,
   ResizeVmInput,
   ResourceTelemetry,
   SetVmResolutionInput,
@@ -401,12 +402,12 @@ export class DesktopManager {
   }
 
   stopVm(vmId: string): void {
-    this.queueVmAction(vmId, "stop", async (vm) => {
+    this.queueVmAction(vmId, "stop", async (vm, report) => {
       if (vm.status === "stopped") {
         return `${vm.name} is already stopped`;
       }
 
-      await sleep(350);
+      report("Stopping workspace", 58);
       const mutation = await this.provider.stopVm(vm);
 
       this.store.update((draft) => {
@@ -420,6 +421,30 @@ export class DesktopManager {
 
       return `${vm.name} stopped`;
     });
+  }
+
+  reorderVms(input: ReorderVmsInput): DashboardSummary {
+    const requestedVmIds = input.vmIds.filter(
+      (vmId, index, vmIds) => vmId.trim().length > 0 && vmIds.indexOf(vmId) === index,
+    );
+
+    this.store.update((draft) => {
+      const byId = new Map(draft.vms.map((vm) => [vm.id, vm]));
+      const nextVms = requestedVmIds
+        .map((vmId) => byId.get(vmId) ?? null)
+        .filter((vm): vm is VmInstance => vm !== null);
+      const pinnedIds = new Set(nextVms.map((vm) => vm.id));
+
+      draft.vms = [
+        ...nextVms,
+        ...draft.vms.filter((vm) => !pinnedIds.has(vm.id)),
+      ];
+
+      return true;
+    });
+
+    this.publish();
+    return this.getSummary();
   }
 
   deleteVm(vmId: string): void {

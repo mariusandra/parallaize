@@ -6,6 +6,7 @@ import {
   useState,
   type CSSProperties,
   type ChangeEvent,
+  type DragEvent as ReactDragEvent,
   type FormEvent,
   type JSX,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -30,6 +31,7 @@ import type {
   EnvironmentTemplate,
   HealthStatus,
   InjectCommandInput,
+  ReorderVmsInput,
   ResizeVmInput,
   ResourceTelemetry,
   SetVmResolutionInput,
@@ -59,7 +61,10 @@ import {
   type ResolutionRequest,
   type ViewportBounds,
 } from "./desktopResolution.js";
-import { canUseDeferredIdentifiedCollection } from "./deferredCollections.js";
+import {
+  canUseDeferredIdentifiedCollection,
+  orderIdentifiedCollectionByIds,
+} from "./deferredCollections.js";
 import { NoVncViewport } from "./NoVncViewport.js";
 
 interface CreateDraft {
@@ -187,6 +192,7 @@ const defaultLoginDraft: LoginDraft = {
 
 const quickCommands = ["pwd", "ls -la", "pnpm build", "pnpm test", "incus list"];
 const railWidthStorageKey = "parallaize.rail-width";
+const activeCpuThresholdsByVmStorageKey = "parallaize.active-cpu-thresholds-by-vm";
 const overviewSidepanelCollapsedStorageKey = "parallaize.overview-sidepanel-collapsed";
 const railCompactWidth = 48;
 const railExpandedMinWidth = 248;
@@ -194,6 +200,7 @@ const railCompactSnapWidth = Math.round((railCompactWidth + railExpandedMinWidth
 const railDefaultWidth = 320;
 const railMinWidth = railCompactWidth;
 const railMaxWidth = 420;
+const activeCpuThresholdDefault = 2;
 const desktopViewportScaleDefault = 1;
 const desktopViewportScaleMin = 0.5;
 const desktopViewportScaleMax = 3;
@@ -258,10 +265,16 @@ export function DashboardApp(): JSX.Element {
     Record<string, DesktopResolutionPreference>
   >(() => readDesktopResolutionByVm());
   const [openVmMenuId, setOpenVmMenuId] = useState<string | null>(null);
+  const [vmRailOrderIds, setVmRailOrderIds] = useState<string[] | null>(null);
+  const [draggedVmId, setDraggedVmId] = useState<string | null>(null);
+  const [vmReorderBusy, setVmReorderBusy] = useState(false);
   const [openTemplateMenuId, setOpenTemplateMenuId] = useState<string | null>(null);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [fullscreenActive, setFullscreenActive] = useState(() => readFullscreenActive());
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
+  const [activeCpuThresholdsByVm, setActiveCpuThresholdsByVm] = useState<
+    Record<string, number>
+  >(() => readActiveCpuThresholdsByVm());
   const [resolutionDraft, setResolutionDraft] = useState<ResolutionDraft>(() =>
     buildResolutionDraft(
       defaultDesktopResolutionPreference.mode,
@@ -299,6 +312,7 @@ export function DashboardApp(): JSX.Element {
   const [railResizeActive, setRailResizeActive] = useState(false);
   const [sidepanelResizeActive, setSidepanelResizeActive] = useState(false);
   const selectedVmIdRef = useRef<string | null>(null);
+  const vmDragDropCommittedRef = useRef(false);
   const tabIdRef = useRef<string>(createTabId());
   const shellMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
@@ -343,6 +357,7 @@ export function DashboardApp(): JSX.Element {
   )
     ? deferredTemplates
     : summary?.templates ?? [];
+  const renderedVms = orderIdentifiedCollectionByIds(displayedVms, vmRailOrderIds);
   const selectedVm =
     summary?.vms.find((entry) => entry.id === selectedVmId) ?? detail?.vm ?? null;
   const selectedDesktopResolutionPreference =
@@ -357,7 +372,7 @@ export function DashboardApp(): JSX.Element {
       : overviewSidepanelCollapsed;
   const effectiveSidePanelCollapsed =
     selectedVmId !== null ? sidePanelCollapsed : wideShellLayout && sidePanelCollapsed;
-  const isBusy = busyLabel !== null;
+  const isBusy = busyLabel !== null || vmReorderBusy;
   const currentDetail = selectedVm && detail?.vm.id === selectedVm.id ? detail : null;
   const liveResolutionVmId =
     currentDetail?.vm.status === "running" &&
@@ -493,11 +508,14 @@ export function DashboardApp(): JSX.Element {
   useEffect(() => {
     function handleFullscreenChange(): void {
       setFullscreenActive(readFullscreenActive());
+      void syncFullscreenKeyboardLock();
     }
 
     document.addEventListener("fullscreenchange", handleFullscreenChange);
+    void syncFullscreenKeyboardLock();
     return () => {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      releaseFullscreenKeyboardLock();
     };
   }, []);
 
@@ -795,6 +813,13 @@ export function DashboardApp(): JSX.Element {
       showLivePreviews ? "true" : "false",
     );
   }, [showLivePreviews]);
+
+  useEffect(() => {
+    writeStoredString(
+      activeCpuThresholdsByVmStorageKey,
+      JSON.stringify(activeCpuThresholdsByVm),
+    );
+  }, [activeCpuThresholdsByVm]);
 
   useEffect(() => {
     writeStoredString(railWidthStorageKey, String(railWidthPreference));
@@ -1453,6 +1478,55 @@ export function DashboardApp(): JSX.Element {
     );
   }
 
+  function activeCpuThresholdForVm(vmId: string): number {
+    return normalizeActiveCpuThreshold(
+      activeCpuThresholdsByVm[vmId] ?? activeCpuThresholdDefault,
+    );
+  }
+
+  function handleSetActiveCpuThreshold(vm: VmInstance): void {
+    const nextValue = window.prompt(
+      "Active threshold (%)",
+      String(activeCpuThresholdForVm(vm.id)),
+    );
+
+    if (nextValue === null) {
+      return;
+    }
+
+    const parsed = Number(nextValue.replace(/%/gu, "").trim());
+
+    if (!Number.isFinite(parsed)) {
+      setNotice({
+        tone: "error",
+        message: "Active threshold must be a number between 0 and 100.",
+      });
+      return;
+    }
+
+    const nextThreshold = normalizeActiveCpuThreshold(parsed);
+    setActiveCpuThresholdsByVm((current) => {
+      if (nextThreshold === activeCpuThresholdDefault) {
+        if (!(vm.id in current)) {
+          return current;
+        }
+
+        const next = { ...current };
+        delete next[vm.id];
+        return next;
+      }
+
+      if (current[vm.id] === nextThreshold) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [vm.id]: nextThreshold,
+      };
+    });
+  }
+
   async function handleEditTemplateDescription(template: EnvironmentTemplate): Promise<void> {
     setOpenTemplateMenuId(null);
     const description = window.prompt("Template description", template.description);
@@ -1658,6 +1732,128 @@ export function DashboardApp(): JSX.Element {
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
+  }
+
+  function currentVmRailIds(): string[] {
+    return (summary?.vms ?? displayedVms).map((vm) => vm.id);
+  }
+
+  async function persistVmRailOrder(vmIds: string[]): Promise<void> {
+    setVmReorderBusy(true);
+
+    try {
+      const nextSummary = await postJson<DashboardSummary>(
+        "/api/vms/reorder",
+        {
+          vmIds,
+        } satisfies ReorderVmsInput,
+      );
+      startTransition(() => {
+        setSummary(nextSummary);
+      });
+      setVmRailOrderIds(null);
+    } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        requireLogin();
+        return;
+      }
+
+      setNotice({
+        tone: "error",
+        message: errorMessage(error),
+      });
+      setVmRailOrderIds(null);
+      await refreshSummary();
+    } finally {
+      setVmReorderBusy(false);
+    }
+  }
+
+  function handleVmTileDragStart(
+    vmId: string,
+    event: ReactDragEvent<HTMLElement>,
+  ): void {
+    if (vmReorderBusy) {
+      event.preventDefault();
+      return;
+    }
+
+    vmDragDropCommittedRef.current = false;
+    setDraggedVmId(vmId);
+    setVmRailOrderIds(currentVmRailIds());
+    setOpenVmMenuId(null);
+    setOpenTemplateMenuId(null);
+    setShellMenuOpen(false);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", vmId);
+  }
+
+  function handleVmTileDragOver(
+    targetVmId: string,
+    event: ReactDragEvent<HTMLElement>,
+  ): void {
+    if (!draggedVmId || draggedVmId === targetVmId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setVmRailOrderIds((current) =>
+      reorderVmIds(current ?? currentVmRailIds(), draggedVmId, targetVmId),
+    );
+  }
+
+  function commitVmRailOrder(nextOrder: string[]): void {
+    vmDragDropCommittedRef.current = true;
+    setDraggedVmId(null);
+
+    if (sameIdOrder(nextOrder, currentVmRailIds())) {
+      setVmRailOrderIds(null);
+      return;
+    }
+
+    setVmRailOrderIds(nextOrder);
+    void persistVmRailOrder(nextOrder);
+  }
+
+  function handleVmStripDragOver(event: ReactDragEvent<HTMLDivElement>): void {
+    if (!draggedVmId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+
+  function handleVmStripDrop(event: ReactDragEvent<HTMLDivElement>): void {
+    if (!draggedVmId) {
+      return;
+    }
+
+    event.preventDefault();
+    commitVmRailOrder(vmRailOrderIds ?? currentVmRailIds());
+  }
+
+  function handleVmTileDragEnd(): void {
+    if (!vmDragDropCommittedRef.current) {
+      setVmRailOrderIds(null);
+    }
+
+    setDraggedVmId(null);
+  }
+
+  function handleVmTileDrop(
+    targetVmId: string,
+    event: ReactDragEvent<HTMLElement>,
+  ): void {
+    if (!draggedVmId) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextOrder = reorderVmIds(vmRailOrderIds ?? currentVmRailIds(), draggedVmId, targetVmId);
+    event.stopPropagation();
+    commitVmRailOrder(nextOrder);
   }
 
   function handleRailResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
@@ -2573,6 +2769,7 @@ export function DashboardApp(): JSX.Element {
                     </div>
 
                     <TelemetryPanel
+                      activeCpuThresholdPercent={activeCpuThresholdDefault}
                       label="Host"
                       telemetry={summary.hostTelemetry}
                     />
@@ -2666,23 +2863,34 @@ export function DashboardApp(): JSX.Element {
               </div>
             ) : null}
 
-            <div className="vm-strip">
-              {displayedVms.map((vm) => (
+            <div
+              className="vm-strip"
+              onDragOver={handleVmStripDragOver}
+              onDrop={handleVmStripDrop}
+            >
+              {renderedVms.map((vm) => (
                 <VmTile
                   key={vm.id}
+                  activeCpuThresholdPercent={activeCpuThresholdForVm(vm.id)}
                   busy={isBusy}
                   compact={compactRail}
+                  dragging={draggedVmId === vm.id}
                   inspectorVisible={vm.id === selectedVmId && !effectiveSidePanelCollapsed}
                   menuOpen={openVmMenuId === vm.id}
                   selected={vm.id === selectedVmId}
                   showLivePreview={showLivePreviews}
                   vm={vm}
+                  onDragEnd={handleVmTileDragEnd}
+                  onDragOver={handleVmTileDragOver}
+                  onDragStart={handleVmTileDragStart}
+                  onDrop={handleVmTileDrop}
                   onClone={handleClone}
                   onDelete={handleDelete}
                   onHideInspector={() => setVmSidepanelCollapsed(vm.id, true)}
                   onOpen={selectVm}
                   onInspect={inspectVm}
                   onRename={handleRenameVm}
+                  onSetActiveCpuThreshold={handleSetActiveCpuThreshold}
                   onSnapshot={handleSnapshot}
                   onStartStop={handleVmAction}
                   onToggleMenu={(vmId) => {
@@ -2693,7 +2901,7 @@ export function DashboardApp(): JSX.Element {
                 />
               ))}
 
-              {displayedVms.length === 0 && !compactRail ? (
+              {renderedVms.length === 0 && !compactRail ? (
                 <div className="empty-state">
                   <p className="empty-state__eyebrow">No VMs yet</p>
                   <h3 className="empty-state__title">Launch a workspace to populate the rail.</h3>
@@ -3003,19 +3211,26 @@ function CreateVmDialog({
 }
 
 interface VmTileProps {
+  activeCpuThresholdPercent: number;
   busy: boolean;
   compact: boolean;
+  dragging: boolean;
   inspectorVisible: boolean;
   menuOpen: boolean;
   selected: boolean;
   showLivePreview: boolean;
   vm: VmInstance;
+  onDragEnd: () => void;
+  onDragOver: (targetVmId: string, event: ReactDragEvent<HTMLElement>) => void;
+  onDragStart: (vmId: string, event: ReactDragEvent<HTMLElement>) => void;
+  onDrop: (targetVmId: string, event: ReactDragEvent<HTMLElement>) => void;
   onClone: (vm: VmInstance) => Promise<void>;
   onDelete: (vm: VmInstance) => Promise<void>;
   onHideInspector: () => void;
   onInspect: (vmId: string) => void;
   onOpen: (vmId: string) => void;
   onRename: (vm: VmInstance) => Promise<void>;
+  onSetActiveCpuThreshold: (vm: VmInstance) => void;
   onSnapshot: (vm: VmInstance) => Promise<void>;
   onStartStop: (vmId: string, action: "start" | "stop") => Promise<void>;
   onToggleMenu: (vmId: string) => void;
@@ -3080,19 +3295,26 @@ function RailSettingsIcon(): JSX.Element {
 }
 
 function VmTile({
+  activeCpuThresholdPercent,
   busy,
   compact,
+  dragging,
   inspectorVisible,
   menuOpen,
   selected,
   showLivePreview,
   vm,
+  onDragEnd,
+  onDragOver,
+  onDragStart,
+  onDrop,
   onClone,
   onDelete,
   onHideInspector,
   onInspect,
   onOpen,
   onRename,
+  onSetActiveCpuThreshold,
   onSnapshot,
   onStartStop,
   onToggleMenu,
@@ -3104,6 +3326,15 @@ function VmTile({
     vm.session?.kind === "vnc" &&
     Boolean(vm.session.webSocketPath);
   const previewLabel = vmTilePreviewLabel(vm, showLivePreview);
+  const compactCpuPercent = compactVmCpuPercent(vm);
+  const showMutedPreviewStatus =
+    vm.status === "running" && compactCpuPercent <= activeCpuThresholdPercent;
+  const previewStatusColor =
+    vm.status === "running"
+      ? showMutedPreviewStatus
+        ? "rgb(34 197 94 / 0.3)"
+        : compactVmCpuColor(compactCpuPercent)
+      : null;
   const menu = (
     <div className="vm-tile__menu" onClick={(event) => event.stopPropagation()}>
       <button
@@ -3127,7 +3358,11 @@ function VmTile({
         >
           {compact ? (
             <div className="vm-tile__popover-telemetry">
-              <TelemetryPanel compact telemetry={vm.telemetry} />
+              <TelemetryPanel
+                activeCpuThresholdPercent={activeCpuThresholdPercent}
+                compact
+                telemetry={vm.telemetry}
+              />
             </div>
           ) : null}
           {!selected ? (
@@ -3191,6 +3426,20 @@ function VmTile({
             Rename
           </button>
           <button
+            className="menu-action menu-action--split"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              onSetActiveCpuThreshold(vm);
+            }}
+            disabled={busy}
+          >
+            <span>Set active threshold</span>
+            <span className="menu-action__state">
+              {formatThresholdPercent(activeCpuThresholdPercent)}
+            </span>
+          </button>
+          <button
             className="menu-action"
             type="button"
             onClick={() => {
@@ -3218,23 +3467,24 @@ function VmTile({
   );
 
   if (compact) {
-    const compactCpuPercent = compactVmCpuPercent(vm);
     const compactStatusTitle =
       vm.status === "running"
         ? `${vm.name} · ${vm.status} · CPU ${formatTelemetryPercent(vm.telemetry?.cpuPercent)}`
         : `${vm.name} · ${vm.status}`;
-    const compactCpuColor =
-      vm.status === "running"
-        ? compactVmCpuColor(compactCpuPercent)
-        : null;
 
     return (
       <article
         className={joinClassNames(
           "vm-tile",
+          dragging ? "vm-tile--dragging" : "",
           selected ? "vm-tile--active" : "",
           "vm-tile--compact",
         )}
+        draggable={!busy}
+        onDragEnd={onDragEnd}
+        onDragOver={(event) => onDragOver(vm.id, event)}
+        onDragStart={(event) => onDragStart(vm.id, event)}
+        onDrop={(event) => onDrop(vm.id, event)}
       >
         <button
           className="vm-tile__compact-trigger"
@@ -3262,10 +3512,11 @@ function VmTile({
             className={joinClassNames(
               "vm-tile__compact-status",
               statusClassName(vm.status),
+              showMutedPreviewStatus ? "vm-tile__compact-status--muted" : "",
             )}
             style={
               {
-                "--vm-compact-cpu-color": compactCpuColor ?? undefined,
+                "--vm-compact-cpu-color": previewStatusColor ?? undefined,
               } as CSSProperties
             }
             title={
@@ -3285,25 +3536,72 @@ function VmTile({
     <article
       className={joinClassNames(
         "vm-tile",
+        dragging ? "vm-tile--dragging" : "",
         selected ? "vm-tile--active" : "",
       )}
+      draggable={!busy}
+      onDragEnd={onDragEnd}
+      onDragOver={(event) => onDragOver(vm.id, event)}
+      onDragStart={(event) => onDragStart(vm.id, event)}
+      onDrop={(event) => onDrop(vm.id, event)}
     >
       <button className="vm-tile__open" type="button" onClick={() => onOpen(vm.id)}>
         <div className="vm-tile__preview">
           {canShowLivePreview && vm.session?.webSocketPath ? (
-            <NoVncViewport
-              className="vm-tile__viewport"
-              surfaceClassName="vm-tile__canvas"
-              webSocketPath={vm.session.webSocketPath}
-              viewportMode="scale"
-              viewOnly
-              showHeader={false}
-              statusMode="overlay"
-            />
+            <>
+              <NoVncViewport
+                className="vm-tile__viewport"
+                hideConnectedOverlayStatus
+                surfaceClassName="vm-tile__canvas"
+                webSocketPath={vm.session.webSocketPath}
+                viewportMode="scale"
+                viewOnly
+                showHeader={false}
+                statusMode="overlay"
+              />
+              <span
+                className={joinClassNames(
+                  "vm-tile__compact-status",
+                  "vm-tile__preview-status",
+                  statusClassName(vm.status),
+                  showMutedPreviewStatus ? "vm-tile__compact-status--muted" : "",
+                )}
+                style={
+                  {
+                    "--vm-compact-cpu-color": previewStatusColor ?? undefined,
+                  } as CSSProperties
+                }
+                title={
+                  vm.status === "running"
+                    ? `CPU ${formatTelemetryPercent(vm.telemetry?.cpuPercent)}`
+                    : undefined
+                }
+                aria-hidden="true"
+              />
+            </>
           ) : (
             <>
               <StaticPatternPreview vm={vm} variant="tile" />
               <span className="vm-tile__preview-note">{previewLabel}</span>
+              <span
+                className={joinClassNames(
+                  "vm-tile__compact-status",
+                  "vm-tile__preview-status",
+                  statusClassName(vm.status),
+                  showMutedPreviewStatus ? "vm-tile__compact-status--muted" : "",
+                )}
+                style={
+                  {
+                    "--vm-compact-cpu-color": previewStatusColor ?? undefined,
+                  } as CSSProperties
+                }
+                title={
+                  vm.status === "running"
+                    ? `CPU ${formatTelemetryPercent(vm.telemetry?.cpuPercent)}`
+                    : undefined
+                }
+                aria-hidden="true"
+              />
             </>
           )}
         </div>
@@ -3317,7 +3615,10 @@ function VmTile({
             <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
           </div>
 
-          <TelemetryPanel telemetry={vm.telemetry} />
+          <TelemetryPanel
+            activeCpuThresholdPercent={activeCpuThresholdPercent}
+            telemetry={vm.telemetry}
+          />
 
           <div className="vm-tile__meta">
             <span>{formatForwardCount(vm.forwardedPorts.length)}</span>
@@ -3330,10 +3631,12 @@ function VmTile({
 }
 
 function TelemetryPanel({
+  activeCpuThresholdPercent,
   compact = false,
   label,
   telemetry,
 }: {
+  activeCpuThresholdPercent: number;
   compact?: boolean;
   label?: string;
   telemetry?: ResourceTelemetry;
@@ -3342,14 +3645,27 @@ function TelemetryPanel({
   const chartHeight = compact ? 20 : 24;
   const cpuHistory = telemetry?.cpuHistory.length ? telemetry.cpuHistory : [0];
   const ramHistory = telemetry?.ramHistory.length ? telemetry.ramHistory : [0];
+  const cpuPercent = telemetry?.cpuPercent;
+  const showMutedCpuMetric =
+    !compact &&
+    cpuPercent !== null &&
+    cpuPercent !== undefined &&
+    Number.isFinite(cpuPercent) &&
+    cpuPercent <= activeCpuThresholdPercent;
 
   return (
     <div className={joinClassNames("telemetry-panel", compact ? "telemetry-panel--compact" : "")}>
       <div className="telemetry-panel__head">
         {label ? <span className="telemetry-panel__label">{label}</span> : <span />}
         <span className="telemetry-panel__stats">
-          <span className="telemetry-panel__metric telemetry-panel__metric--cpu">
-            CPU {formatTelemetryPercent(telemetry?.cpuPercent)}
+          <span
+            className={joinClassNames(
+              "telemetry-panel__metric",
+              "telemetry-panel__metric--cpu",
+              showMutedCpuMetric ? "telemetry-panel__metric--muted" : "",
+            )}
+          >
+            CPU {formatTelemetryPercent(cpuPercent)}
           </span>
           <span className="telemetry-panel__separator">·</span>
           <span className="telemetry-panel__metric telemetry-panel__metric--ram">
@@ -5148,6 +5464,43 @@ function trimTrailingZeros(value: string): string {
   return value.replace(/(?:\.0+|(\.\d*?[1-9])0+)$/, "$1");
 }
 
+function reorderVmIds(
+  currentVmIds: string[],
+  draggedVmId: string,
+  targetVmId: string,
+): string[] {
+  if (draggedVmId === targetVmId) {
+    return currentVmIds;
+  }
+
+  const nextVmIds = currentVmIds.filter((vmId) => vmId !== draggedVmId);
+  const targetIndex = nextVmIds.indexOf(targetVmId);
+
+  if (targetIndex === -1) {
+    return currentVmIds;
+  }
+
+  nextVmIds.splice(targetIndex, 0, draggedVmId);
+  return nextVmIds;
+}
+
+function sameIdOrder(left: string[], right: string[]): boolean {
+  return left.length === right.length &&
+    left.every((id, index) => id === right[index]);
+}
+
+function normalizeActiveCpuThreshold(value: number): number {
+  if (!Number.isFinite(value)) {
+    return activeCpuThresholdDefault;
+  }
+
+  return Math.min(100, Math.max(0, Number(value.toFixed(2))));
+}
+
+function formatThresholdPercent(value: number): string {
+  return `${trimTrailingZeros(value.toFixed(2))}%`;
+}
+
 function buildCaptureDraft(
   template: EnvironmentTemplate | null,
   vm: VmInstance,
@@ -5585,6 +5938,62 @@ function readFullscreenActive(): boolean {
   return typeof document !== "undefined" && document.fullscreenElement !== null;
 }
 
+function fullscreenKeyboardLock():
+  | {
+      lock: (keyCodes?: string[]) => Promise<void>;
+      unlock: () => void;
+    }
+  | null {
+  if (typeof navigator === "undefined") {
+    return null;
+  }
+
+  const keyboard = (
+    navigator as Navigator & {
+      keyboard?: {
+        lock?: (keyCodes?: string[]) => Promise<void>;
+        unlock?: () => void;
+      };
+    }
+  ).keyboard;
+
+  if (!keyboard || typeof keyboard.lock !== "function" || typeof keyboard.unlock !== "function") {
+    return null;
+  }
+
+  return {
+    lock: keyboard.lock.bind(keyboard),
+    unlock: keyboard.unlock.bind(keyboard),
+  };
+}
+
+async function syncFullscreenKeyboardLock(): Promise<void> {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const keyboard = fullscreenKeyboardLock();
+
+  if (!keyboard) {
+    return;
+  }
+
+  if (!document.fullscreenElement) {
+    keyboard.unlock();
+    return;
+  }
+
+  try {
+    await keyboard.lock(["Escape"]);
+  } catch {
+    keyboard.unlock();
+  }
+}
+
+function releaseFullscreenKeyboardLock(): void {
+  fullscreenKeyboardLock()?.unlock();
+}
+
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   const stored = readStoredString(key);
 
@@ -5703,6 +6112,32 @@ function readSidepanelCollapsedByVm(): Record<string, true> {
         ([vmId, collapsed]) => vmId.length > 0 && collapsed === true,
       ),
     ) as Record<string, true>;
+  } catch {
+    return {};
+  }
+}
+
+function readActiveCpuThresholdsByVm(): Record<string, number> {
+  const stored = readStoredString(activeCpuThresholdsByVmStorageKey);
+
+  if (!stored) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .map(([vmId, threshold]) => {
+          if (vmId.length === 0 || typeof threshold !== "number" || !Number.isFinite(threshold)) {
+            return null;
+          }
+
+          return [vmId, normalizeActiveCpuThreshold(threshold)];
+        })
+        .filter((entry): entry is [string, number] => entry !== null),
+    );
   } catch {
     return {};
   }

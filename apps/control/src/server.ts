@@ -16,6 +16,7 @@ import type {
   HealthStatus,
   InjectCommandInput,
   LoginInput,
+  ReorderVmsInput,
   ResizeVmInput,
   SetVmResolutionInput,
   SnapshotLaunchInput,
@@ -125,6 +126,14 @@ const server = createServer(async (request, response) => {
       return writeJson<VmDetail>(response, 200, {
         ok: true,
         data: manager.getVmDetail(vmMatch[1]),
+      });
+    }
+
+    if (method === "POST" && url.pathname === "/api/vms/reorder") {
+      const payload = await readJsonBody<ReorderVmsInput>(request);
+      return writeJson<DashboardSummary>(response, 200, {
+        ok: true,
+        data: manager.reorderVms(payload),
       });
     }
 

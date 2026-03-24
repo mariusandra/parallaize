@@ -1915,6 +1915,11 @@ section.workspace-shell {
   color: rgba(53, 122, 231, 0.95);
 }
 
+.telemetry-panel__metric--muted {
+  color: var(--ink-faint);
+  opacity: 0.3;
+}
+
 .telemetry-panel__metric--ram {
   color: rgba(16, 158, 128, 0.95);
 }
@@ -2123,10 +2128,20 @@ section.workspace-shell {
     background-color 140ms ease;
 }
 
+.vm-tile[draggable="true"] {
+  cursor: grab;
+}
+
 .vm-tile:hover {
   transform: translateY(-1px);
   border-color: var(--line-strong);
   box-shadow: 0 18px 36px rgba(8, 14, 20, 0.1);
+}
+
+.vm-tile--dragging {
+  opacity: 0.62;
+  transform: scale(0.985);
+  box-shadow: 0 16px 36px rgba(8, 14, 20, 0.16);
 }
 
 :root[data-theme="dark"] .vm-tile:hover {
@@ -2371,6 +2386,7 @@ section.workspace-shell {
   position: absolute;
   right: 0.24rem;
   bottom: 0.24rem;
+  z-index: 2;
   display: block;
   width: 0.62rem;
   height: 0.62rem;
@@ -2388,6 +2404,15 @@ section.workspace-shell {
   box-shadow:
     0 0 0 0.14rem rgba(4, 7, 11, 0.82),
     0 0 14px color-mix(in srgb, var(--vm-compact-cpu-color, #22c55e) 34%, transparent);
+}
+
+.vm-tile__compact-status--muted.status-badge--running {
+  box-shadow: 0 0 0 0.14rem rgba(4, 7, 11, 0.82);
+}
+
+.vm-tile__preview-status {
+  right: 0.36rem;
+  bottom: 0.36rem;
 }
 
 .vm-tile__compact-status.status-badge--running::after {

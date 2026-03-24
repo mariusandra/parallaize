@@ -243,6 +243,10 @@ export interface UpdateVmInput {
   name: string;
 }
 
+export interface ReorderVmsInput {
+  vmIds: string[];
+}
+
 export interface InjectCommandInput {
   command: string;
 }
