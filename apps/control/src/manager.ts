@@ -387,15 +387,7 @@ export class DesktopManager {
       report("Starting VM", 58);
       const mutation = await this.provider.startVm(vm);
       report("Waiting for desktop", 88);
-
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmId);
-        current.status = "running";
-        current.liveSince = nowIso();
-        applyProviderMutation(current, mutation);
-      });
-
-      this.publish();
+      this.markVmRunning(vmId, mutation);
 
       return `${vm.name} started`;
     });
@@ -409,17 +401,33 @@ export class DesktopManager {
 
       report("Stopping workspace", 58);
       const mutation = await this.provider.stopVm(vm);
-
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmId);
-        current.status = "stopped";
-        current.liveSince = null;
-        applyProviderMutation(current, mutation);
-      });
-
-      this.publish();
+      this.markVmStopped(vmId, mutation);
 
       return `${vm.name} stopped`;
+    });
+  }
+
+  restartVm(vmId: string): void {
+    this.queueVmAction(vmId, "restart", async (vm, report) => {
+      const wasRunning = vm.status !== "stopped";
+
+      if (wasRunning) {
+        report("Stopping workspace", 24);
+        const stopMutation = await this.provider.stopVm(vm);
+        this.markVmStopped(vmId, stopMutation);
+      }
+
+      const currentVm = this.getVmDetail(vmId).vm;
+      report("Preparing boot", wasRunning ? 42 : 24);
+      await sleep(350);
+      report("Starting VM", wasRunning ? 66 : 58);
+      const startMutation = await this.provider.startVm(currentVm);
+      report("Waiting for desktop", 92);
+      this.markVmRunning(vmId, startMutation);
+
+      return wasRunning
+        ? `${vm.name} restarted`
+        : `${vm.name} started`;
     });
   }
 
@@ -1003,6 +1011,28 @@ export class DesktopManager {
 
   private requireVm(state: AppState, vmId: string): VmInstance {
     return requireVm(state, vmId);
+  }
+
+  private markVmRunning(vmId: string, mutation: ProviderMutation): void {
+    this.store.update((draft) => {
+      const current = this.requireVm(draft, vmId);
+      current.status = "running";
+      current.liveSince = nowIso();
+      applyProviderMutation(current, mutation);
+    });
+
+    this.publish();
+  }
+
+  private markVmStopped(vmId: string, mutation: ProviderMutation): void {
+    this.store.update((draft) => {
+      const current = this.requireVm(draft, vmId);
+      current.status = "stopped";
+      current.liveSince = null;
+      applyProviderMutation(current, mutation);
+    });
+
+    this.publish();
   }
 
   private markVmFailed(vmId: string, error: unknown): void {

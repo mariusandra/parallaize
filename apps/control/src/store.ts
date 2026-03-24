@@ -492,6 +492,7 @@ function normalizeJobKind(value: ActionJob["kind"] | undefined): ActionJob["kind
     case "launch-snapshot":
     case "start":
     case "stop":
+    case "restart":
     case "delete":
     case "snapshot":
     case "restore-snapshot":

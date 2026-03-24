@@ -19,6 +19,7 @@ export type VmWindow = "editor" | "terminal" | "browser" | "logs";
 
 export type VmSessionKind = "synthetic" | "vnc";
 export type VmForwardProtocol = "http";
+export type VmPowerAction = "start" | "stop" | "restart";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -26,8 +27,7 @@ export type JobKind =
   | "create"
   | "clone"
   | "launch-snapshot"
-  | "start"
-  | "stop"
+  | VmPowerAction
   | "delete"
   | "snapshot"
   | "restore-snapshot"

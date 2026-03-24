@@ -206,7 +206,7 @@ const server = createServer(async (request, response) => {
       return writeAccepted(response);
     }
 
-    const actionMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/(clone|start|stop|delete|snapshot|resize|template|input)$/);
+    const actionMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/(clone|start|stop|restart|delete|snapshot|resize|template|input)$/);
     if (method === "POST" && actionMatch) {
       const vmId = actionMatch[1];
       const action = actionMatch[2];
@@ -228,6 +228,9 @@ const server = createServer(async (request, response) => {
           return writeAccepted(response);
         case "stop":
           manager.stopVm(vmId);
+          return writeAccepted(response);
+        case "restart":
+          manager.restartVm(vmId);
           return writeAccepted(response);
         case "delete":
           manager.deleteVm(vmId);

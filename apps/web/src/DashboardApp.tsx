@@ -43,6 +43,7 @@ import type {
   UpdateVmInput,
   VmDetail,
   VmInstance,
+  VmPowerAction,
   VmPortForward,
   VmStatus,
 } from "../../../packages/shared/src/types.js";
@@ -151,6 +152,19 @@ interface ResolutionRetryState {
   key: string;
 }
 
+type RenameDialogState =
+  | {
+      kind: "vm";
+      id: string;
+      currentName: string;
+    }
+  | {
+      kind: "template";
+      id: string;
+      currentName: string;
+      description: string;
+    };
+
 const emptyCreateDraft: CreateDraft = {
   templateId: "",
   name: "",
@@ -255,6 +269,8 @@ export function DashboardApp(): JSX.Element {
   const [forwardDraft, setForwardDraft] = useState<ForwardDraft>(emptyForwardDraft);
   const [captureDraft, setCaptureDraft] = useState<CaptureDraft>(emptyCaptureDraft);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const [sidepanelCollapsedByVm, setSidepanelCollapsedByVm] = useState<
     Record<string, true>
   >(() => readSidepanelCollapsedByVm());
@@ -1431,47 +1447,79 @@ export function DashboardApp(): JSX.Element {
     setShowCreateDialog(true);
   }
 
+  function closeRenameDialog(): void {
+    setRenameDialog(null);
+    setRenameDraft("");
+  }
+
   async function handleRenameVm(vm: VmInstance): Promise<void> {
-    const name = window.prompt("Workspace name", vm.name)?.trim();
-
-    if (!name || name === vm.name) {
-      return;
-    }
-
-    await runMutation(
-      `Renaming ${vm.name}`,
-      async () => {
-        await postJson<VmInstance>(
-          `/api/vms/${vm.id}/update`,
-          {
-            name,
-          } satisfies UpdateVmInput,
-        );
-        await refreshSummary();
-        await refreshDetail(vm.id);
-      },
-      `Renamed workspace to ${name}.`,
-    );
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+    setRenameDialog({
+      kind: "vm",
+      id: vm.id,
+      currentName: vm.name,
+    });
+    setRenameDraft(vm.name);
   }
 
   async function handleRenameTemplate(template: EnvironmentTemplate): Promise<void> {
     setOpenTemplateMenuId(null);
-    const name = window.prompt("Template name", template.name)?.trim();
+    setShellMenuOpen(false);
+    setRenameDialog({
+      kind: "template",
+      id: template.id,
+      currentName: template.name,
+      description: template.description,
+    });
+    setRenameDraft(template.name);
+  }
 
-    if (!name || name === template.name) {
+  async function handleRenameSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (!renameDialog) {
+      return;
+    }
+
+    const name = renameDraft.trim();
+
+    if (!name || name === renameDialog.currentName) {
+      return;
+    }
+
+    if (renameDialog.kind === "vm") {
+      await runMutation(
+        `Renaming ${renameDialog.currentName}`,
+        async () => {
+          await postJson<VmInstance>(
+            `/api/vms/${renameDialog.id}/update`,
+            {
+              name,
+            } satisfies UpdateVmInput,
+          );
+          closeRenameDialog();
+          await refreshSummary();
+          if (selectedVmIdRef.current === renameDialog.id) {
+            await refreshDetail(renameDialog.id);
+          }
+        },
+        `Renamed workspace to ${name}.`,
+      );
       return;
     }
 
     await runMutation(
-      `Renaming ${template.name}`,
+      `Renaming ${renameDialog.currentName}`,
       async () => {
         await postJson<EnvironmentTemplate>(
-          `/api/templates/${template.id}/update`,
+          `/api/templates/${renameDialog.id}/update`,
           {
             name,
-            description: template.description,
+            description: renameDialog.description,
           } satisfies UpdateTemplateInput,
         );
+        closeRenameDialog();
         await refreshSummary();
       },
       `Renamed template to ${name}.`,
@@ -1995,7 +2043,7 @@ export function DashboardApp(): JSX.Element {
 
   async function handleVmAction(
     vmId: string,
-    action: "start" | "stop",
+    action: VmPowerAction,
   ): Promise<void> {
     const vmName = summary?.vms.find((vm) => vm.id === vmId)?.name ?? vmId;
 
@@ -2892,7 +2940,7 @@ export function DashboardApp(): JSX.Element {
                   onRename={handleRenameVm}
                   onSetActiveCpuThreshold={handleSetActiveCpuThreshold}
                   onSnapshot={handleSnapshot}
-                  onStartStop={handleVmAction}
+                  onPowerAction={handleVmAction}
                   onToggleMenu={(vmId) => {
                     setShellMenuOpen(false);
                     setOpenTemplateMenuId(null);
@@ -3009,7 +3057,7 @@ export function DashboardApp(): JSX.Element {
                 onSaveForward={handleAddForward}
                 onLaunchFromSnapshot={handleLaunchFromSnapshot}
                 onSnapshot={handleSnapshot}
-                onStartStop={handleVmAction}
+                onPowerAction={handleVmAction}
                 onClosedResizeStart={handleSidepanelClosedResizeStart}
                 onSubmitCapture={handleCaptureTemplate}
                 onSubmitCommand={handleCommand}
@@ -3076,6 +3124,17 @@ export function DashboardApp(): JSX.Element {
           onTemplateChange={handleTemplateChange}
         />
       ) : null}
+      {renameDialog ? (
+        <RenameDialog
+          busy={isBusy}
+          currentName={renameDialog.currentName}
+          draft={renameDraft}
+          entityLabel={renameDialog.kind === "vm" ? "Workspace" : "Template"}
+          onClose={closeRenameDialog}
+          onDraftChange={setRenameDraft}
+          onSubmit={handleRenameSubmit}
+        />
+      ) : null}
     </>
   );
 }
@@ -3089,6 +3148,82 @@ interface CreateVmDialogProps {
   onFieldChange: (field: keyof CreateDraft, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onTemplateChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+}
+
+interface RenameDialogProps {
+  busy: boolean;
+  currentName: string;
+  draft: string;
+  entityLabel: string;
+  onClose: () => void;
+  onDraftChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+}
+
+function RenameDialog({
+  busy,
+  currentName,
+  draft,
+  entityLabel,
+  onClose,
+  onDraftChange,
+  onSubmit,
+}: RenameDialogProps): JSX.Element {
+  const normalizedDraft = draft.trim();
+  const unchanged = normalizedDraft.length === 0 || normalizedDraft === currentName;
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onClick={() => {
+        if (!busy) {
+          onClose();
+        }
+      }}
+    >
+      <section className="dialog-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="dialog-panel__header">
+          <div>
+            <p className="workspace-shell__eyebrow">{entityLabel}</p>
+            <h2 className="dialog-panel__title">Rename {entityLabel.toLowerCase()}</h2>
+            <p className="dialog-panel__copy">
+              This stays inside the dashboard, so browser fullscreen remains active.
+            </p>
+          </div>
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Close
+          </button>
+        </div>
+
+        <form className="dialog-panel__form" onSubmit={onSubmit}>
+          <label className="field-shell">
+            <span>Name</span>
+            <input
+              className="field-input"
+              value={draft}
+              onChange={(event) => onDraftChange(event.target.value)}
+              placeholder={currentName}
+              disabled={busy}
+              autoFocus
+            />
+          </label>
+
+          <button
+            className="button button--primary button--full"
+            type="submit"
+            disabled={busy || unchanged}
+          >
+            Save name
+          </button>
+        </form>
+      </section>
+    </div>
+  );
 }
 
 function CreateVmDialog({
@@ -3232,7 +3367,7 @@ interface VmTileProps {
   onRename: (vm: VmInstance) => Promise<void>;
   onSetActiveCpuThreshold: (vm: VmInstance) => void;
   onSnapshot: (vm: VmInstance) => Promise<void>;
-  onStartStop: (vmId: string, action: "start" | "stop") => Promise<void>;
+  onPowerAction: (vmId: string, action: VmPowerAction) => Promise<void>;
   onToggleMenu: (vmId: string) => void;
 }
 
@@ -3316,7 +3451,7 @@ function VmTile({
   onRename,
   onSetActiveCpuThreshold,
   onSnapshot,
-  onStartStop,
+  onPowerAction,
   onToggleMenu,
 }: VmTileProps): JSX.Element {
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -3397,11 +3532,22 @@ function VmTile({
             type="button"
             onClick={() => {
               onToggleMenu(vm.id);
-              void onStartStop(vm.id, vm.status === "running" ? "stop" : "start");
+              void onPowerAction(vm.id, vm.status === "running" ? "stop" : "start");
             }}
             disabled={busy}
           >
             {vm.status === "running" ? "Stop" : "Start"}
+          </button>
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              void onPowerAction(vm.id, "restart");
+            }}
+            disabled={busy || vm.status !== "running"}
+          >
+            Restart
           </button>
           <button
             className="menu-action"
@@ -3918,7 +4064,7 @@ interface WorkspaceSidepanelProps {
   onResize: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSaveForward: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSnapshot: (vm: VmInstance) => Promise<void>;
-  onStartStop: (vmId: string, action: "start" | "stop") => Promise<void>;
+  onPowerAction: (vmId: string, action: VmPowerAction) => Promise<void>;
   onSubmitCapture: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSubmitCommand: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onLaunchFromSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
@@ -3967,20 +4113,28 @@ function RailResizeHandle({
 
   return (
     <div
-      aria-label="Resize workspace rail"
-      aria-orientation="vertical"
-      aria-valuemax={railMaxWidth}
-      aria-valuemin={railMinWidth}
-      aria-valuenow={width}
       className={joinClassNames(
-        "workspace-rail__resize-handle",
-        resizing ? "workspace-rail__resize-handle--active" : "",
+        "workspace-rail__resize-track",
+        resizing ? "workspace-rail__resize-track--active" : "",
       )}
-      role="separator"
-      tabIndex={0}
-      onKeyDown={onResizeKeyDown}
-      onPointerDown={onResizePointerDown}
-    />
+    >
+      <div aria-hidden="true" className="workspace-rail__resize-line" />
+      <div
+        aria-label="Resize workspace rail"
+        aria-orientation="vertical"
+        aria-valuemax={railMaxWidth}
+        aria-valuemin={railMinWidth}
+        aria-valuenow={width}
+        className={joinClassNames(
+          "workspace-rail__resize-handle",
+          resizing ? "workspace-rail__resize-handle--active" : "",
+        )}
+        role="separator"
+        tabIndex={0}
+        onKeyDown={onResizeKeyDown}
+        onPointerDown={onResizePointerDown}
+      />
+    </div>
   );
 }
 
@@ -4066,20 +4220,28 @@ function SidepanelResizeHandle({
 
   return (
     <div
-      aria-label="Resize inspector"
-      aria-orientation="vertical"
-      aria-valuemax={sidepanelMaxWidth}
-      aria-valuemin={sidepanelClosedWidth}
-      aria-valuenow={width}
       className={joinClassNames(
-        "workspace-sidepanel__resize-handle",
-        resizing ? "workspace-sidepanel__resize-handle--active" : "",
+        "workspace-sidepanel__resize-track",
+        resizing ? "workspace-sidepanel__resize-track--active" : "",
       )}
-      role="separator"
-      tabIndex={0}
-      onKeyDown={onResizeKeyDown}
-      onPointerDown={handlePointerDown}
-    />
+    >
+      <div aria-hidden="true" className="workspace-sidepanel__resize-line" />
+      <div
+        aria-label="Resize inspector"
+        aria-orientation="vertical"
+        aria-valuemax={sidepanelMaxWidth}
+        aria-valuemin={sidepanelClosedWidth}
+        aria-valuenow={width}
+        className={joinClassNames(
+          "workspace-sidepanel__resize-handle",
+          resizing ? "workspace-sidepanel__resize-handle--active" : "",
+        )}
+        role="separator"
+        tabIndex={0}
+        onKeyDown={onResizeKeyDown}
+        onPointerDown={handlePointerDown}
+      />
+    </div>
   );
 }
 
@@ -4113,7 +4275,7 @@ function WorkspaceSidepanel({
   onSaveForward,
   onLaunchFromSnapshot,
   onSnapshot,
-  onStartStop,
+  onPowerAction,
   onClosedResizeStart,
   onOpenCollapsed,
   onSubmitCapture,
@@ -4198,12 +4360,18 @@ function WorkspaceSidepanel({
                 <button
                   className="button button--secondary"
                   type="button"
-                  onClick={() =>
-                    onStartStop(vm.id, vm.status === "running" ? "stop" : "start")
-                  }
+                  onClick={() => onPowerAction(vm.id, vm.status === "running" ? "stop" : "start")}
                   disabled={busy}
                 >
                   {vm.status === "running" ? "Stop" : "Start"}
+                </button>
+                <button
+                  className="button button--ghost"
+                  type="button"
+                  onClick={() => void onPowerAction(vm.id, "restart")}
+                  disabled={busy || vm.status !== "running"}
+                >
+                  Restart
                 </button>
                 <button
                   className="button button--ghost"
@@ -5656,8 +5824,18 @@ function formatJobKindLabel(kind: DashboardSummary["jobs"][number]["kind"]): str
   }
 }
 
+function isDesktopBootJobKind(kind: DashboardSummary["jobs"][number]["kind"]): boolean {
+  return (
+    kind === "create" ||
+    kind === "clone" ||
+    kind === "launch-snapshot" ||
+    kind === "start" ||
+    kind === "restart"
+  );
+}
+
 function formatActiveJobTiming(
-  job: Pick<DashboardSummary["jobs"][number], "createdAt" | "progressPercent">,
+  job: Pick<DashboardSummary["jobs"][number], "createdAt" | "kind" | "progressPercent">,
   nowMs = Date.now(),
 ): string | null {
   const createdAt = Date.parse(job.createdAt);
@@ -5668,7 +5846,10 @@ function formatActiveJobTiming(
 
   const elapsedMs = Math.max(0, nowMs - createdAt);
   const timingParts = [`Elapsed ${formatDurationShort(elapsedMs)}`];
-  const remainingMs = estimateRemainingDurationMs(elapsedMs, job.progressPercent ?? null);
+  const remainingMs =
+    job.kind === "start" || job.kind === "restart"
+      ? null
+      : estimateRemainingDurationMs(elapsedMs, job.progressPercent ?? null);
 
   if (remainingMs !== null) {
     timingParts.push(`About ${formatDurationShort(remainingMs)} left`);
@@ -5731,12 +5912,7 @@ function getVmDesktopBootState(
   nowMs = Date.now(),
 ): DesktopBootState | null {
   const failedBootJob = detail.recentJobs.find(
-    (job) =>
-      (job.kind === "create" ||
-        job.kind === "clone" ||
-        job.kind === "launch-snapshot" ||
-        job.kind === "start") &&
-      job.status === "failed",
+    (job) => isDesktopBootJobKind(job.kind) && job.status === "failed",
   );
 
   if (failedBootJob) {
@@ -5745,10 +5921,7 @@ function getVmDesktopBootState(
 
   const activeJob = detail.recentJobs.find(
     (job) =>
-      (job.kind === "create" ||
-        job.kind === "clone" ||
-        job.kind === "launch-snapshot" ||
-        job.kind === "start") &&
+      isDesktopBootJobKind(job.kind) &&
       (job.status === "queued" || job.status === "running"),
   );
 
@@ -5756,10 +5929,14 @@ function getVmDesktopBootState(
     return null;
   }
 
-  if (activeJob?.kind === "start") {
+  if (activeJob?.kind === "start" || activeJob?.kind === "restart") {
     return {
-      label: "Booting workspace",
-      message: activeJob.message || "Starting the VM and waiting for the desktop.",
+      label: activeJob.kind === "restart" ? "Restarting workspace" : "Booting workspace",
+      message:
+        activeJob.message ||
+        (activeJob.kind === "restart"
+          ? "Restarting the VM and waiting for the desktop."
+          : "Starting the VM and waiting for the desktop."),
       progressPercent: activeJob.progressPercent ?? null,
       timingCopy: formatActiveJobTiming(activeJob, nowMs),
     };
@@ -5794,12 +5971,7 @@ function getVmDesktopBootState(
 
 function desktopFallbackBadge(detail: VmDetail): string {
   const failedBootJob = detail.recentJobs.find(
-    (job) =>
-      (job.kind === "create" ||
-        job.kind === "clone" ||
-        job.kind === "launch-snapshot" ||
-        job.kind === "start") &&
-      job.status === "failed",
+    (job) => isDesktopBootJobKind(job.kind) && job.status === "failed",
   );
 
   if (failedBootJob) {
@@ -5819,12 +5991,7 @@ function desktopFallbackBadge(detail: VmDetail): string {
 
 function desktopFallbackMessage(detail: VmDetail): string {
   const failedBootJob = detail.recentJobs.find(
-    (job) =>
-      (job.kind === "create" ||
-        job.kind === "clone" ||
-        job.kind === "launch-snapshot" ||
-        job.kind === "start") &&
-      job.status === "failed",
+    (job) => isDesktopBootJobKind(job.kind) && job.status === "failed",
   );
 
   if (failedBootJob) {
@@ -5836,7 +6003,7 @@ function desktopFallbackMessage(detail: VmDetail): string {
   }
 
   if (detail.vm.status !== "running") {
-    return "Start the VM to attach a browser desktop. Until then the dashboard keeps showing the latest generated frame.";
+    return "Start the VM to attach a browser desktop.";
   }
 
   return "This VM does not have a browser VNC session yet. The synthetic frame stays here until the guest publishes a reachable desktop endpoint.";

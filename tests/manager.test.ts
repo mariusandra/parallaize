@@ -177,6 +177,162 @@ test("manager marks a running VM stopped after the provider reports an external 
   );
 });
 
+test("manager treats an already-running incus start as a successful resume", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-start-already-running-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const instanceName = "parallaize-vm-0104-already-running";
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5901,
+    commandRunner: {
+      execute(args: string[]) {
+        if (
+          args[0] === "list" &&
+          ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+        ) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.104",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        if (args[0] === "start" && args[1] === instanceName) {
+          return {
+            args,
+            status: 1,
+            stdout: "",
+            stderr:
+              `Error: The instance is already running ` +
+              `Try \`incus info --show-log ${instanceName}\` for more info`,
+          };
+        }
+
+        return ok("", args);
+      },
+    },
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const now = new Date().toISOString();
+
+  store.update((draft) => {
+    draft.vms.unshift({
+      id: "vm-0104",
+      name: "already-running",
+      templateId: "tpl-0001",
+      provider: "incus",
+      providerRef: instanceName,
+      status: "stopped",
+      resources: {
+        cpu: 2,
+        ramMb: 4096,
+        diskGb: 30,
+      },
+      createdAt: now,
+      updatedAt: now,
+      liveSince: null,
+      lastAction: "Stopped",
+      snapshotIds: [],
+      frameRevision: 1,
+      screenSeed: 104,
+      activeWindow: "terminal",
+      workspacePath: "/root",
+      session: null,
+      forwardedPorts: [],
+      activityLog: [],
+      commandHistory: [],
+    });
+  });
+
+  manager.startVm("vm-0104");
+  await wait(500);
+
+  const detail = manager.getVmDetail("vm-0104");
+
+  assert.equal(detail.vm.status, "running");
+  assert.ok(detail.vm.liveSince);
+  assert.equal(detail.vm.lastAction, "Workspace resumed");
+  assert.equal(detail.vm.session?.display, "10.55.0.104:5901");
+  assert.ok(
+    detail.recentJobs.some(
+      (job) => job.kind === "start" && job.status === "succeeded" && job.message === "already-running started",
+    ),
+  );
+});
+
+test("restart runs as a single queued action that stops before booting again", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-restart-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "restart-lab",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  await wait(700);
+  manager.restartVm(vm.id);
+  await wait(50);
+
+  const restartingDetail = manager.getVmDetail(vm.id);
+  assert.equal(restartingDetail.vm.status, "stopped");
+  assert.equal(restartingDetail.recentJobs[0]?.kind, "restart");
+  assert.equal(restartingDetail.recentJobs[0]?.status, "running");
+  assert.equal(restartingDetail.recentJobs[0]?.message, "Preparing boot");
+
+  await wait(500);
+
+  const detail = manager.getVmDetail(vm.id);
+  assert.equal(detail.vm.status, "running");
+  assert.equal(detail.vm.lastAction, "Workspace resumed");
+  assert.ok(detail.recentJobs[0]);
+  assert.equal(detail.recentJobs[0]?.kind, "restart");
+  assert.equal(detail.recentJobs[0]?.status, "succeeded");
+  assert.equal(detail.recentJobs[0]?.message, "restart-lab restarted");
+  assert.ok(detail.vm.activityLog.includes("stop: VM state checkpoint saved"));
+  assert.ok(detail.vm.activityLog.includes("resume: desktop compositor restarted"));
+});
+
 test("template capture jobs expose staged publish progress", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-capture-progress-"));
   context.after(() => {
@@ -2403,6 +2559,103 @@ test("incus provider refreshes an existing agent device before resuming a VM", a
     "agent",
   ]);
   assert.deepEqual(startCall, ["start", instanceName]);
+});
+
+test("incus provider treats an already-running instance as a successful resume", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0111-resume-already-running";
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (
+        args[0] === "list" &&
+        ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+      ) {
+        return ok(
+          JSON.stringify([
+            {
+              name: instanceName,
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address: "10.55.0.111",
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      if (args[0] === "start" && args[1] === instanceName) {
+        return {
+          args,
+          status: 1,
+          stdout: "",
+          stderr:
+            `Error: The instance is already running ` +
+            `Try \`incus info --show-log ${instanceName}\` for more info`,
+        };
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5901,
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0111",
+    name: "resume-already-running",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "stopped",
+    resources: {
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 30,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Stopped",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 11,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.startVm(vm);
+  const startCall = calls.find(
+    (args) => args[0] === "start" && args[1] === instanceName,
+  );
+
+  assert.equal(mutation.session?.display, "10.55.0.111:5901");
+  assert.deepEqual(startCall, ["start", instanceName]);
+  assert.equal(mutation.lastAction, "Workspace resumed");
 });
 
 function ok(stdout: string, args: string[]) {

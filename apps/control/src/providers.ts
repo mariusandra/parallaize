@@ -760,7 +760,17 @@ class IncusProvider implements DesktopProvider {
   async startVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
     await this.ensureAgentDeviceAsync(vm.providerRef);
-    await this.runAsync(["start", vm.providerRef]);
+    const startArgs = ["start", vm.providerRef];
+    const startResult = await this.executeAsync(startArgs);
+
+    if (startResult.status !== 0) {
+      const failure = formatCommandFailure(startArgs, startResult);
+
+      if (!isAlreadyRunningFailure(failure)) {
+        throw new Error(failure);
+      }
+    }
+
     const session = await this.resolveSession(vm.providerRef);
 
     return {
@@ -2619,6 +2629,10 @@ function isMissingInstanceFailure(message: string): boolean {
     message.includes("Instance not found") ||
     message.includes("Failed to fetch instance")
   );
+}
+
+function isAlreadyRunningFailure(message: string): boolean {
+  return message.includes("already running");
 }
 
 function sleep(ms: number): Promise<void> {
