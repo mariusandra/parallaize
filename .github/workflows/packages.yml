@@ -41,6 +41,12 @@ jobs:
       - name: Prepare package artifacts
         run: pnpm package:prepare
 
+      - name: Set up QEMU for cross-arch RPM builds
+        if: matrix.format == 'rpm' && matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Build package
         run: node scripts/build-packages.mjs --format ${{ matrix.format }} --arch ${{ matrix.arch }}
 

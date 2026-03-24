@@ -19,6 +19,7 @@ const nodeVersion = process.version.replace(/^v/, "");
 const buildRunId = `${Date.now()}-${process.pid}`;
 const formats = normalizeFormats(args.format ?? "deb");
 const architectures = normalizeArchitectures(args.arch ?? "amd64");
+const hostArchitecture = normalizeHostArchitecture(process.arch);
 
 const archMatrix = {
   amd64: {
@@ -339,7 +340,7 @@ async function buildRpmPackage({
     }),
   );
 
-  if (commandExists("rpmbuild")) {
+  if (canBuildRpmLocally(architecture)) {
     spawnChecked("rpmbuild", [
       "--target",
       archMatrix[architecture].rpm,
@@ -369,7 +370,12 @@ async function buildRpmPackage({
       ].join(" && "),
     ]);
   } else {
-    throw new Error("Building RPM packages requires either rpmbuild or docker.");
+    throw new Error(
+      [
+        `Building ${archMatrix[architecture].rpm} RPMs requires either a native ${architecture} host with rpmbuild`,
+        "or docker for the Fedora container fallback.",
+      ].join(" "),
+    );
   }
 
   const builtPackagePath = join(
@@ -553,6 +559,21 @@ function normalizeFormats(value) {
 
     return entry;
   });
+}
+
+function normalizeHostArchitecture(value) {
+  switch (value) {
+    case "x64":
+      return "amd64";
+    case "arm64":
+      return "arm64";
+    default:
+      return null;
+  }
+}
+
+function canBuildRpmLocally(architecture) {
+  return commandExists("rpmbuild") && hostArchitecture === architecture;
 }
 
 function parseArgs(argv) {

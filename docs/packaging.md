@@ -76,7 +76,7 @@ The package build flow does this:
 3. Downloads and verifies the matching official Node tarball for the target architecture.
 4. Stages the install tree.
 5. Emits `.deb` via `dpkg-deb`.
-6. Emits `.rpm` via local `rpmbuild` or a Fedora container when `rpmbuild` is not installed on the host.
+6. Emits `.rpm` via local `rpmbuild` on native-architecture hosts, or a Fedora container when `rpmbuild` is unavailable or the target RPM architecture differs from the host.
 
 ## Install And Boot
 
