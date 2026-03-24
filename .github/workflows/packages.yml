@@ -13,9 +13,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        format:
-          - deb
-          - rpm
         arch:
           - amd64
           - arm64
@@ -41,18 +38,12 @@ jobs:
       - name: Prepare package artifacts
         run: pnpm package:prepare
 
-      - name: Set up QEMU for cross-arch RPM builds
-        if: matrix.format == 'rpm' && matrix.arch == 'arm64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Build package
-        run: node scripts/build-packages.mjs --format ${{ matrix.format }} --arch ${{ matrix.arch }}
+        run: node scripts/build-packages.mjs --format deb --arch ${{ matrix.arch }}
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: parallaize-${{ matrix.format }}-${{ matrix.arch }}
+          name: parallaize-deb-${{ matrix.arch }}
           path: artifacts/packages/
           if-no-files-found: error
