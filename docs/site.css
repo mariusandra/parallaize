@@ -231,7 +231,7 @@ li code {
 .screencast-frame {
   position: relative;
   overflow: hidden;
-  min-height: 28rem;
+  aspect-ratio: 1623 / 1056;
   border: 1px dashed color-mix(in srgb, var(--accent) 32%, var(--line-strong));
   border-radius: 1.6rem;
   background:
@@ -240,14 +240,13 @@ li code {
 }
 
 .screencast-frame::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(18, 32, 42, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(18, 32, 42, 0.06) 1px, transparent 1px);
-  background-size: 40px 40px;
-  opacity: 0.7;
+  display: none;
+}
+
+.screencast-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .screencast-placeholder {
@@ -396,9 +395,8 @@ li code {
     grid-template-columns: 1fr;
   }
 
-  .screencast-frame,
-  .screencast-placeholder {
-    min-height: 20rem;
+  .screencast-frame {
+    min-height: 0;
   }
 }
 
