@@ -30,6 +30,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `ar
 - [x] Packaged-install foundation with bundled Node runtime, staged `.deb` builder, packaged systemd/Caddy assets, and a packaging decision note
 - [x] Dispatch-driven release automation that bumps versioned package/docs references, builds package artifacts, uploads them to the archive bucket, pushes the release commit back to GitHub, and publishes GitHub releases with Debian assets
 - [x] Host internet/bootstrap diagnostics plus guest desktop self-heal for packaged Incus VMs so X11/VNC converge even after a bad first boot
+- [x] Repeated guest desktop bootstrap retries during running-session refresh so cloud-init-disabled Ubuntu desktop images can still recover VNC once the guest agent comes up
 
 ## Priority Backlog
 
@@ -92,6 +93,7 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-25: Live-debugged a packaged `0.1.1` install on `devbox`, confirmed the Ubuntu desktop image had `cloud-init` disabled by generator, and moved the Incus guest desktop bootstrap retry into the normal missing-session refresh path so VNC self-heals after the guest agent becomes ready.
 - 2026-03-25: Added host internet/bootstrap diagnostics for the Incus provider, made `/api/health` degrade on host egress failures, and switched guest desktop bootstrap to a retrying systemd service so `x11vnc` and the X11 GDM config can recover after a failed first boot.
 - 2026-03-25: Extended the release workflow to create and push a GitHub release tag and attach the generated `amd64` and `arm64` Debian packages as GitHub release assets.
 - 2026-03-25: Removed RPM package generation from the shared builder and release workflow after CI publish failures on cross-architecture Fedora container runs; Debian packages remain the only emitted artifacts.

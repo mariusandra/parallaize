@@ -17,6 +17,7 @@ import type {
 const DEFAULT_GUEST_VNC_PORT = 5900;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
+const DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 30_000;
 const DEFAULT_GUEST_WORKSPACE = "/root";
 const DEFAULT_VM_CREATE_HEARTBEAT_MS = 4000;
 const VM_CREATE_ALLOCATION_START_PERCENT = 18;
@@ -46,6 +47,7 @@ export interface CreateProviderOptions {
   guestVncPort?: number;
   guestInotifyMaxUserWatches?: number;
   guestInotifyMaxUserInstances?: number;
+  guestDesktopBootstrapRetryMs?: number;
   commandRunner?: IncusCommandRunner;
   guestPortProbe?: GuestPortProbe;
   hostNetworkProbe?: HostNetworkProbe;
@@ -522,6 +524,7 @@ class IncusProvider implements DesktopProvider {
   private readonly guestVncPort: number;
   private readonly guestInotifyMaxUserWatches: number;
   private readonly guestInotifyMaxUserInstances: number;
+  private readonly guestDesktopBootstrapRetryMs: number;
   private readonly runner: IncusCommandRunner;
   private readonly project: string | null;
   private readonly storagePool: string | null;
@@ -532,6 +535,7 @@ class IncusProvider implements DesktopProvider {
   private telemetrySnapshotAt = 0;
   private telemetryInstances = new Map<string, IncusListInstance>();
   private readonly vmCpuUsage = new Map<string, { capturedAt: number; usage: number }>();
+  private readonly guestDesktopBootstrapAttemptAt = new Map<string, number>();
   private hostNetworkDiagnosticAt = 0;
   private hostNetworkDiagnostic: HostNetworkDiagnostic = {
     status: "unknown",
@@ -548,6 +552,10 @@ class IncusProvider implements DesktopProvider {
       options.guestInotifyMaxUserWatches ?? DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES;
     this.guestInotifyMaxUserInstances =
       options.guestInotifyMaxUserInstances ?? DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES;
+    this.guestDesktopBootstrapRetryMs = Math.max(
+      options.guestDesktopBootstrapRetryMs ?? DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
+      0,
+    );
     this.project = options.project ?? null;
     this.storagePool = options.storagePool ?? null;
     this.runner =
@@ -659,7 +667,32 @@ class IncusProvider implements DesktopProvider {
       return null;
     }
 
-    return this.probeReachableSession(info);
+    const session = await this.probeReachableSession(info);
+
+    if (session) {
+      this.guestDesktopBootstrapAttemptAt.delete(vm.providerRef);
+      return session;
+    }
+
+    const bootstrapped = await this.maybeEnsureGuestDesktopBootstrapAsync(vm.providerRef);
+
+    if (!bootstrapped) {
+      return null;
+    }
+
+    const refreshedInfo = await this.inspectInstanceAsync(vm.providerRef);
+
+    if (normalizeStatus(refreshedInfo.status ?? refreshedInfo.state?.status) !== "running") {
+      return null;
+    }
+
+    const refreshedSession = await this.probeReachableSession(refreshedInfo);
+
+    if (refreshedSession) {
+      this.guestDesktopBootstrapAttemptAt.delete(vm.providerRef);
+    }
+
+    return refreshedSession;
   }
 
   async createVm(
@@ -1374,7 +1407,6 @@ class IncusProvider implements DesktopProvider {
     let address: string | null = null;
     const waitStartedAt = Date.now();
     const emitProgress = report;
-    let bootstrapTriggered = false;
 
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const info = await this.inspectInstanceAsync(instanceName);
@@ -1383,13 +1415,12 @@ class IncusProvider implements DesktopProvider {
       const session = await this.probeReachableSessionForAddresses(addresses);
 
       if (session) {
+        this.guestDesktopBootstrapAttemptAt.delete(instanceName);
         emitProgress?.("Desktop session ready", VM_CREATE_READY_PERCENT);
         return session;
       }
 
-      if (!bootstrapTriggered) {
-        bootstrapTriggered = await this.ensureGuestDesktopBootstrapAsync(instanceName);
-      }
+      await this.maybeEnsureGuestDesktopBootstrapAsync(instanceName);
 
       if (normalizeStatus(info.status ?? info.state?.status) !== "running") {
         break;
@@ -1403,6 +1434,18 @@ class IncusProvider implements DesktopProvider {
     }
 
     return address ? buildVncSession(address, this.guestVncPort) : null;
+  }
+
+  private async maybeEnsureGuestDesktopBootstrapAsync(instanceName: string): Promise<boolean> {
+    const now = Date.now();
+    const lastAttemptAt = this.guestDesktopBootstrapAttemptAt.get(instanceName) ?? 0;
+
+    if (now - lastAttemptAt < this.guestDesktopBootstrapRetryMs) {
+      return false;
+    }
+
+    this.guestDesktopBootstrapAttemptAt.set(instanceName, now);
+    return this.ensureGuestDesktopBootstrapAsync(instanceName);
   }
 
   private async ensureGuestDesktopBootstrapAsync(instanceName: string): Promise<boolean> {

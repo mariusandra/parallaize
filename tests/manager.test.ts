@@ -3112,6 +3112,102 @@ test("manager reattaches reachable VNC sessions for running incus VMs after star
   assert.equal(detail.vm.session?.browserPath, "/?vm=vm-0201");
 });
 
+test("incus provider refresh reruns guest desktop bootstrap when VNC is still missing", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0202-refresh-bootstrap";
+  let probeAttempts = 0;
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5900,
+    commandRunner: {
+      execute(args: string[]) {
+        calls.push(args);
+
+        if (
+          args[0] === "list" &&
+          ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+        ) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.202",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        if (
+          args[0] === "exec" &&
+          args[1] === instanceName &&
+          (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+        ) {
+          return ok("", args);
+        }
+
+        return ok("", args);
+      },
+    },
+    guestPortProbe: {
+      async probe() {
+        probeAttempts += 1;
+        return probeAttempts >= 2;
+      },
+    },
+  });
+
+  const session = await provider.refreshVmSession({
+    id: "vm-0202",
+    name: "refresh-bootstrap",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Workspace resumed",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 202,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+    commandHistory: [],
+  });
+
+  const bootstrapExecCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
+  );
+
+  assert.ok(bootstrapExecCall);
+  assert.equal(session?.display, "10.55.0.202:5900");
+});
+
 test("incus provider prefers the primary guest NIC over bridge interfaces for VNC", async () => {
   const instanceName = "parallaize-vm-0202-prefer-primary-nic";
   const probedHosts: string[] = [];
