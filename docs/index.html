@@ -59,6 +59,44 @@
           </div>
         </section>
 
+        <section class="usage-panel" aria-labelledby="usage-title">
+          <div class="section-heading">
+            <p class="eyebrow">Basic usage</p>
+            <h2 id="usage-title">Create one VM, shape it, then turn it into a repeatable fleet.</h2>
+            <p class="section-copy">
+              Parallaize is built around a simple loop: launch a VM, configure it exactly
+              how you want, then either save it as a reusable template or clone it directly
+              into as many workspaces as you need.
+            </p>
+          </div>
+
+          <div class="usage-grid">
+            <article class="usage-card">
+              <h3>1. Create a VM</h3>
+              <p>
+                Start from a base template such as Ubuntu desktop and open it in the browser
+                through the built-in VNC path.
+              </p>
+            </article>
+
+            <article class="usage-card">
+              <h3>2. Configure it</h3>
+              <p>
+                Install tools, pull repositories, set up services, and shape the machine
+                until it matches the environment you want operators or agents to use.
+              </p>
+            </article>
+
+            <article class="usage-card">
+              <h3>3. Save or clone</h3>
+              <p>
+                Capture the result as a template for future launches, or clone the VM into a
+                larger fleet when you want several identical workspaces right away.
+              </p>
+            </article>
+          </div>
+        </section>
+
         <section class="downloads" aria-labelledby="downloads-title">
           <div class="section-heading">
             <p class="eyebrow">Ubuntu 24.04 packages</p>
@@ -115,6 +153,48 @@ sudo apt install ./parallaize_0.1.0-1_arm64.deb</code></pre>
               <pre><code>sudoedit /etc/parallaize/parallaize.env
 sudo systemctl start parallaize.service
 sudo systemctl start parallaize-caddy.service</code></pre>
+            </article>
+
+            <article class="install-card install-card--wide">
+              <h3>3. Workflow for Hetzner</h3>
+              <p>
+                This works perfectly with dedicated Hetzner machines. Keep Parallaize bound
+                to <code>127.0.0.1</code>, allow only SSH through the firewall, and use SSH
+                port forwarding for secure local access instead of exposing the app directly.
+              </p>
+
+              <p class="install-card__label">Ubuntu 24.04 command line</p>
+              <pre><code>sudo apt-get update
+sudo apt-get install -y curl ufw
+
+curl -fLo /tmp/parallaize_0.1.0-1_amd64.deb \
+  https://archive.parallaize.com/packages/parallaize_0.1.0-1_amd64.deb
+sudo apt-get install -y /tmp/parallaize_0.1.0-1_amd64.deb
+
+sudo cp /etc/parallaize/parallaize.env /etc/parallaize/parallaize.env.bak
+sudo sed -i 's/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=replace-this-now/' \
+  /etc/parallaize/parallaize.env
+sudo grep -E '^(HOST|PORT|PARALLAIZE_ADMIN_USERNAME|PARALLAIZE_ADMIN_PASSWORD)=' \
+  /etc/parallaize/parallaize.env
+
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow OpenSSH
+sudo ufw --force enable
+
+sudo systemctl disable --now parallaize-caddy.service || true
+sudo systemctl enable --now parallaize.service
+curl http://127.0.0.1:3000/api/health</code></pre>
+
+              <p class="install-card__label">Secure local access over SSH</p>
+              <pre><code>ssh -N -L 3000:127.0.0.1:3000 root@YOUR_HETZNER_HOST
+# then open http://127.0.0.1:3000 on your laptop</code></pre>
+
+              <p>
+                The packaged defaults already keep the app on <code>127.0.0.1:3000</code>,
+                so you do not need to open <code>3000</code> or <code>8080</code> in UFW for
+                this flow.
+              </p>
             </article>
           </div>
         </section>

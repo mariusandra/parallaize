@@ -279,7 +279,7 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 
 Parallaize now has a staged package builder for host installs. The first supported target is Ubuntu 24.04 `amd64` as a `.deb`, with experimental `.deb` `arm64` and `.rpm` outputs emitted from the same workflow.
 
-The package build path bundles Node 24 into the package, stages systemd and Caddy assets, and writes artifacts into `artifacts/packages/`. The detailed packaging note is in [`docs/packaging.md`](/home/marius/Projects/Parralaize/parallaize/docs/packaging.md).
+The package build path bundles Node 24 into the package, stages systemd and Caddy assets, and writes artifacts into `artifacts/packages/`. The detailed packaging note is in [`docs/packaging.md`](/home/marius/Projects/Parralaize/parallaize/docs/packaging.md), including a locked-down dedicated Hetzner workflow for Ubuntu 24.04 that keeps the app on localhost and reaches it through SSH port forwarding.
 
 ## Configuration
 

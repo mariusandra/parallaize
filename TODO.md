@@ -1,6 +1,6 @@
 # Parallaize TODO
 
-Last updated: 2026-03-24
+Last updated: 2026-03-25
 Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` and `arm64` artifacts buildable from the same flow, and then validate the packaged install on a live Incus host.
 
 ## Current State
@@ -91,6 +91,7 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-25: Documented the dedicated Hetzner packaged-install workflow for Ubuntu 24.04, including SSH-only UFW rules, localhost binding, and SSH port forwarding, and clarified the basic VM-to-template-or-fleet usage on the docs landing page.
 - 2026-03-24: Installed the Ubuntu 24.04 `amd64` `.deb` on the live host, confirmed the packaged systemd units boot, and found two follow-ups: the package must add `parallaize` to `incus-admin` on Ubuntu, and full Incus-path validation should happen on a clean distro-managed Incus host because this machine already had a manual Flox `incusd` bound to the same socket path.
 - 2026-03-24: Chose packaged host installs over npm-only deploys for real deployments, bundled the Node 24 runtime into the package, and made Ubuntu 24.04 `amd64` `.deb` the first supported package target while keeping `.rpm` and `arm64` outputs experimental.
 - 2026-03-22: Verified the real `incus` server boots cleanly against both JSON and PostgreSQL persistence; the PostgreSQL backend seeded and served state from the local Docker PostgreSQL stack.

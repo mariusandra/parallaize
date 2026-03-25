@@ -92,6 +92,78 @@ sudo systemctl start parallaize-caddy.service
 
 The post-install scripts create a dedicated `parallaize` system user, create `/var/lib/parallaize`, and add that user to `incus`, `incus-admin`, `lxd`, and `sudo` when those groups already exist on the host. Services are not auto-started because the operator should review the env file first.
 
+### Workflow For Hetzner
+
+This packaged install path works perfectly on dedicated Hetzner machines.
+
+The cleanest Hetzner setup is:
+
+- keep Parallaize bound to `127.0.0.1`
+- allow inbound SSH only at the firewall
+- leave the packaged Caddy front door stopped
+- reach the UI through SSH port forwarding from your laptop
+
+On Ubuntu 24.04 `amd64`, this is the full command-line flow:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y curl ufw
+
+curl -fLo /tmp/parallaize_0.1.0-1_amd64.deb \
+  https://archive.parallaize.com/packages/parallaize_0.1.0-1_amd64.deb
+sudo apt-get install -y /tmp/parallaize_0.1.0-1_amd64.deb
+
+sudo cp /etc/parallaize/parallaize.env /etc/parallaize/parallaize.env.bak
+sudo sed -i 's/^PARALLAIZE_ADMIN_USERNAME=.*/PARALLAIZE_ADMIN_USERNAME=admin/' \
+  /etc/parallaize/parallaize.env
+sudo sed -i 's/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=replace-this-now/' \
+  /etc/parallaize/parallaize.env
+sudo grep -E '^(HOST|PORT|PARALLAIZE_ADMIN_USERNAME|PARALLAIZE_ADMIN_PASSWORD)=' \
+  /etc/parallaize/parallaize.env
+
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow OpenSSH
+sudo ufw --force enable
+sudo ufw status verbose
+
+sudo systemctl disable --now parallaize-caddy.service || true
+sudo systemctl enable --now parallaize.service
+sudo systemctl status --no-pager parallaize.service
+curl http://127.0.0.1:3000/api/health
+```
+
+What that does:
+
+- `apt-get install /tmp/parallaize_...deb` installs the package and resolves the distro dependencies such as `incus`, QEMU helpers, and firmware from Ubuntu.
+- The packaged env file already defaults `HOST=127.0.0.1` and `PORT=3000`, so the control plane stays local to the host.
+- UFW ends up denying all new inbound traffic except SSH, which means you do not need to expose `3000` or `8080` publicly.
+- `parallaize-caddy.service` stays off for this workflow because SSH tunneling is the intended front door.
+
+Then create a local tunnel from your laptop:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 root@YOUR_HETZNER_HOST
+```
+
+Now open this URL on your laptop:
+
+```text
+http://127.0.0.1:3000
+```
+
+If your local port `3000` is already in use, bind another local port instead:
+
+```bash
+ssh -N -L 8080:127.0.0.1:3000 root@YOUR_HETZNER_HOST
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8080
+```
+
 On a blank Ubuntu 24.04 host where Incus is installed but not initialized yet, the package now bootstraps a basic local Incus setup during install:
 
 - storage pool `default` with the `btrfs` driver when the host supports it, otherwise a `dir` fallback
