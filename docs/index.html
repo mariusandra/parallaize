@@ -45,7 +45,14 @@
           <h1>Run isolated agent workspaces on a beefy self-hosted server.</h1>
           <p class="hero-detail">
             Parallaize keeps heavy agent desktops off your laptop and inside one managed host,
-            with browser access, packaged installs, and room to scale.
+            with browser access, packaged installs, and room to scale. Perfect with
+            <a
+              href="https://hetzner.cloud/?ref=qOKe5qXBXByK"
+              target="_blank"
+              rel="noreferrer"
+              >Hetzner</a
+            >
+            dedicated server.
           </p>
         </section>
 
@@ -62,11 +69,12 @@
         <section class="usage-panel" aria-labelledby="usage-title">
           <div class="section-heading">
             <p class="eyebrow">Basic usage</p>
-            <h2 id="usage-title">Create one VM, shape it, then turn it into a repeatable fleet.</h2>
+            <h2 id="usage-title">Create one VM, manually shape it, then turn it into a repeatable fleet.</h2>
             <p class="section-copy">
-              Parallaize is built around a simple loop: launch a VM, configure it exactly
-              how you want, then either save it as a reusable template or clone it directly
-              into as many workspaces as you need.
+              Parallaize is built around a simple loop: launch a VM, pretend it's the year
+              of the linux desktop, configure it exactly how you want, then either save it
+              as a reusable template or clone it directly into as many workspaces as you
+              need.
             </p>
           </div>
 
@@ -162,11 +170,26 @@ sudo systemctl start parallaize.service</code></pre>
             </article>
 
             <article class="install-card install-card--wide">
-              <h3>3. Workflow for Hetzner</h3>
+              <h3>
+                3. Workflow for
+                <a
+                  href="https://hetzner.cloud/?ref=qOKe5qXBXByK"
+                  target="_blank"
+                  rel="noreferrer"
+                  >Hetzner</a
+                >
+              </h3>
               <p>
-                This works perfectly with dedicated Hetzner machines. Keep Parallaize bound
-                to <code>127.0.0.1</code>, allow only SSH through the firewall, and use SSH
-                port forwarding for secure local access instead of exposing the app directly.
+                This works perfectly with dedicated
+                <a
+                  href="https://hetzner.cloud/?ref=qOKe5qXBXByK"
+                  target="_blank"
+                  rel="noreferrer"
+                  >Hetzner</a
+                >
+                machines. Keep Parallaize bound to <code>127.0.0.1</code>, allow only SSH
+                through the firewall, and use SSH port forwarding for secure local access
+                instead of exposing the app directly.
               </p>
 
               <p class="install-card__label">Ubuntu 24.04 command line</p>
@@ -196,12 +219,6 @@ curl http://127.0.0.1:3000/api/health</code></pre>
               <p class="install-card__label">Secure local access over SSH</p>
               <pre><code>ssh -N -L 3000:127.0.0.1:3000 root@YOUR_HETZNER_HOST
 # then open http://127.0.0.1:3000 on your laptop</code></pre>
-
-              <p>
-                The packaged defaults already keep the app on <code>127.0.0.1:3000</code>,
-                so you do not need to open <code>3000</code> or <code>8080</code> in UFW for
-                this flow.
-              </p>
             </article>
           </div>
         </section>

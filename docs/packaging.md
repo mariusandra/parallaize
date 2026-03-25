@@ -95,11 +95,11 @@ sudo systemctl start parallaize.service
 
 The post-install scripts create a dedicated `parallaize` system user, create `/var/lib/parallaize`, and add that user to `incus`, `incus-admin`, `lxd`, and `sudo` when those groups already exist on the host. Services are not auto-started because the operator should rotate the default admin password first. The packaged Caddy unit stays optional; you do not need it when you are using the app directly on `127.0.0.1:3000`.
 
-### Workflow For Hetzner
+### Workflow For [Hetzner](https://hetzner.cloud/?ref=qOKe5qXBXByK)
 
-This packaged install path works perfectly on dedicated Hetzner machines.
+This packaged install path works perfectly on dedicated [Hetzner](https://hetzner.cloud/?ref=qOKe5qXBXByK) machines.
 
-The cleanest Hetzner setup is:
+The cleanest [Hetzner](https://hetzner.cloud/?ref=qOKe5qXBXByK) setup is:
 
 - keep Parallaize bound to `127.0.0.1`
 - allow inbound SSH only at the firewall
