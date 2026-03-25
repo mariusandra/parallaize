@@ -53,6 +53,17 @@ a {
   text-decoration: none;
 }
 
+a:not(.brand-lockup):not(.site-header__link):not(.button) {
+  color: color-mix(in srgb, var(--accent) 82%, var(--ink));
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.16em;
+}
+
+a:not(.brand-lockup):not(.site-header__link):not(.button):hover {
+  color: var(--accent);
+}
+
 img {
   display: block;
   max-width: 100%;
