@@ -14,6 +14,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `ar
 
 - Keep this file current when scope changes or a major task lands.
 - Prefer finishing one verified vertical slice over adding speculative features.
+- Leave package/app/docs version numbers unchanged during normal engineering work. Only the manual GitHub release workflow should update release-version references.
 - After backend or infra changes, run `pnpm build`, `pnpm test`, and boot the real server with `pnpm start`.
 - When touching Incus/Caddy/guest-network behavior, verify on the live host when feasible.
 

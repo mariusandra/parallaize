@@ -77,6 +77,8 @@ The package build flow does this:
 
 Use `.github/workflows/release.yml` when you want GitHub Actions to cut and publish a new packaged release from `main`.
 
+Normal feature work, bug fixes, and docs cleanup should not bump versions in `package.json`, `docs/index.html`, this file, or any other release-version reference. Treat version changes as release-only edits driven by the manual GitHub Actions workflow.
+
 Inputs:
 
 - `version`: required stable semver such as `0.1.1`

@@ -282,6 +282,8 @@ Parallaize now has a staged package builder for host installs. The first support
 
 The package build path bundles Node 24 into the package, stages systemd and Caddy assets, and writes artifacts into `artifacts/packages/`. The detailed packaging note is in [`docs/packaging.md`](/home/marius/Projects/Parralaize/parallaize/docs/packaging.md), including a locked-down dedicated [Hetzner](https://hetzner.cloud/?ref=qOKe5qXBXByK) workflow for Ubuntu 24.04 that keeps the app on localhost and reaches it through SSH port forwarding.
 
+Version bumps are not part of normal development changes in this repo. Leave `package.json` and other release-version references alone unless you are intentionally running the manual GitHub release workflow.
+
 ## Configuration
 
 - `PARALLAIZE_APP_HOME`: packaged app root, default `process.cwd()`

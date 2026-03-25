@@ -21,6 +21,7 @@
 - The optional front door is Caddy using `infra/Caddyfile`.
 - Keep `TODO.md` current when scope changes or a major task lands.
 - Prefer finishing one verified vertical slice over speculative feature spread.
+- Do not bump `package.json` or any other versioned package/docs references during normal development work. Version bumps are manual release operations triggered through the GitHub release action only.
 - After backend or infra changes, run `pnpm build`, `pnpm test`, and boot the
   real server with `pnpm start`.
 - When touching Incus, Caddy, guest networking, or browser-session behavior,
