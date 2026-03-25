@@ -2,6 +2,8 @@
 
 Parallaize is a server-first proof of concept for managing many isolated desktop workspaces from one browser UI. This repository now starts the control plane in real Incus VM mode by default, while still keeping a mock provider path available for fallback and tests. State can persist either to a local JSON file or to PostgreSQL, with PostgreSQL intended for deployed runs.
 
+![Parallaize screencast](https://parallaize.com/screencast.gif)
+
 ## What Works
 
 - Simplified React + Tailwind operator dashboard with server-sent updates
