@@ -11,6 +11,8 @@ const outputDir = join(root, "dist", "apps", "web", "static", "assets");
 const noVncBundleDir = join(outputDir, "vendor", "novnc");
 const noVncSourceDir = join(outputDir, ".novnc-src");
 const noVncLibraryDir = join(noVncSourceDir, "lib");
+const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+const appVersion = JSON.stringify(packageJson.version);
 
 await mkdir(outputDir, { recursive: true });
 
@@ -62,6 +64,7 @@ await writeFile(browserFeaturePath, browserFeaturePatched);
 await build({
   bundle: true,
   define: {
+    __PARALLAIZE_VERSION__: appVersion,
     "process.env.NODE_ENV": '"production"',
   },
   entryPoints: [join(noVncLibraryDir, "rfb.js")],
@@ -82,6 +85,7 @@ await rm(noVncSourceDir, {
 await build({
   bundle: true,
   define: {
+    __PARALLAIZE_VERSION__: appVersion,
     "process.env.NODE_ENV": '"production"',
   },
   entryPoints: [join(root, "apps", "web", "src", "main.tsx")],

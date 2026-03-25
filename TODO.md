@@ -1,7 +1,7 @@
 # Parallaize TODO
 
 Last updated: 2026-03-25
-Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` and `arm64` artifacts buildable from the same flow, and then validate the packaged install on a live Incus host.
+Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `arm64` `.deb` artifact buildable from the same flow, and then validate the packaged install on a live Incus host.
 
 ## Current State
 
@@ -27,8 +27,8 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` 
 - [x] Pluggable persistence backend with PostgreSQL support and JSON fallback
 - [x] Browser-to-guest and guest-to-browser clipboard flow for the main noVNC session, with browser-API fallback handling
 - [x] Configurable guest bootstrap defaults for higher inotify watcher limits in new Incus VMs
-- [x] Packaged-install foundation with bundled Node runtime, staged `.deb` and `.rpm` builders, packaged systemd/Caddy assets, and a packaging decision note
-- [x] Dispatch-driven release automation that bumps versioned package/docs references, builds package artifacts, uploads them to the archive bucket, and pushes the release commit back to GitHub
+- [x] Packaged-install foundation with bundled Node runtime, staged `.deb` builder, packaged systemd/Caddy assets, and a packaging decision note
+- [x] Dispatch-driven release automation that bumps versioned package/docs references, builds package artifacts, uploads them to the archive bucket, pushes the release commit back to GitHub, and publishes GitHub releases with Debian assets
 - [x] Host internet/bootstrap diagnostics plus guest desktop self-heal for packaged Incus VMs so X11/VNC converge even after a bad first boot
 
 ## Priority Backlog
@@ -63,12 +63,11 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` 
 
 - [x] Write a packaging decision note comparing Ubuntu `.deb` installs against an npm-only install path; npm should remain the dev/operator source path, while deployed installs need a real system package because systemd, Incus access, QEMU helpers, and optional Caddy live outside Node.
 - [x] Inventory packaged-install dependencies explicitly: bundled Node runtime, Incus CLI/socket access, optional Caddy, `attr`, VM-capable QEMU/OVMF helpers, optional PostgreSQL, and the systemd/env-file layout.
-- [x] Decide first supported package targets: Ubuntu 24.04 LTS `amd64` `.deb` first, while `.deb` `arm64` plus `.rpm` `x86_64` and `aarch64` remain experimental until they are validated on live hosts.
+- [x] Decide first supported package targets: Ubuntu 24.04 LTS `amd64` `.deb` first, while `.deb` `arm64` remains experimental until it is validated on a live host.
 - [x] Design an upgrade path for packaged installs: preflight checks, state backup/export, service restart ordering, rollback expectations, and current persistence/schema expectations.
 - [ ] Install the generated Ubuntu 24.04 `amd64` `.deb` on a live host that uses a clean distro-managed Incus daemon and verify the packaged service units against real Incus, optional Caddy, and the packaged env file.
-- [ ] Decide whether the RPM output should stay generic or target a specific RPM family with concrete dependency metadata once a live RPM host is available.
 - [ ] Validate the generated `arm64` packages on a real `arm64` Incus/QEMU host before promoting them beyond experimental.
-- [ ] Add package-signing and git-tag creation to the release workflow once the package formats and support matrix settle.
+- [ ] Add package-signing to the release workflow once the package formats and support matrix settle.
 
 ### P2: Forwarded Service Routing
 
@@ -88,16 +87,18 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` 
 After each completed todo step, create a commit. Use a brief commit message that summarizes what was just done in the same style as the rewritten history.
 
 1. Install and validate the generated Ubuntu 24.04 `amd64` `.deb` on a live host with a clean distro-managed Incus daemon.
-2. Decide whether the RPM output should target a specific RPM family or stay generic for now.
-3. Validate the generated `arm64` packages on a real `arm64` Incus/QEMU host.
+2. Validate the generated `arm64` packages on a real `arm64` Incus/QEMU host.
+3. Add package-signing to the release workflow once the package formats and support matrix settle.
 
 ## Decision Log
 
 - 2026-03-25: Added host internet/bootstrap diagnostics for the Incus provider, made `/api/health` degrade on host egress failures, and switched guest desktop bootstrap to a retrying systemd service so `x11vnc` and the X11 GDM config can recover after a failed first boot.
+- 2026-03-25: Extended the release workflow to create and push a GitHub release tag and attach the generated `amd64` and `arm64` Debian packages as GitHub release assets.
+- 2026-03-25: Removed RPM package generation from the shared builder and release workflow after CI publish failures on cross-architecture Fedora container runs; Debian packages remain the only emitted artifacts.
 - 2026-03-25: Documented the dedicated Hetzner packaged-install workflow for Ubuntu 24.04, including SSH-only UFW rules, localhost binding, and SSH port forwarding, and clarified the basic VM-to-template-or-fleet usage on the docs landing page.
-- 2026-03-25: Added a dispatch-driven GitHub release workflow that updates package/docs version references, builds `.deb` and `.rpm` artifacts, uploads them to Cloudflare R2, and pushes the release commit back to `main`.
+- 2026-03-25: Added a dispatch-driven GitHub release workflow that updates package/docs version references, builds Debian artifacts, uploads them to Cloudflare R2, and pushes the release commit back to `main`.
 - 2026-03-24: Installed the Ubuntu 24.04 `amd64` `.deb` on the live host, confirmed the packaged systemd units boot, and found two follow-ups: the package must add `parallaize` to `incus-admin` on Ubuntu, and full Incus-path validation should happen on a clean distro-managed Incus host because this machine already had a manual Flox `incusd` bound to the same socket path.
-- 2026-03-24: Chose packaged host installs over npm-only deploys for real deployments, bundled the Node 24 runtime into the package, and made Ubuntu 24.04 `amd64` `.deb` the first supported package target while keeping `.rpm` and `arm64` outputs experimental.
+- 2026-03-24: Chose packaged host installs over npm-only deploys for real deployments, bundled the Node 24 runtime into the package, and made Ubuntu 24.04 `amd64` `.deb` the first supported package target while keeping `arm64` `.deb` experimental.
 - 2026-03-22: Verified the real `incus` server boots cleanly against both JSON and PostgreSQL persistence; the PostgreSQL backend seeded and served state from the local Docker PostgreSQL stack.
 - 2026-03-22: Added a persistence admin CLI for JSON/PostgreSQL export, import, and direct copy so deployment state can be migrated without manual edits.
 - 2026-03-22: Added persistence diagnostics to the store boundary, exposed them through `/api/health`, and surfaced backend/degraded-state status in the operator UI.

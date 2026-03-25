@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       package_release:
-        description: Package release suffix for deb/rpm artifacts
+        description: Package release suffix for Debian artifacts
         required: false
         default: "1"
         type: string
@@ -84,7 +84,7 @@ jobs:
           set -euo pipefail
           pnpm package:prepare
           node scripts/build-packages.mjs \
-            --format deb,rpm \
+            --format deb \
             --arch amd64,arm64 \
             --version "${RELEASE_VERSION}" \
             --release "${PACKAGE_RELEASE}"
@@ -103,6 +103,16 @@ jobs:
           path: artifacts/packages/
           if-no-files-found: error
 
+      - name: Resolve release tag
+        run: |
+          set -euo pipefail
+          if [ "${PACKAGE_RELEASE}" = "1" ]; then
+            release_tag="v${RELEASE_VERSION}"
+          else
+            release_tag="v${RELEASE_VERSION}-${PACKAGE_RELEASE}"
+          fi
+          echo "RELEASE_TAG=${release_tag}" >> "${GITHUB_ENV}"
+
       - name: Commit release version updates
         run: |
           set -euo pipefail
@@ -112,3 +122,24 @@ jobs:
           git commit -m "chore: release ${RELEASE_VERSION}-${PACKAGE_RELEASE}"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
+
+      - name: Create and push release tag
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release tag ${RELEASE_TAG} already exists on origin." >&2
+            exit 1
+          fi
+          git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}"
+          git push origin "refs/tags/${RELEASE_TAG}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Parallaize ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/packages/parallaize_${{ env.RELEASE_VERSION }}-${{ env.PACKAGE_RELEASE }}_amd64.deb
+            artifacts/packages/parallaize_${{ env.RELEASE_VERSION }}-${{ env.PACKAGE_RELEASE }}_arm64.deb

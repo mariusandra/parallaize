@@ -2051,10 +2051,24 @@ section.workspace-shell {
   gap: 0.45rem;
 }
 
+.workspace-rail__brand-lockup {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+
 .brand-wordmark {
   display: inline-flex;
   align-items: baseline;
   gap: 0;
+}
+
+.workspace-rail__brand-version {
+  color: var(--ink);
+  opacity: 0.72;
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
 }
 
 .brand-wordmark__accent {

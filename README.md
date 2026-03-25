@@ -269,7 +269,6 @@ flox activate -d . -- pnpm start
 flox activate -d . -- pnpm test
 flox activate -d . -- pnpm smoke:incus
 flox activate -d . -- pnpm package:deb
-flox activate -d . -- pnpm package:rpm
 flox activate -d . -- pnpm package:release
 flox activate -d . -- pnpm persistence:copy -- --from json --data-file data/incus-state.json --to postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize
 flox activate -d . -- pnpm persistence:export -- --from postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize --output backups/parallaize-state.json
@@ -279,7 +278,7 @@ docker compose -f infra/docker-compose.postgres.yml up -d
 
 ## Packaging
 
-Parallaize now has a staged package builder for host installs. The first supported target is Ubuntu 24.04 `amd64` as a `.deb`, with experimental `.deb` `arm64` and `.rpm` outputs emitted from the same workflow.
+Parallaize now has a staged package builder for host installs. The first supported target is Ubuntu 24.04 `amd64` as a `.deb`, with experimental `.deb` `arm64` output emitted from the same workflow.
 
 The package build path bundles Node 24 into the package, stages systemd and Caddy assets, and writes artifacts into `artifacts/packages/`. The detailed packaging note is in [`docs/packaging.md`](/home/marius/Projects/Parralaize/parallaize/docs/packaging.md), including a locked-down dedicated [Hetzner](https://hetzner.cloud/?ref=qOKe5qXBXByK) workflow for Ubuntu 24.04 that keeps the app on localhost and reaches it through SSH port forwarding.
 

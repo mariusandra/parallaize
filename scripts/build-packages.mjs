@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import process from "node:process";
 
@@ -14,18 +14,15 @@ const packageVersion = (args.version ?? packageJson.version).trim();
 const packageRelease = (args.release ?? process.env.PARALLAIZE_PACKAGE_RELEASE ?? "1").trim();
 const outputDir = resolve(root, args["output-dir"] ?? "artifacts/packages");
 const workDir = resolve(root, args["work-dir"] ?? ".artifacts/package-work");
-const rpmBuildImage = args["rpm-build-image"] ?? process.env.PARALLAIZE_RPM_BUILD_IMAGE ?? "fedora:41";
 const nodeVersion = process.version.replace(/^v/, "");
 const buildRunId = `${Date.now()}-${process.pid}`;
 const formats = normalizeFormats(args.format ?? "deb");
 const architectures = normalizeArchitectures(args.arch ?? "amd64");
-const hostArchitecture = normalizeHostArchitecture(process.arch);
 
 const archMatrix = {
   amd64: {
     deb: "amd64",
     node: "x64",
-    rpm: "x86_64",
     debDepends: [
       "bash",
       "incus",
@@ -39,7 +36,6 @@ const archMatrix = {
   arm64: {
     deb: "arm64",
     node: "arm64",
-    rpm: "aarch64",
     debDepends: [
       "bash",
       "incus",
@@ -53,6 +49,7 @@ const archMatrix = {
 };
 
 ensureBuildInputs();
+await rm(outputDir, { force: true, recursive: true });
 await mkdir(outputDir, { recursive: true });
 
 const manifestEntries = [];
@@ -68,27 +65,13 @@ for (const architecture of architectures) {
   });
 
   for (const format of formats) {
-    if (format === "deb") {
-      const packagePath = await buildDebPackage({
-        architecture,
-        depends: archConfig.debDepends,
-        outputDir,
-        packageRelease,
-        packageVersion,
-        rootfsDir,
-      });
-
-      manifestEntries.push(await buildManifestEntry(packagePath, format, architecture));
-      continue;
-    }
-
-    const packagePath = await buildRpmPackage({
+    const packagePath = await buildDebPackage({
       architecture,
+      depends: archConfig.debDepends,
       outputDir,
       packageRelease,
       packageVersion,
       rootfsDir,
-      rpmBuildImage,
     });
 
     manifestEntries.push(await buildManifestEntry(packagePath, format, architecture));
@@ -305,169 +288,6 @@ async function buildDebPackage({
   return outputPath;
 }
 
-async function buildRpmPackage({
-  architecture,
-  outputDir,
-  packageRelease,
-  packageVersion,
-  rootfsDir,
-  rpmBuildImage,
-}) {
-  const rpmWorkDir = join(workDir, "rpm", buildRunId, architecture);
-  const rpmbuildRoot = join(rpmWorkDir, "rpmbuild");
-  const sourcesDir = join(rpmbuildRoot, "SOURCES");
-  const specsDir = join(rpmbuildRoot, "SPECS");
-  const tarballName = `${appName}-root-${packageVersion}-${packageRelease}-${archMatrix[architecture].rpm}.tar.xz`;
-  const tarballPath = join(sourcesDir, tarballName);
-  const specPath = join(specsDir, `${appName}.spec`);
-
-  await rm(rpmWorkDir, { force: true, recursive: true });
-  await mkdir(sourcesDir, { recursive: true });
-  await mkdir(specsDir, { recursive: true });
-
-  spawnChecked("tar", [
-    "--create",
-    "--xz",
-    "--file",
-    tarballPath,
-    "--directory",
-    rootfsDir,
-    "--group=0",
-    "--numeric-owner",
-    "--owner=0",
-    ".",
-  ]);
-
-  await writeTextFile(
-    specPath,
-    await buildRpmSpec({
-      architecture,
-      packageRelease,
-      packageVersion,
-      rootfsDir,
-      tarballName,
-    }),
-  );
-
-  if (canBuildRpmLocally(architecture)) {
-    spawnChecked("rpmbuild", [
-      "--target",
-      archMatrix[architecture].rpm,
-      "--define",
-      `_topdir ${rpmbuildRoot}`,
-      "-bb",
-      specPath,
-    ]);
-  } else if (commandExists("docker")) {
-    const topDirInContainer = `/work/${toContainerPath(relative(root, rpmbuildRoot))}`;
-    const specPathInContainer = `/work/${toContainerPath(relative(root, specPath))}`;
-    spawnChecked("docker", [
-      "run",
-      "--rm",
-      "--platform",
-      architecture === "arm64" ? "linux/arm64" : "linux/amd64",
-      "-v",
-      `${root}:/work`,
-      "-w",
-      "/work",
-      rpmBuildImage,
-      "bash",
-      "-lc",
-      [
-        "dnf -y install rpm-build tar xz >/dev/null",
-        `rpmbuild --target ${archMatrix[architecture].rpm} --define "_topdir ${topDirInContainer}" -bb ${specPathInContainer}`,
-      ].join(" && "),
-    ]);
-  } else {
-    throw new Error(
-      [
-        `Building ${archMatrix[architecture].rpm} RPMs requires either a native ${architecture} host with rpmbuild`,
-        "or docker for the Fedora container fallback.",
-      ].join(" "),
-    );
-  }
-
-  const builtPackagePath = join(
-    rpmbuildRoot,
-    "RPMS",
-    archMatrix[architecture].rpm,
-    `${appName}-${packageVersion}-${packageRelease}.${archMatrix[architecture].rpm}.rpm`,
-  );
-  const outputPath = join(outputDir, `${appName}-${packageVersion}-${packageRelease}.${archMatrix[architecture].rpm}.rpm`);
-
-  await mkdir(outputDir, { recursive: true });
-  await cp(builtPackagePath, outputPath, { force: true });
-  return outputPath;
-}
-
-async function buildRpmSpec({
-  architecture,
-  packageRelease,
-  packageVersion,
-  rootfsDir,
-  tarballName,
-}) {
-  const configFiles = new Set([
-    "/etc/parallaize/Caddyfile",
-    "/etc/parallaize/parallaize.env",
-  ]);
-  const docFiles = new Set([
-    "/usr/share/doc/parallaize/README.md",
-    "/usr/share/doc/parallaize/packaging.md",
-  ]);
-  const filePaths = (await listFiles(rootfsDir))
-    .map((entry) => `/${toContainerPath(relative(rootfsDir, entry))}`)
-    .sort();
-  const regularFiles = filePaths.filter(
-    (entry) => !configFiles.has(entry) && !docFiles.has(entry),
-  );
-
-  const sections = [
-    `Name: ${appName}`,
-    `Version: ${packageVersion}`,
-    `Release: ${packageRelease}`,
-    "Summary: Server-first control plane for many isolated desktop workspaces",
-    "License: Proprietary",
-    `BuildArch: ${archMatrix[architecture].rpm}`,
-    `Source0: ${tarballName}`,
-    "",
-    "%description",
-    "Parallaize packages the control plane, bundled Node runtime, static web UI,",
-    "systemd service units, and packaged install defaults for host deployments.",
-    "",
-    "%prep",
-    "",
-    "%build",
-    "",
-    "%install",
-    "mkdir -p %{buildroot}",
-    "tar -xJf %{SOURCE0} -C %{buildroot}",
-    "",
-    "%pre",
-    await readFile(join(root, "packaging", "maintainer", "preinstall.sh"), "utf8"),
-    "",
-    "%post",
-    await readFile(join(root, "packaging", "maintainer", "postinstall.sh"), "utf8"),
-    "",
-    "%preun",
-    await readFile(join(root, "packaging", "maintainer", "preremove.sh"), "utf8"),
-    "",
-    "%postun",
-    await readFile(join(root, "packaging", "maintainer", "postremove.sh"), "utf8"),
-    "",
-    "%files",
-    "%defattr(-,root,root,-)",
-    "%config(noreplace) /etc/parallaize/Caddyfile",
-    "%config(noreplace) /etc/parallaize/parallaize.env",
-    "%doc /usr/share/doc/parallaize/README.md",
-    "%doc /usr/share/doc/parallaize/packaging.md",
-    ...regularFiles,
-    "",
-  ];
-
-  return sections.join("\n");
-}
-
 async function buildManifestEntry(packagePath, format, architecture) {
   return {
     architecture,
@@ -509,32 +329,6 @@ async function downloadFile(url, targetPath) {
   await writeFile(targetPath, buffer);
 }
 
-async function listFiles(rootDir) {
-  const entries = [];
-
-  for (const dirent of await readdir(rootDir, { withFileTypes: true })) {
-    const entryPath = join(rootDir, dirent.name);
-
-    if (dirent.isDirectory()) {
-      entries.push(...(await listFiles(entryPath)));
-      continue;
-    }
-
-    if (dirent.isFile()) {
-      entries.push(entryPath);
-    }
-  }
-
-  return entries;
-}
-
-function commandExists(command) {
-  const result = spawnSync("bash", ["-lc", `command -v ${command}`], {
-    stdio: "ignore",
-  });
-  return result.status === 0;
-}
-
 function normalizeArchitectures(value) {
   const rawArchitectures = splitCsv(value);
   if (rawArchitectures.includes("all")) {
@@ -558,31 +352,16 @@ function normalizeArchitectures(value) {
 function normalizeFormats(value) {
   const rawFormats = splitCsv(value);
   if (rawFormats.includes("all") || rawFormats.includes("both")) {
-    return ["deb", "rpm"];
+    return ["deb"];
   }
 
   return rawFormats.map((entry) => {
-    if (entry !== "deb" && entry !== "rpm") {
-      throw new Error(`Unsupported package format "${entry}". Use deb or rpm.`);
+    if (entry !== "deb") {
+      throw new Error(`Unsupported package format "${entry}". Use deb.`);
     }
 
     return entry;
   });
-}
-
-function normalizeHostArchitecture(value) {
-  switch (value) {
-    case "x64":
-      return "amd64";
-    case "arm64":
-      return "arm64";
-    default:
-      return null;
-  }
-}
-
-function canBuildRpmLocally(architecture) {
-  return commandExists("rpmbuild") && hostArchitecture === architecture;
 }
 
 function parseArgs(argv) {
@@ -655,10 +434,6 @@ function splitCsv(value) {
     .split(",")
     .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean);
-}
-
-function toContainerPath(value) {
-  return value.replaceAll("\\", "/");
 }
 
 async function writeTextFile(path, contents) {

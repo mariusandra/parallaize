@@ -16,6 +16,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+declare const __PARALLAIZE_VERSION__: string;
+
 import {
   formatRam,
   formatResources,
@@ -139,6 +141,8 @@ interface ResolutionControlStatus {
   owner: ResolutionControlOwner;
   vmId: string | null;
 }
+
+const appVersionLabel = __PARALLAIZE_VERSION__;
 
 interface DesktopResolutionTarget {
   height: number;
@@ -2781,10 +2785,18 @@ export function DashboardApp(): JSX.Element {
                           )}
                           aria-hidden="true"
                         />
-                        <span className="brand-wordmark" aria-label="Parallaize">
-                          <span>Parall</span>
-                          <span className="brand-wordmark__accent">ai</span>
-                          <span>ze</span>
+                        <span className="workspace-rail__brand-lockup">
+                          <span className="brand-wordmark" aria-label="Parallaize">
+                            <span>Parall</span>
+                            <span className="brand-wordmark__accent">ai</span>
+                            <span>ze</span>
+                          </span>
+                          <span
+                            className="workspace-rail__brand-version"
+                            aria-label={`Version ${appVersionLabel}`}
+                          >
+                            {appVersionLabel}
+                          </span>
                         </span>
                       </button>
                       <button

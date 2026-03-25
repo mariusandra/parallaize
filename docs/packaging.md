@@ -15,9 +15,8 @@ The package builder bundles the Node 24 runtime into the package so deployed hos
 
 - Supported: Ubuntu 24.04 `amd64` `.deb`
 - Experimental build output: Ubuntu 24.04 `arm64` `.deb`
-- Experimental build output: `x86_64` and `aarch64` `.rpm`
 
-The `.rpm` and `arm64` packages are intentionally emitted from the same build system now, but they should stay marked experimental until they are validated on live hosts with real Incus VM workloads.
+The `arm64` package is intentionally emitted from the same build system now, but it should stay marked experimental until it is validated on a live host with real Incus VM workloads.
 
 ## Package Contents
 
@@ -54,8 +53,6 @@ Ubuntu 24.04 package metadata currently pins the VM helper packages directly, pl
 - `amd64`: `ovmf`, `qemu-system-x86`, `qemu-utils`
 - `arm64`: `qemu-efi-aarch64`, `qemu-system-arm`, `qemu-utils`
 
-The RPM build currently leaves more of that dependency resolution to the operator because package names vary too much across RPM families to claim a verified target yet.
-
 ## Build Commands
 
 Run these from the repo root.
@@ -63,8 +60,6 @@ Run these from the repo root.
 ```bash
 flox activate -d . -- pnpm package:deb
 flox activate -d . -- pnpm package:deb:arm64
-flox activate -d . -- pnpm package:rpm
-flox activate -d . -- pnpm package:rpm:arm64
 flox activate -d . -- pnpm package:release
 ```
 
@@ -77,7 +72,6 @@ The package build flow does this:
 3. Downloads and verifies the matching official Node tarball for the target architecture.
 4. Stages the install tree.
 5. Emits `.deb` via `dpkg-deb`.
-6. Emits `.rpm` via local `rpmbuild` on native-architecture hosts, or a Fedora container when `rpmbuild` is unavailable or the target RPM architecture differs from the host.
 
 ## GitHub Release Workflow
 
@@ -99,9 +93,10 @@ The workflow does this:
 
 1. Installs dependencies.
 2. Updates `package.json`, `docs/index.html`, and this packaging note to the requested release version.
-3. Builds `.deb` and `.rpm` packages for `amd64` and `arm64`.
+3. Builds `.deb` packages for `amd64` and `arm64`.
 4. Uploads everything from `artifacts/packages/` to `s3://$R2_BUCKET/packages/` through the Cloudflare R2 endpoint so the public files stay available at `https://archive.parallaize.com/packages/`.
 5. Commits the versioned-file changes back to `main`.
+6. Creates a GitHub release tag and uploads the `amd64` plus `arm64` `.deb` files as release assets.
 
 If branch protection blocks `github-actions[bot]` from pushing to `main`, allow workflow pushes or change the final step to open a pull request instead.
 
