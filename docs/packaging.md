@@ -85,12 +85,15 @@ Ubuntu 24.04 `amd64` example:
 
 ```bash
 sudo apt install ./artifacts/packages/parallaize_0.1.0-1_amd64.deb
-sudoedit /etc/parallaize/parallaize.env
+sudo apt-get install -y pwgen
+PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"
+printf 'Generated Parallaize admin password: %s\n' "$PARALLAIZE_ADMIN_PASSWORD"
+sudo sed -i "s/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=$PARALLAIZE_ADMIN_PASSWORD/" \
+  /etc/parallaize/parallaize.env
 sudo systemctl start parallaize.service
-sudo systemctl start parallaize-caddy.service
 ```
 
-The post-install scripts create a dedicated `parallaize` system user, create `/var/lib/parallaize`, and add that user to `incus`, `incus-admin`, `lxd`, and `sudo` when those groups already exist on the host. Services are not auto-started because the operator should review the env file first.
+The post-install scripts create a dedicated `parallaize` system user, create `/var/lib/parallaize`, and add that user to `incus`, `incus-admin`, `lxd`, and `sudo` when those groups already exist on the host. Services are not auto-started because the operator should rotate the default admin password first. The packaged Caddy unit stays optional; you do not need it when you are using the app directly on `127.0.0.1:3000`.
 
 ### Workflow For Hetzner
 
@@ -100,14 +103,13 @@ The cleanest Hetzner setup is:
 
 - keep Parallaize bound to `127.0.0.1`
 - allow inbound SSH only at the firewall
-- leave the packaged Caddy front door stopped
 - reach the UI through SSH port forwarding from your laptop
 
 On Ubuntu 24.04 `amd64`, this is the full command-line flow:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y curl ufw
+sudo apt-get install -y curl pwgen ufw
 
 curl -fLo /tmp/parallaize_0.1.0-1_amd64.deb \
   https://archive.parallaize.com/packages/parallaize_0.1.0-1_amd64.deb
@@ -116,9 +118,11 @@ sudo apt-get install -y /tmp/parallaize_0.1.0-1_amd64.deb
 sudo cp /etc/parallaize/parallaize.env /etc/parallaize/parallaize.env.bak
 sudo sed -i 's/^PARALLAIZE_ADMIN_USERNAME=.*/PARALLAIZE_ADMIN_USERNAME=admin/' \
   /etc/parallaize/parallaize.env
-sudo sed -i 's/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=replace-this-now/' \
+PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"
+printf 'Generated Parallaize admin password: %s\n' "$PARALLAIZE_ADMIN_PASSWORD"
+sudo sed -i "s/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=$PARALLAIZE_ADMIN_PASSWORD/" \
   /etc/parallaize/parallaize.env
-sudo grep -E '^(HOST|PORT|PARALLAIZE_ADMIN_USERNAME|PARALLAIZE_ADMIN_PASSWORD)=' \
+sudo grep -E '^(HOST|PORT|PARALLAIZE_ADMIN_USERNAME)=' \
   /etc/parallaize/parallaize.env
 
 sudo ufw default deny incoming
@@ -127,7 +131,6 @@ sudo ufw allow OpenSSH
 sudo ufw --force enable
 sudo ufw status verbose
 
-sudo systemctl disable --now parallaize-caddy.service || true
 sudo systemctl enable --now parallaize.service
 sudo systemctl status --no-pager parallaize.service
 curl http://127.0.0.1:3000/api/health
@@ -138,7 +141,7 @@ What that does:
 - `apt-get install /tmp/parallaize_...deb` installs the package and resolves the distro dependencies such as `incus`, QEMU helpers, and firmware from Ubuntu.
 - The packaged env file already defaults `HOST=127.0.0.1` and `PORT=3000`, so the control plane stays local to the host.
 - UFW ends up denying all new inbound traffic except SSH, which means you do not need to expose `3000` or `8080` publicly.
-- `parallaize-caddy.service` stays off for this workflow because SSH tunneling is the intended front door.
+- You can skip Caddy entirely for this workflow because SSH tunneling is the intended front door.
 
 Then create a local tunnel from your laptop:
 

@@ -148,11 +148,17 @@ sudo apt install ./parallaize_0.1.0-1_arm64.deb</code></pre>
             </article>
 
             <article class="install-card">
-              <h3>2. Review config and boot services</h3>
-              <p>The package ships the env file and systemd units. Review the env file first.</p>
-              <pre><code>sudoedit /etc/parallaize/parallaize.env
-sudo systemctl start parallaize.service
-sudo systemctl start parallaize-caddy.service</code></pre>
+              <h3>2. Review config and boot the service</h3>
+              <p>
+                The package ships the env file and systemd unit. Rotate the default admin
+                password first, then start Parallaize on <code>127.0.0.1:3000</code>.
+              </p>
+              <pre><code>sudo apt-get install -y pwgen
+PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"
+printf 'Generated Parallaize admin password: %s\n' "$PARALLAIZE_ADMIN_PASSWORD"
+sudo sed -i "s/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=$PARALLAIZE_ADMIN_PASSWORD/" \
+  /etc/parallaize/parallaize.env
+sudo systemctl start parallaize.service</code></pre>
             </article>
 
             <article class="install-card install-card--wide">
@@ -165,16 +171,18 @@ sudo systemctl start parallaize-caddy.service</code></pre>
 
               <p class="install-card__label">Ubuntu 24.04 command line</p>
               <pre><code>sudo apt-get update
-sudo apt-get install -y curl ufw
+sudo apt-get install -y curl pwgen ufw
 
 curl -fLo /tmp/parallaize_0.1.0-1_amd64.deb \
   https://archive.parallaize.com/packages/parallaize_0.1.0-1_amd64.deb
 sudo apt-get install -y /tmp/parallaize_0.1.0-1_amd64.deb
 
 sudo cp /etc/parallaize/parallaize.env /etc/parallaize/parallaize.env.bak
-sudo sed -i 's/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=replace-this-now/' \
+PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"
+printf 'Generated Parallaize admin password: %s\n' "$PARALLAIZE_ADMIN_PASSWORD"
+sudo sed -i "s/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=$PARALLAIZE_ADMIN_PASSWORD/" \
   /etc/parallaize/parallaize.env
-sudo grep -E '^(HOST|PORT|PARALLAIZE_ADMIN_USERNAME|PARALLAIZE_ADMIN_PASSWORD)=' \
+sudo grep -E '^(HOST|PORT|PARALLAIZE_ADMIN_USERNAME)=' \
   /etc/parallaize/parallaize.env
 
 sudo ufw default deny incoming
@@ -182,7 +190,6 @@ sudo ufw default allow outgoing
 sudo ufw allow OpenSSH
 sudo ufw --force enable
 
-sudo systemctl disable --now parallaize-caddy.service || true
 sudo systemctl enable --now parallaize.service
 curl http://127.0.0.1:3000/api/health</code></pre>
 
