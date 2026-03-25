@@ -5180,7 +5180,7 @@ function OverviewSidepanel({
   onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }): JSX.Element {
   const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
-  const recentJobs = summary.jobs.slice().reverse().slice(0, 5);
+  const recentJobs = summary.jobs.slice(0, 5);
 
   return (
     <aside

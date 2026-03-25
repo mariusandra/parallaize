@@ -827,7 +827,7 @@ textarea {
 .workspace-stage__header-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 0.45rem;
 }
 
@@ -2682,7 +2682,7 @@ section.workspace-shell {
 .workspace-stage__header-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 0.55rem;
   pointer-events: auto;
 }
