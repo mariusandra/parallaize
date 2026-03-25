@@ -5853,7 +5853,7 @@ function isDesktopBootJobKind(kind: DashboardSummary["jobs"][number]["kind"]): b
 }
 
 function formatActiveJobTiming(
-  job: Pick<DashboardSummary["jobs"][number], "createdAt" | "kind" | "progressPercent">,
+  job: Pick<DashboardSummary["jobs"][number], "createdAt">,
   nowMs = Date.now(),
 ): string | null {
   const createdAt = Date.parse(job.createdAt);
@@ -5863,38 +5863,7 @@ function formatActiveJobTiming(
   }
 
   const elapsedMs = Math.max(0, nowMs - createdAt);
-  const timingParts = [`Elapsed ${formatDurationShort(elapsedMs)}`];
-  const remainingMs =
-    job.kind === "start" || job.kind === "restart"
-      ? null
-      : estimateRemainingDurationMs(elapsedMs, job.progressPercent ?? null);
-
-  if (remainingMs !== null) {
-    timingParts.push(`About ${formatDurationShort(remainingMs)} left`);
-  }
-
-  return timingParts.join(" • ");
-}
-
-function estimateRemainingDurationMs(
-  elapsedMs: number,
-  progressPercent: number | null,
-): number | null {
-  if (
-    progressPercent === null ||
-    !Number.isFinite(progressPercent) ||
-    progressPercent < 10 ||
-    progressPercent >= 100
-  ) {
-    return null;
-  }
-
-  const totalEstimateMs = (elapsedMs / progressPercent) * 100;
-  const remainingMs = Math.max(0, totalEstimateMs - elapsedMs);
-
-  return Number.isFinite(remainingMs) && remainingMs >= 1_000
-    ? remainingMs
-    : null;
+  return `Elapsed ${formatDurationShort(elapsedMs)}`;
 }
 
 function formatDurationShort(durationMs: number): string {
