@@ -61,6 +61,8 @@ const faviconPath = join(staticRoot, "favicon.svg");
 const sessionCookieName = "parallaize_session";
 const sessionMaxAgeSeconds = 60 * 60 * 24 * 7;
 const activeSessionTokens = new Set<string>();
+const activeSockets = new Set<Socket>();
+const activeEventStreams = new Set<ServerResponse>();
 
 const server = createServer(async (request, response) => {
   try {
@@ -339,6 +341,13 @@ const server = createServer(async (request, response) => {
   }
 });
 
+server.on("connection", (socket) => {
+  activeSockets.add(socket);
+  socket.on("close", () => {
+    activeSockets.delete(socket);
+  });
+});
+
 server.on("upgrade", (request, socket, head) => {
   if (!isAuthorized(request)) {
     writeSocketAuthRequired(socket as Socket);
@@ -371,6 +380,7 @@ server.listen(config.port, config.host, () => {
 registerShutdownHandlers();
 
 function handleEvents(response: ServerResponse): void {
+  activeEventStreams.add(response);
   response.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
@@ -378,14 +388,15 @@ function handleEvents(response: ServerResponse): void {
   });
 
   const unsubscribe = manager.subscribe((summary) => {
-    response.write(`event: summary\ndata: ${JSON.stringify(summary)}\n\n`);
+    writeSseEvent(response, "summary", JSON.stringify(summary));
   });
 
   const heartbeat = setInterval(() => {
-    response.write(`event: heartbeat\ndata: ${Date.now()}\n\n`);
+    writeSseEvent(response, "heartbeat", String(Date.now()));
   }, 15000);
 
   response.on("close", () => {
+    activeEventStreams.delete(response);
     clearInterval(heartbeat);
     unsubscribe();
   });
@@ -740,11 +751,28 @@ function registerShutdownHandlers(): void {
     shuttingDown = true;
     process.stdout.write(`received ${signal}, shutting down parallaize\n`);
     manager.stop();
+    closeActiveEventStreams();
+    networkBridge.close();
 
     await new Promise<void>((resolve) => {
+      const forceCloseTimer = setTimeout(() => {
+        if (typeof server.closeAllConnections === "function") {
+          server.closeAllConnections();
+        }
+
+        for (const socket of activeSockets) {
+          socket.destroy();
+        }
+      }, 250);
+
       server.close(() => {
+        clearTimeout(forceCloseTimer);
         resolve();
       });
+
+      if (typeof server.closeIdleConnections === "function") {
+        server.closeIdleConnections();
+      }
     });
 
     await store.close();
@@ -755,5 +783,28 @@ function registerShutdownHandlers(): void {
     process.on(signal, () => {
       void shutdown(signal);
     });
+  }
+}
+
+function writeSseEvent(
+  response: ServerResponse,
+  event: string,
+  data: string,
+): void {
+  if (response.destroyed || response.writableEnded) {
+    return;
+  }
+
+  response.write(`event: ${event}\ndata: ${data}\n\n`);
+}
+
+function closeActiveEventStreams(): void {
+  for (const response of activeEventStreams) {
+    if (response.destroyed || response.writableEnded) {
+      continue;
+    }
+
+    response.end();
+    response.socket?.end();
   }
 }

@@ -30,6 +30,14 @@ export class VmNetworkBridge {
 
   constructor(private readonly manager: DesktopManager) {}
 
+  close(): void {
+    for (const client of this.vncServer.clients) {
+      client.terminate();
+    }
+
+    this.vncServer.close();
+  }
+
   async maybeHandleRequest(
     request: IncomingMessage,
     response: ServerResponse,
