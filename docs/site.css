@@ -144,7 +144,7 @@ li code {
 }
 
 .brand-wordmark__accent {
-  color: color-mix(in srgb, var(--ink) 84%, white 16%);
+  color: color-mix(in srgb, var(--ink) 84%, white 30%);
 }
 
 .site-header__link {
