@@ -91,6 +91,15 @@ sudo systemctl start parallaize-caddy.service
 
 The post-install scripts create a dedicated `parallaize` system user, create `/var/lib/parallaize`, and add that user to `incus`, `incus-admin`, `lxd`, and `sudo` when those groups already exist on the host. Services are not auto-started because the operator should review the env file first.
 
+On a blank Ubuntu 24.04 host where Incus is installed but not initialized yet, the package now bootstraps a basic local Incus setup during install:
+
+- storage pool `default` with the `dir` driver
+- bridge network `incusbr0`
+- `default` profile root disk pointing at pool `default`
+- `default` profile NIC attached to `incusbr0`
+
+The packaged env file also defaults `PARALLAIZE_INCUS_STORAGE_POOL=default` so new VM creates and copies keep targeting the bootstrap pool until the operator changes it.
+
 ## Live Verification Note
 
 The Ubuntu 24.04 `amd64` package has been installed and boot-tested on a live host:
