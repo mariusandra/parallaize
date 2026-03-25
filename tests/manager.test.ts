@@ -2872,6 +2872,198 @@ test("incus provider treats an already-running instance as a successful resume",
   assert.equal(mutation.lastAction, "Workspace resumed");
 });
 
+test("manager reattaches reachable VNC sessions for running incus VMs after startup", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-reattach-vnc-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const instanceName = "parallaize-vm-0201-reattach";
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5900,
+    commandRunner: {
+      execute(args: string[]) {
+        if (
+          args[0] === "list" &&
+          ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+        ) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.201",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+    guestPortProbe: {
+      async probe(host: string) {
+        return host === "10.55.0.201";
+      },
+    },
+  });
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const now = new Date().toISOString();
+
+  store.update((draft) => {
+    draft.vms.unshift({
+      id: "vm-0201",
+      name: "reattach",
+      templateId: "tpl-0001",
+      provider: "incus",
+      providerRef: instanceName,
+      status: "running",
+      resources: {
+        cpu: 4,
+        ramMb: 8192,
+        diskGb: 60,
+      },
+      createdAt: now,
+      updatedAt: now,
+      liveSince: now,
+      lastAction: "Workspace resumed",
+      snapshotIds: [],
+      frameRevision: 1,
+      screenSeed: 201,
+      activeWindow: "terminal",
+      workspacePath: "/root",
+      session: null,
+      forwardedPorts: [],
+      activityLog: ["vnc: 10.55.0.201:5900"],
+      commandHistory: [],
+    });
+  });
+
+  const manager = new DesktopManager(store, provider);
+
+  await wait(50);
+
+  const detail = manager.getVmDetail("vm-0201");
+
+  assert.equal(detail.vm.session?.display, "10.55.0.201:5900");
+  assert.equal(detail.vm.session?.webSocketPath, "/api/vms/vm-0201/vnc");
+  assert.equal(detail.vm.session?.browserPath, "/?vm=vm-0201");
+});
+
+test("incus provider prefers the primary guest NIC over bridge interfaces for VNC", async () => {
+  const instanceName = "parallaize-vm-0202-prefer-primary-nic";
+  const probedHosts: string[] = [];
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5900,
+    commandRunner: {
+      execute(args: string[]) {
+        if (
+          args[0] === "list" &&
+          ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+        ) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    "br-c8802e9f546e": {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "172.18.0.1",
+                        },
+                      ],
+                    },
+                    docker0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "172.17.0.1",
+                        },
+                      ],
+                    },
+                    enp5s0: {
+                      host_name: "tap1234",
+                      type: "broadcast",
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.202",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+    guestPortProbe: {
+      async probe(host: string) {
+        probedHosts.push(host);
+        return host === "10.55.0.202";
+      },
+    },
+  });
+
+  const session = await provider.refreshVmSession({
+    id: "vm-0202",
+    name: "prefer-primary-nic",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Workspace resumed",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 202,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+    commandHistory: [],
+  });
+
+  assert.deepEqual(probedHosts, ["10.55.0.202"]);
+  assert.equal(session?.display, "10.55.0.202:5900");
+});
+
 function ok(stdout: string, args: string[]) {
   return {
     args,

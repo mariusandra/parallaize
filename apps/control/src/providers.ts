@@ -75,6 +75,7 @@ export interface DesktopProvider {
   sampleHostTelemetry(): ProviderTelemetrySample | null;
   sampleVmTelemetry(vm: VmInstance): ProviderTelemetrySample | null;
   observeVmPowerState(vm: VmInstance): ProviderVmPowerState | null;
+  refreshVmSession(vm: VmInstance): Promise<VmSession | null>;
   createVm(
     vm: VmInstance,
     template: EnvironmentTemplate,
@@ -188,6 +189,8 @@ interface IncusListInstance {
     network?: Record<
       string,
       {
+        host_name?: string;
+        type?: string;
         addresses?: Array<{
           family?: string;
           address?: string;
@@ -290,6 +293,10 @@ class MockProvider implements DesktopProvider {
     }
 
     return null;
+  }
+
+  async refreshVmSession(): Promise<VmSession> {
+    return buildSyntheticSession();
   }
 
   async createVm(
@@ -616,6 +623,20 @@ class IncusProvider implements DesktopProvider {
     }
 
     return null;
+  }
+
+  async refreshVmSession(vm: VmInstance): Promise<VmSession | null> {
+    if (!this.state.available || vm.status !== "running") {
+      return null;
+    }
+
+    const info = await this.inspectInstanceAsync(vm.providerRef);
+
+    if (normalizeStatus(info.status ?? info.state?.status) !== "running") {
+      return null;
+    }
+
+    return this.probeReachableSession(info);
   }
 
   async createVm(
@@ -1306,14 +1327,13 @@ class IncusProvider implements DesktopProvider {
 
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const info = await this.inspectInstanceAsync(instanceName);
-      address = findGlobalGuestAddress(info);
+      const addresses = findGuestAddressCandidates(info);
+      address = addresses[0] ?? null;
+      const session = await this.probeReachableSessionForAddresses(addresses);
 
-      if (
-        address &&
-        (await this.guestPortProbe.probe(address, this.guestVncPort))
-      ) {
+      if (session) {
         emitProgress?.("Desktop session ready", VM_CREATE_READY_PERCENT);
-        return buildVncSession(address, this.guestVncPort);
+        return session;
       }
 
       if (normalizeStatus(info.status ?? info.state?.status) !== "running") {
@@ -1328,6 +1348,20 @@ class IncusProvider implements DesktopProvider {
     }
 
     return address ? buildVncSession(address, this.guestVncPort) : null;
+  }
+
+  private async probeReachableSession(instance: IncusListInstance): Promise<VmSession | null> {
+    return this.probeReachableSessionForAddresses(findGuestAddressCandidates(instance));
+  }
+
+  private async probeReachableSessionForAddresses(addresses: string[]): Promise<VmSession | null> {
+    for (const address of addresses) {
+      if (await this.guestPortProbe.probe(address, this.guestVncPort)) {
+        return buildVncSession(address, this.guestVncPort);
+      }
+    }
+
+    return null;
   }
 
   private inspectInstance(instanceName: string): IncusListInstance {
@@ -2223,28 +2257,75 @@ function indentBlock(value: string, prefix: string): string {
     .join("\n");
 }
 
-function findGlobalGuestAddress(instance: IncusListInstance): string | null {
+const PRIMARY_GUEST_INTERFACE_PATTERN = /^(en|eth|wl|ww|ib)/;
+const GUEST_BRIDGE_INTERFACE_PATTERN =
+  /^(lo|docker\d*|br[-\w]*|veth[\w-]*|virbr\d*|cni\d+|flannel\.\d+|incusbr\d*|lxcbr\d*|tun\d+|tap\d+)$/;
+
+function findGuestAddressCandidates(instance: IncusListInstance): string[] {
   const networks = instance.state?.network ?? {};
-  let ipv6Address: string | null = null;
+  const candidates: Array<{
+    address: string;
+    family: "inet" | "inet6";
+    score: number;
+  }> = [];
 
-  for (const network of Object.values(networks)) {
+  for (const [name, network] of Object.entries(networks)) {
     for (const address of network.addresses ?? []) {
-      if (address.family === "inet" && address.scope === "global" && address.address) {
-        return address.address;
+      if (
+        address.scope !== "global" ||
+        !address.address ||
+        (address.family !== "inet" && address.family !== "inet6")
+      ) {
+        continue;
       }
 
-      if (
-        !ipv6Address &&
-        address.family === "inet6" &&
-        address.scope === "global" &&
-        address.address
-      ) {
-        ipv6Address = address.address;
-      }
+      candidates.push({
+        address: address.address,
+        family: address.family,
+        score: scoreGuestAddressCandidate(name, network, address.family),
+      });
     }
   }
 
-  return ipv6Address;
+  candidates.sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score;
+    }
+
+    if (left.family !== right.family) {
+      return left.family === "inet" ? -1 : 1;
+    }
+
+    return left.address.localeCompare(right.address);
+  });
+
+  return [...new Set(candidates.map((candidate) => candidate.address))];
+}
+
+function scoreGuestAddressCandidate(
+  interfaceName: string,
+  network: { host_name?: string; type?: string },
+  family: "inet" | "inet6",
+): number {
+  let score = family === "inet" ? 200 : 100;
+
+  if (network.host_name) {
+    score += 400;
+  }
+
+  if (network.type === "broadcast") {
+    score += 40;
+  }
+
+  if (PRIMARY_GUEST_INTERFACE_PATTERN.test(interfaceName)) {
+    score += 30;
+  }
+
+  if (GUEST_BRIDGE_INTERFACE_PATTERN.test(interfaceName)) {
+    score -= 300;
+  }
+
+  return score;
 }
 
 function formatNetworkEndpoint(host: string, port: number): string {

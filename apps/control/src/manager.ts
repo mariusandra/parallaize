@@ -46,6 +46,8 @@ const MAX_TELEMETRY_SAMPLES = 72;
 const QUEUED_PROGRESS_PERCENT = 6;
 const RUNNING_PROGRESS_PERCENT = 14;
 
+type VmSessionRefreshMode = "none" | "missing" | "all";
+
 export class DesktopManager {
   private readonly listeners = new Set<(summary: DashboardSummary) => void>();
   private ticker: NodeJS.Timeout | null = null;
@@ -54,6 +56,8 @@ export class DesktopManager {
   private readonly hostCpuCount = cpus().length;
   private readonly hostRamMb = Math.round(totalmem() / (1024 * 1024));
   private readonly hostDiskGb = detectHostDiskGb();
+  private sessionRefreshMode: VmSessionRefreshMode = "none";
+  private sessionRefreshInFlight = false;
 
   constructor(
     private readonly store: StateStore,
@@ -66,6 +70,7 @@ export class DesktopManager {
       emptyResourceTelemetry(),
       this.provider.sampleHostTelemetry(),
     );
+    this.requestVmSessionRefresh("all");
   }
 
   start(): void {
@@ -144,6 +149,8 @@ export class DesktopManager {
           telemetryChanged = true;
         }
       }
+
+      this.requestVmSessionRefresh();
 
       if (changed) {
         this.publish();
@@ -1180,7 +1187,95 @@ export class DesktopManager {
       return dirty;
     });
 
+    if (nextProviderState.available) {
+      this.requestVmSessionRefresh();
+    }
+
     return changed;
+  }
+
+  private requestVmSessionRefresh(mode: Exclude<VmSessionRefreshMode, "none"> = "missing"): void {
+    this.sessionRefreshMode = mergeVmSessionRefreshMode(this.sessionRefreshMode, mode);
+
+    if (this.sessionRefreshInFlight) {
+      return;
+    }
+
+    this.sessionRefreshInFlight = true;
+    void this.runVmSessionRefreshLoop();
+  }
+
+  private async runVmSessionRefreshLoop(): Promise<void> {
+    try {
+      while (this.sessionRefreshMode !== "none") {
+        const mode = this.sessionRefreshMode;
+        this.sessionRefreshMode = "none";
+        await this.refreshRunningVmSessions(mode);
+      }
+    } finally {
+      this.sessionRefreshInFlight = false;
+
+      if (this.sessionRefreshMode !== "none") {
+        this.requestVmSessionRefresh(this.sessionRefreshMode);
+      }
+    }
+  }
+
+  private async refreshRunningVmSessions(mode: Exclude<VmSessionRefreshMode, "none">): Promise<void> {
+    const state = this.store.load();
+
+    if (!state.provider.available) {
+      return;
+    }
+
+    const candidateVmIds = state.vms
+      .filter((vm) => shouldRefreshVmSession(vm, state.provider.kind, mode))
+      .map((vm) => vm.id);
+
+    if (candidateVmIds.length === 0) {
+      return;
+    }
+
+    let changed = false;
+
+    for (const vmId of candidateVmIds) {
+      const current = this.store.load().vms.find((entry) => entry.id === vmId);
+
+      if (!current || !shouldRefreshVmSession(current, state.provider.kind, mode)) {
+        continue;
+      }
+
+      try {
+        const nextSession = enrichVmSession(
+          vmId,
+          await this.provider.refreshVmSession(current),
+        );
+        const result = this.store.update((draft) => {
+          const vm = draft.vms.find((entry) => entry.id === vmId);
+
+          if (!vm || !shouldRefreshVmSession(vm, draft.provider.kind, mode)) {
+            return false;
+          }
+
+          if (sameVmSession(vm.session, nextSession)) {
+            return false;
+          }
+
+          vm.session = nextSession;
+          vm.updatedAt = nowIso();
+          vm.frameRevision += 1;
+          return true;
+        });
+
+        changed = changed || result.changed;
+      } catch {
+        continue;
+      }
+    }
+
+    if (changed) {
+      this.publish();
+    }
   }
 
   private publish(): void {
@@ -1293,6 +1388,17 @@ function nextId(state: AppState, prefix: string): string {
   return `${prefix}-${value}`;
 }
 
+function mergeVmSessionRefreshMode(
+  current: VmSessionRefreshMode,
+  next: Exclude<VmSessionRefreshMode, "none">,
+): Exclude<VmSessionRefreshMode, "none"> {
+  if (current === "all" || next === "all") {
+    return "all";
+  }
+
+  return "missing";
+}
+
 function applyProviderMutation(vm: VmInstance, mutation: ProviderMutation): void {
   vm.lastAction = mutation.lastAction;
   vm.updatedAt = nowIso();
@@ -1336,6 +1442,48 @@ function appendManyActivity(vm: VmInstance, lines: string[]): void {
 function appendCommandResult(vm: VmInstance, entry: VmCommandResult): void {
   const history = [...(vm.commandHistory ?? []), entry];
   vm.commandHistory = history.slice(-MAX_COMMAND_RESULTS);
+}
+
+function shouldRefreshVmSession(
+  vm: VmInstance,
+  providerKind: ProviderState["kind"],
+  mode: Exclude<VmSessionRefreshMode, "none">,
+): boolean {
+  if (vm.status !== "running" || vm.provider !== providerKind) {
+    return false;
+  }
+
+  if (mode === "all") {
+    return true;
+  }
+
+  return !hasReachableVncSession(vm.session);
+}
+
+function hasReachableVncSession(session: VmInstance["session"]): boolean {
+  return Boolean(session && session.kind === "vnc" && session.host && session.port);
+}
+
+function sameVmSession(
+  left: VmInstance["session"],
+  right: VmInstance["session"],
+): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  if (!left || !right) {
+    return left === right;
+  }
+
+  return (
+    left.kind === right.kind &&
+    left.host === right.host &&
+    left.port === right.port &&
+    left.webSocketPath === right.webSocketPath &&
+    left.browserPath === right.browserPath &&
+    left.display === right.display
+  );
 }
 
 function markVmStoppedOutsideControlPlane(vm: VmInstance): void {
