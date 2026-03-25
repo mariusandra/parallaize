@@ -1788,6 +1788,7 @@ test("incus provider applies guest display resolution through xrandr", async () 
     execCall?.[5] ?? "",
     /if \[ "\$RESTART_VNC" -eq 1 \] \|\| ! systemctl is-active --quiet parallaize-x11vnc\.service; then/,
   );
+  assert.match(execCall?.[5] ?? "", /systemctl restart --no-block parallaize-x11vnc\.service/);
   assert.match(execCall?.[5] ?? "", /TARGET_MODE="1366x768"/);
   assert.match(execCall?.[5] ?? "", /xrandr --query/);
   assert.match(execCall?.[5] ?? "", /cvt "\$WIDTH" "\$HEIGHT" 60/);

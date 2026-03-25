@@ -1,6 +1,6 @@
 # Parallaize TODO
 
-Last updated: 2026-03-25
+Last updated: 2026-03-26
 Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `arm64` `.deb` artifact buildable from the same flow, and then validate the packaged install on a live Incus host.
 
 ## Current State
@@ -33,6 +33,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `ar
 - [x] Host internet/bootstrap diagnostics plus guest desktop self-heal for packaged Incus VMs so X11/VNC converge even after a bad first boot
 - [x] Repeated guest desktop bootstrap retries during running-session refresh so cloud-init-disabled Ubuntu desktop images can still recover VNC once the guest agent comes up
 - [x] On-demand VM log modal that reads Incus console/info logs from the VM action menu and keeps polling while the modal stays open
+- [x] Homepage persistence/storage diagnostics that distinguish JSON/PostgreSQL state from the Incus VM disk pool and offer clear operator advice
 
 ## Priority Backlog
 
@@ -95,7 +96,9 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-26: Fixed a clone/snapshot guest-bootstrap deadlock where `parallaize-desktop-bootstrap.service` synchronously restarted `parallaize-x11vnc.service` even though the VNC unit was ordered `After=parallaize-desktop-bootstrap.service`, which could leave `incus exec` clone waits hung for tens of minutes.
 - 2026-03-25: Made guest display-resolution changes non-disruptive by only restarting `parallaize-x11vnc.service` when the launcher/unit actually changed or the bridge is inactive, which avoids noVNC reconnect churn during the first viewport-sync resize.
+- 2026-03-26: Fixed the packaged blank-host Incus bootstrap to prefer a `btrfs` pool and fall back to `dir`, and surfaced right-rail diagnostics that explain the difference between control-plane persistence and the Incus VM storage pool.
 - 2026-03-25: Changed captured-template, clone, and snapshot-launch boots to require a successful in-guest desktop bootstrap repair before VNC is treated as ready, so stale baked-in `x11vnc` units from old images cannot short-circuit first-boot provisioning.
 - 2026-03-25: Added startup recovery for interrupted boot/provision jobs so a control-plane restart no longer leaves a still-running Incus VM stranded in `error` without session/bootstrap refresh.
 - 2026-03-25: Fixed a control-plane regression where new Incus VMs with only a guest IP were being treated as live VNC sessions, which stopped the missing-session refresh loop from retrying the guest desktop bootstrap after agent-ready recovery.

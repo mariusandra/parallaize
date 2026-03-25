@@ -427,6 +427,7 @@ export function DashboardApp(): JSX.Element {
     : null;
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
   const persistence = health?.persistence ?? null;
+  const incusStorage = health?.incusStorage ?? null;
   const desktopResolutionMode = selectedDesktopResolutionPreference.mode;
   const appliedDesktopViewportScale = clampDesktopViewportScale(
     selectedDesktopResolutionPreference.scale,
@@ -3228,6 +3229,7 @@ export function DashboardApp(): JSX.Element {
               <OverviewSidepanel
                 busy={isBusy}
                 collapsed={effectiveSidePanelCollapsed}
+                incusStorage={incusStorage}
                 openTemplateMenuId={openTemplateMenuId}
                 persistence={persistence}
                 summary={summary}
@@ -5405,6 +5407,7 @@ function TemplateCard({
 function OverviewSidepanel({
   busy,
   collapsed,
+  incusStorage,
   openTemplateMenuId,
   onCreate,
   onCreateFromTemplate,
@@ -5427,6 +5430,7 @@ function OverviewSidepanel({
 }: {
   busy: boolean;
   collapsed: boolean;
+  incusStorage: HealthStatus["incusStorage"];
   openTemplateMenuId: string | null;
   onCreate: () => void;
   onCreateFromTemplate: (template: EnvironmentTemplate) => void;
@@ -5511,9 +5515,6 @@ function OverviewSidepanel({
               </div>
 
               <p className="empty-copy">{summary.provider.detail}</p>
-              {persistence ? (
-                <p className="empty-copy">{persistenceSummaryCopy(persistence)}</p>
-              ) : null}
 
               <div className="chip-row">
                 {persistence ? (
@@ -5526,6 +5527,18 @@ function OverviewSidepanel({
                     )}
                   >
                     {persistenceChipLabel(persistence)}
+                  </span>
+                ) : null}
+                {incusStorage ? (
+                  <span
+                    className={joinClassNames(
+                      "surface-pill",
+                      incusStorage.status === "ready"
+                        ? "surface-pill--success"
+                        : "surface-pill--warning",
+                    )}
+                  >
+                    {incusStorageChipLabel(incusStorage)}
                   </span>
                 ) : null}
                 <span className="surface-pill">
@@ -5578,6 +5591,75 @@ function OverviewSidepanel({
                 Launch workspace
               </button>
             </SidepanelSection>
+
+            {persistence || incusStorage ? (
+              <SidepanelSection title="Persistence & Storage">
+                {persistence ? (
+                  <div className="compact-grid">
+                    <FieldPair
+                      label="State backend"
+                      value={persistenceBackendLabel(persistence.kind)}
+                    />
+                    <FieldPair
+                      label="State status"
+                      value={persistenceStatusLabel(persistence)}
+                    />
+                    <FieldPair
+                      compact
+                      label="State location"
+                      mono={persistence.kind === "json"}
+                      value={persistenceLocationLabel(persistence)}
+                    />
+                    <FieldPair
+                      label="Last write"
+                      value={
+                        persistence.lastPersistedAt
+                          ? formatTimestamp(persistence.lastPersistedAt)
+                          : "Pending"
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                {incusStorage ? (
+                  <>
+                    <div className="compact-grid">
+                      <FieldPair
+                        compact
+                        label="Selected pool"
+                        mono
+                        value={incusStoragePoolLabel(incusStorage)}
+                      />
+                      <FieldPair
+                        label="Pool status"
+                        value={incusStorageStatusLabel(incusStorage)}
+                      />
+                      <FieldPair
+                        label="Driver"
+                        value={incusStorage.selectedPoolDriver ?? "Unknown"}
+                      />
+                      <FieldPair
+                        compact
+                        label="Source"
+                        mono
+                        value={incusStorage.selectedPoolSource ?? "Managed by Incus"}
+                      />
+                    </div>
+
+                    {incusStorage.availablePools.length > 0 ? (
+                      <div className="chip-row">
+                        {incusStorage.availablePools.map((pool) => (
+                          <span key={pool.name} className="surface-pill mono-font">
+                            {pool.name}
+                            {pool.driver ? ` (${pool.driver})` : ""}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+              </SidepanelSection>
+            ) : null}
 
             <SidepanelSection title="Templates">
               <div className="stack">
@@ -5735,7 +5817,7 @@ function SidepanelSection({
   defaultOpen = false,
   title,
 }: {
-  children: JSX.Element | JSX.Element[];
+  children: ReactNode;
   defaultOpen?: boolean;
   title: string;
 }): JSX.Element {
@@ -5985,20 +6067,38 @@ function persistenceChipLabel(persistence: HealthStatus["persistence"]): string 
   return `${persistenceBackendLabel(persistence.kind)} ${persistenceStatusLabel(persistence)}`;
 }
 
-function persistenceSummaryCopy(persistence: HealthStatus["persistence"]): string {
-  const backend = persistenceBackendLabel(persistence.kind);
-
-  if (persistence.status === "degraded") {
-    return persistence.lastPersistError
-      ? `${backend} persistence is degraded. ${persistence.lastPersistError}`
-      : `${backend} persistence is degraded.`;
+function persistenceLocationLabel(persistence: HealthStatus["persistence"]): string {
+  if (persistence.kind === "json") {
+    return persistence.dataFile ?? "Unknown JSON path";
   }
 
-  if (!persistence.lastPersistedAt) {
-    return `${backend} persistence is ready and waiting for the next write.`;
-  }
+  return persistence.databaseConfigured
+    ? "Database URL configured"
+    : "Database URL missing";
+}
 
-  return `${backend} persistence last wrote at ${formatTimestamp(persistence.lastPersistedAt)}.`;
+function incusStorageStatusLabel(incusStorage: NonNullable<HealthStatus["incusStorage"]>): string {
+  switch (incusStorage.status) {
+    case "ready":
+      return "Ready";
+    case "warning":
+      return "Needs attention";
+    case "unavailable":
+    default:
+      return "Unavailable";
+  }
+}
+
+function incusStorageChipLabel(incusStorage: NonNullable<HealthStatus["incusStorage"]>): string {
+  return `Incus storage ${incusStorageStatusLabel(incusStorage)}`;
+}
+
+function incusStoragePoolLabel(incusStorage: NonNullable<HealthStatus["incusStorage"]>): string {
+  return (
+    incusStorage.selectedPool ??
+    incusStorage.defaultProfilePool ??
+    (incusStorage.configuredPool ? `${incusStorage.configuredPool} (missing)` : "Unpinned")
+  );
 }
 
 function providerStatusTitle(provider: DashboardSummary["provider"]): string {
@@ -6897,7 +6997,7 @@ async function fetchJson<T>(path: string): Promise<T> {
   return payload.data;
 }
 
-async function postJson<T = unknown>(path: string, body: unknown): Promise<T> {
+async function postJson<T = unknown, Body = unknown>(path: string, body: Body): Promise<T> {
   const response = await fetch(path, {
     method: "POST",
     headers: {

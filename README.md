@@ -112,6 +112,7 @@ Captured templates publish a reusable local Incus image alias and future launche
 ### VM Storage Performance
 
 On this host, `incus info` reports the active storage backend as `dir`. That works, but for VM-heavy create, clone, and snapshot workflows it is usually the slow path because the backend cannot use thin-provisioned or filesystem-native snapshot/copy features.
+This is separate from Parallaize's control-plane state backend: switching JSON to PostgreSQL improves app-state durability and backup options, but it does not speed up Incus VM disk operations.
 
 If you want faster VM provisioning and snapshot churn, create a faster Incus storage pool such as `lvm`, `btrfs`, or `zfs` and point Parallaize at it:
 
@@ -205,6 +206,7 @@ flox activate -d . -- pnpm start
 ## Persistence Import And Export
 
 Use the persistence admin CLI to move the singleton app state between JSON files and PostgreSQL without hand-editing the state blob. The CLI normalizes older persisted shapes on read and writes the canonical state on import.
+That switch only changes how Parallaize persists its own control-plane state. If VM create, clone, or snapshot speed is the issue, move new VMs onto a faster Incus storage pool instead.
 
 Copy an existing JSON deployment state into PostgreSQL:
 

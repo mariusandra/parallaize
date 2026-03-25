@@ -8,6 +8,7 @@ export type ProviderHostStatus =
   | "error";
 export type ProviderDesktopTransport = "synthetic" | "novnc";
 export type PersistenceStatus = "ready" | "degraded";
+export type IncusStorageStatus = "ready" | "warning" | "unavailable";
 
 export type VmStatus =
   | "creating"
@@ -170,6 +171,37 @@ export interface PersistenceDiagnostics {
   lastPersistError: string | null;
 }
 
+export interface IncusStoragePoolSummary {
+  name: string;
+  driver: string | null;
+}
+
+export interface IncusStorageDiagnostics {
+  status: IncusStorageStatus;
+  detail: string;
+  configuredPool: string | null;
+  defaultProfilePool: string | null;
+  selectedPool: string | null;
+  selectedPoolDriver: string | null;
+  selectedPoolSource: string | null;
+  selectedPoolLoopBacked: boolean | null;
+  availablePools: IncusStoragePoolSummary[];
+  nextSteps: string[];
+}
+
+export type IncusStorageAction = "probe" | "bootstrap";
+
+export interface RunIncusStorageActionInput {
+  action: IncusStorageAction;
+}
+
+export interface IncusStorageActionResult {
+  action: IncusStorageAction;
+  changed: boolean;
+  message: string;
+  output: string[];
+}
+
 export interface DashboardMetrics {
   totalVmCount: number;
   runningVmCount: number;
@@ -291,6 +323,7 @@ export interface HealthStatus {
   status: "ok" | "degraded";
   provider: ProviderState;
   persistence: PersistenceDiagnostics;
+  incusStorage: IncusStorageDiagnostics | null;
   generatedAt: string;
 }
 

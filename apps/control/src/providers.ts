@@ -2660,7 +2660,7 @@ if [ "$RESTART_GDM" -eq 1 ]; then
   sleep 2
 fi
 if [ "$RESTART_VNC" -eq 1 ] || ! systemctl is-active --quiet parallaize-x11vnc.service; then
-  systemctl restart parallaize-x11vnc.service
+  systemctl restart --no-block parallaize-x11vnc.service
 fi`;
 }
 

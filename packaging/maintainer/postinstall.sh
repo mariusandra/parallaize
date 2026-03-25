@@ -2,6 +2,36 @@
 set -eu
 
 bootstrap_blank_incus_host() {
+  preseed_blank_incus_host() {
+    storage_driver="$1"
+
+    cat <<EOF | incus admin init --preseed >/dev/null 2>&1
+config: {}
+networks:
+- name: incusbr0
+  type: bridge
+  config:
+    ipv4.address: auto
+    ipv6.address: auto
+storage_pools:
+- name: default
+  driver: $storage_driver
+profiles:
+- name: default
+  description: Default Incus profile
+  config: {}
+  devices:
+    eth0:
+      name: eth0
+      network: incusbr0
+      type: nic
+    root:
+      path: /
+      pool: default
+      type: disk
+EOF
+  }
+
   if ! command -v incus >/dev/null 2>&1; then
     return 0
   fi
@@ -37,31 +67,11 @@ bootstrap_blank_incus_host() {
     return 0
   fi
 
-  cat <<'EOF' | incus admin init --preseed >/dev/null 2>&1 || return 0
-config: {}
-networks:
-- name: incusbr0
-  type: bridge
-  config:
-    ipv4.address: auto
-    ipv6.address: auto
-storage_pools:
-- name: default
-  driver: dir
-profiles:
-- name: default
-  description: Default Incus profile
-  config: {}
-  devices:
-    eth0:
-      name: eth0
-      network: incusbr0
-      type: nic
-    root:
-      path: /
-      pool: default
-      type: disk
-EOF
+  if command -v mkfs.btrfs >/dev/null 2>&1; then
+    preseed_blank_incus_host btrfs || preseed_blank_incus_host dir || return 0
+  else
+    preseed_blank_incus_host dir || return 0
+  fi
 
   if [ -f /etc/parallaize/parallaize.env ]; then
     if grep -q '^PARALLAIZE_INCUS_STORAGE_POOL=$' /etc/parallaize/parallaize.env; then

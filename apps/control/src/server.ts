@@ -14,9 +14,11 @@ import type {
   CreateVmInput,
   DashboardSummary,
   HealthStatus,
+  IncusStorageActionResult,
   InjectCommandInput,
   LoginInput,
   ReorderVmsInput,
+  RunIncusStorageActionInput,
   ResizeVmInput,
   SetVmResolutionInput,
   SnapshotLaunchInput,
@@ -28,6 +30,7 @@ import type {
   VmLogsSnapshot,
 } from "../../../packages/shared/src/types.js";
 import { loadConfig } from "./config.js";
+import { collectIncusStorageDiagnostics, runIncusStorageAction } from "./incus-storage.js";
 import { DesktopManager } from "./manager.js";
 import { VmNetworkBridge } from "./network.js";
 import { createProvider } from "./providers.js";
@@ -92,8 +95,11 @@ const server = createServer(async (request, response) => {
     if (method === "GET" && url.pathname === "/api/health") {
       const providerState = manager.getProviderState();
       const persistence = store.getDiagnostics();
+      const incusStorage = collectIncusStorageDiagnostics(config);
       const status =
-        providerState.hostStatus === "ready" && persistence.status === "ready"
+        providerState.hostStatus === "ready" &&
+        persistence.status === "ready" &&
+        (incusStorage === null || incusStorage.status === "ready")
           ? "ok"
           : "degraded";
 
@@ -103,8 +109,17 @@ const server = createServer(async (request, response) => {
           status,
           provider: providerState,
           persistence,
+          incusStorage,
           generatedAt: new Date().toISOString(),
         },
+      });
+    }
+
+    if (method === "POST" && url.pathname === "/api/incus/storage/action") {
+      const payload = await readJsonBody<RunIncusStorageActionInput>(request);
+      return writeJson<IncusStorageActionResult>(response, 200, {
+        ok: true,
+        data: runIncusStorageAction(config, payload.action),
       });
     }
 
