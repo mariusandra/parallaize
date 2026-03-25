@@ -32,6 +32,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `ar
 - [x] Dispatch-driven release automation that bumps versioned package/docs references, builds package artifacts, uploads them to the archive bucket, pushes the release commit back to GitHub, and publishes GitHub releases with Debian assets
 - [x] Host internet/bootstrap diagnostics plus guest desktop self-heal for packaged Incus VMs so X11/VNC converge even after a bad first boot
 - [x] Repeated guest desktop bootstrap retries during running-session refresh so cloud-init-disabled Ubuntu desktop images can still recover VNC once the guest agent comes up
+- [x] On-demand VM log modal that reads Incus console/info logs from the VM action menu and keeps polling while the modal stays open
 
 ## Priority Backlog
 
@@ -94,6 +95,7 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-25: Fixed a control-plane regression where new Incus VMs with only a guest IP were being treated as live VNC sessions, which stopped the missing-session refresh loop from retrying the guest desktop bootstrap after agent-ready recovery.
 - 2026-03-25: Live-debugged a packaged `0.1.1` install on `devbox`, confirmed the Ubuntu desktop image had `cloud-init` disabled by generator, and moved the Incus guest desktop bootstrap retry into the normal missing-session refresh path so VNC self-heals after the guest agent becomes ready.
 - 2026-03-25: Added host internet/bootstrap diagnostics for the Incus provider, made `/api/health` degrade on host egress failures, and switched guest desktop bootstrap to a retrying systemd service so `x11vnc` and the X11 GDM config can recover after a failed first boot.
 - 2026-03-25: Extended the release workflow to create and push a GitHub release tag and attach the generated `amd64` and `arm64` Debian packages as GitHub release assets.

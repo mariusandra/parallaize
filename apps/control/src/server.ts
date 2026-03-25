@@ -25,6 +25,7 @@ import type {
   UpdateVmInput,
   UpdateVmForwardedPortsInput,
   VmDetail,
+  VmLogsSnapshot,
 } from "../../../packages/shared/src/types.js";
 import { loadConfig } from "./config.js";
 import { DesktopManager } from "./manager.js";
@@ -125,6 +126,14 @@ const server = createServer(async (request, response) => {
       return writeJson<VmDetail>(response, 200, {
         ok: true,
         data: manager.getVmDetail(vmMatch[1]),
+      });
+    }
+
+    const vmLogsMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/logs$/);
+    if (method === "GET" && vmLogsMatch) {
+      return writeJson<VmLogsSnapshot>(response, 200, {
+        ok: true,
+        data: await manager.getVmLogs(vmLogsMatch[1]),
       });
     }
 

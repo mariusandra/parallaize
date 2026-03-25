@@ -64,6 +64,7 @@ export interface VmSession {
   kind: VmSessionKind;
   host: string | null;
   port: number | null;
+  reachable?: boolean;
   webSocketPath: string | null;
   browserPath: string | null;
   display: string;
@@ -198,6 +199,14 @@ export interface VmDetail {
   snapshots: Snapshot[];
   recentJobs: ActionJob[];
   generatedAt: string;
+}
+
+export interface VmLogsSnapshot {
+  provider: ProviderKind;
+  providerRef: string;
+  source: string;
+  content: string;
+  fetchedAt: string;
 }
 
 export interface CreateVmInput {

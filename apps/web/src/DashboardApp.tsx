@@ -45,6 +45,7 @@ import type {
   UpdateVmInput,
   VmDetail,
   VmInstance,
+  VmLogsSnapshot,
   VmPowerAction,
   VmPortForward,
   VmStatus,
@@ -68,6 +69,7 @@ import {
   canUseDeferredIdentifiedCollection,
   orderIdentifiedCollectionByIds,
 } from "./deferredCollections.js";
+import { parseAnsiText, resolveAnsiSegmentStyle } from "./ansi.js";
 import { NoVncViewport } from "./NoVncViewport.js";
 
 interface CreateDraft {
@@ -169,6 +171,15 @@ type RenameDialogState =
       description: string;
     };
 
+interface VmLogsDialogState {
+  error: string | null;
+  loading: boolean;
+  logs: VmLogsSnapshot | null;
+  refreshing: boolean;
+  vmId: string;
+  vmName: string;
+}
+
 const emptyCreateDraft: CreateDraft = {
   templateId: "",
   name: "",
@@ -248,6 +259,7 @@ const sidepanelMinWidth = 320;
 const sidepanelMaxWidth = 560;
 const sidepanelCollapseSnapWidth = Math.round(sidepanelMinWidth / 2);
 const sidepanelCompactBreakpoint = 1120;
+const vmLogsPollIntervalMs = 4000;
 
 const defaultDesktopResolutionPreference: DesktopResolutionPreference = {
   mode: "viewport",
@@ -275,6 +287,8 @@ export function DashboardApp(): JSX.Element {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [vmLogsDialog, setVmLogsDialog] = useState<VmLogsDialogState | null>(null);
+  const [vmLogsRefreshTick, setVmLogsRefreshTick] = useState(0);
   const [sidepanelCollapsedByVm, setSidepanelCollapsedByVm] = useState<
     Record<string, true>
   >(() => readSidepanelCollapsedByVm());
@@ -747,6 +761,107 @@ export function DashboardApp(): JSX.Element {
       cancelled = true;
     };
   }, [selectedVmId, summary?.generatedAt]);
+
+  useEffect(() => {
+    if (authState !== "ready" || !vmLogsDialog) {
+      return;
+    }
+
+    let cancelled = false;
+    let refreshTimer: number | null = null;
+    const vmId = vmLogsDialog.vmId;
+
+    const loadLogs = async (mode: "initial" | "refresh"): Promise<void> => {
+      setVmLogsDialog((current) => {
+        if (!current || current.vmId !== vmId) {
+          return current;
+        }
+
+        return {
+          ...current,
+          loading: mode === "initial" && current.logs === null,
+          refreshing: mode === "refresh" && current.logs !== null,
+        };
+      });
+
+      try {
+        const logs = await fetchJson<VmLogsSnapshot>(`/api/vms/${vmId}/logs`);
+
+        if (cancelled) {
+          return;
+        }
+
+        setVmLogsDialog((current) =>
+          current && current.vmId === vmId
+            ? {
+                ...current,
+                error: null,
+                loading: false,
+                logs,
+                refreshing: false,
+              }
+            : current,
+        );
+      } catch (error) {
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setVmLogsDialog((current) =>
+          current && current.vmId === vmId
+            ? {
+                ...current,
+                error: errorMessage(error),
+                loading: false,
+                refreshing: false,
+              }
+            : current,
+        );
+      }
+
+      if (!cancelled) {
+        refreshTimer = window.setTimeout(() => {
+          void loadLogs("refresh");
+        }, vmLogsPollIntervalMs);
+      }
+    };
+
+    void loadLogs(vmLogsDialog.logs ? "refresh" : "initial");
+
+    return () => {
+      cancelled = true;
+
+      if (refreshTimer !== null) {
+        window.clearTimeout(refreshTimer);
+      }
+    };
+  }, [authState, vmLogsDialog?.vmId, vmLogsRefreshTick]);
+
+  useEffect(() => {
+    if (!summary || !vmLogsDialog) {
+      return;
+    }
+
+    const matchingVm = summary.vms.find((entry) => entry.id === vmLogsDialog.vmId);
+
+    if (!matchingVm || matchingVm.name === vmLogsDialog.vmName) {
+      return;
+    }
+
+    setVmLogsDialog((current) =>
+      current && current.vmId === matchingVm.id
+        ? {
+            ...current,
+            vmName: matchingVm.name,
+          }
+        : current,
+    );
+  }, [summary?.generatedAt, vmLogsDialog?.vmId, vmLogsDialog?.vmName]);
 
   useEffect(() => {
     if (!detail) {
@@ -1325,6 +1440,7 @@ export function DashboardApp(): JSX.Element {
     setShellMenuOpen(false);
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
+    setVmLogsDialog(null);
   }
 
   async function handleLogout(): Promise<void> {
@@ -1449,6 +1565,27 @@ export function DashboardApp(): JSX.Element {
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
     setShowCreateDialog(true);
+  }
+
+  function openVmLogsDialog(vm: VmInstance): void {
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+    setVmLogsDialog({
+      error: null,
+      loading: true,
+      logs: null,
+      refreshing: false,
+      vmId: vm.id,
+      vmName: vm.name,
+    });
+  }
+
+  function closeVmLogsDialog(): void {
+    setVmLogsDialog(null);
+  }
+
+  function refreshVmLogsDialog(): void {
+    setVmLogsRefreshTick((current) => current + 1);
   }
 
   function closeRenameDialog(): void {
@@ -2949,6 +3086,7 @@ export function DashboardApp(): JSX.Element {
                   onHideInspector={() => setVmSidepanelCollapsed(vm.id, true)}
                   onOpen={selectVm}
                   onInspect={inspectVm}
+                  onOpenLogs={openVmLogsDialog}
                   onRename={handleRenameVm}
                   onSetActiveCpuThreshold={handleSetActiveCpuThreshold}
                   onSnapshot={handleSnapshot}
@@ -3147,6 +3285,17 @@ export function DashboardApp(): JSX.Element {
           onSubmit={handleRenameSubmit}
         />
       ) : null}
+      {vmLogsDialog ? (
+        <VmLogsDialog
+          error={vmLogsDialog.error}
+          loading={vmLogsDialog.loading}
+          logs={vmLogsDialog.logs}
+          refreshing={vmLogsDialog.refreshing}
+          vmName={vmLogsDialog.vmName}
+          onClose={closeVmLogsDialog}
+          onRefresh={refreshVmLogsDialog}
+        />
+      ) : null}
     </>
   );
 }
@@ -3170,6 +3319,16 @@ interface RenameDialogProps {
   onClose: () => void;
   onDraftChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+}
+
+interface VmLogsDialogProps {
+  error: string | null;
+  loading: boolean;
+  logs: VmLogsSnapshot | null;
+  refreshing: boolean;
+  vmName: string;
+  onClose: () => void;
+  onRefresh: () => void;
 }
 
 function RenameDialog({
@@ -3233,6 +3392,94 @@ function RenameDialog({
             Save name
           </button>
         </form>
+      </section>
+    </div>
+  );
+}
+
+function VmLogsDialog({
+  error,
+  loading,
+  logs,
+  refreshing,
+  vmName,
+  onClose,
+  onRefresh,
+}: VmLogsDialogProps): JSX.Element {
+  const outputRef = useRef<HTMLPreElement | null>(null);
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const output = outputRef.current;
+
+    if (!output || !stickToBottomRef.current) {
+      return;
+    }
+
+    output.scrollTop = output.scrollHeight;
+  }, [logs?.content]);
+
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <section
+        className="dialog-panel dialog-panel--logs"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-panel__header">
+          <div>
+            <p className="workspace-shell__eyebrow">Workspace logs</p>
+            <h2 className="dialog-panel__title">Logs for {vmName}</h2>
+            <p className="dialog-panel__copy">
+              Polls {logs?.source ?? "the VM log stream"} every {vmLogsPollIntervalMs / 1000}s
+              while this modal stays open.
+            </p>
+          </div>
+          <div className="chip-row">
+            <button
+              className="button button--ghost"
+              type="button"
+              onClick={onRefresh}
+              disabled={loading || refreshing}
+            >
+              {loading || refreshing ? "Refreshing..." : "Refresh"}
+            </button>
+            <button className="button button--ghost" type="button" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </div>
+
+        <div className="chip-row vm-logs__meta">
+          {logs ? <span className="surface-pill mono-font">{logs.providerRef}</span> : null}
+          <span className="surface-pill">{logs?.source ?? "Loading logs..."}</span>
+          {logs ? (
+            <span className="surface-pill">Updated {formatTimestamp(logs.fetchedAt)}</span>
+          ) : null}
+        </div>
+
+        {error ? <p className="empty-copy">Last refresh failed: {error}</p> : null}
+
+        {loading && !logs ? <p className="empty-copy">Loading logs...</p> : null}
+
+        {logs && logs.content.trim().length > 0 ? (
+          <pre
+            ref={outputRef}
+            className="vm-logs__output mono-font"
+            onScroll={(event) => {
+              stickToBottomRef.current = isNearScrollBottom(event.currentTarget);
+            }}
+          >
+            {parseAnsiText(logs.content).map((segment, index) => (
+              <span key={index} style={resolveAnsiSegmentStyle(segment)}>
+                {segment.text}
+              </span>
+            ))}
+          </pre>
+        ) : null}
+
+        {!loading && logs && logs.content.trim().length === 0 ? (
+          <p className="empty-copy">No VM log output is available yet.</p>
+        ) : null}
       </section>
     </div>
   );
@@ -3375,6 +3622,7 @@ interface VmTileProps {
   onDelete: (vm: VmInstance) => Promise<void>;
   onHideInspector: () => void;
   onInspect: (vmId: string) => void;
+  onOpenLogs: (vm: VmInstance) => void;
   onOpen: (vmId: string) => void;
   onRename: (vm: VmInstance) => Promise<void>;
   onSetActiveCpuThreshold: (vm: VmInstance) => void;
@@ -3459,6 +3707,7 @@ function VmTile({
   onDelete,
   onHideInspector,
   onInspect,
+  onOpenLogs,
   onOpen,
   onRename,
   onSetActiveCpuThreshold,
@@ -3582,6 +3831,16 @@ function VmTile({
             disabled={busy}
           >
             Rename
+          </button>
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              onOpenLogs(vm);
+            }}
+          >
+            Logs
           </button>
           <button
             className="menu-action menu-action--split"
@@ -6612,6 +6871,10 @@ function buildSparklinePoints(
 
 function joinClassNames(...values: Array<string | false | null | undefined>): string {
   return values.filter(Boolean).join(" ");
+}
+
+function isNearScrollBottom(element: HTMLElement): boolean {
+  return element.scrollHeight - (element.scrollTop + element.clientHeight) <= 24;
 }
 
 async function fetchJson<T>(path: string): Promise<T> {

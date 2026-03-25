@@ -11,6 +11,7 @@ import type {
   VmInstance,
 } from "../packages/shared/src/types.js";
 import { DesktopManager } from "../apps/control/src/manager.js";
+import type { DesktopProvider } from "../apps/control/src/providers.js";
 import { createProvider } from "../apps/control/src/providers.js";
 import { createSeedState } from "../apps/control/src/seed.js";
 import { JsonStateStore } from "../apps/control/src/store.js";
@@ -1380,6 +1381,67 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /cvt "\$WIDTH" "\$HEIGHT" 60/);
   assert.match(execCall?.[5] ?? "", /MODE_TO_APPLY=/);
   assert.match(execCall?.[5] ?? "", /xrandr --output "\$OUTPUT" --mode "\$MODE_TO_APPLY"/);
+});
+
+test("incus provider reads VM logs from the console stream and falls back to info output", async () => {
+  const instanceName = "parallaize-vm-0200-log-reader";
+  let consoleAttempts = 0;
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        if (args[0] === "console" && args[1] === instanceName && args[2] === "--show-log") {
+          consoleAttempts += 1;
+          return ok(consoleAttempts === 1 ? "Boot complete\n" : "", args);
+        }
+
+        if (args[0] === "info" && args[1] === instanceName && args[2] === "--show-log") {
+          return ok("Fallback info log\nAgent connected\n", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0200",
+    name: "log-reader",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 200,
+    activeWindow: "logs",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const consoleLogs = await provider.readVmLogs(vm);
+  assert.equal(consoleLogs.source, "incus console --show-log");
+  assert.equal(consoleLogs.providerRef, instanceName);
+  assert.match(consoleLogs.content, /Boot complete/);
+
+  const fallbackLogs = await provider.readVmLogs(vm);
+  assert.equal(fallbackLogs.source, "incus info --show-log");
+  assert.match(fallbackLogs.content, /Fallback info log/);
+  assert.match(fallbackLogs.content, /Agent connected/);
 });
 
 test("incus provider resource resize only updates changed limits and preserves the current session", async () => {
@@ -3110,6 +3172,152 @@ test("manager reattaches reachable VNC sessions for running incus VMs after star
   assert.equal(detail.vm.session?.display, "10.55.0.201:5900");
   assert.equal(detail.vm.session?.webSocketPath, "/api/vms/vm-0201/vnc");
   assert.equal(detail.vm.session?.browserPath, "/?vm=vm-0201");
+});
+
+test("manager keeps refreshing newly created VMs while guest VNC is still pending", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-pending-vnc-refresh-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let refreshCalls = 0;
+  let createdAt = 0;
+  const providerState = {
+    kind: "incus" as const,
+    available: true,
+    detail: "Incus is reachable.",
+    hostStatus: "ready" as const,
+    binaryPath: "incus",
+    project: null,
+    desktopTransport: "novnc" as const,
+    nextSteps: [],
+  };
+  const pendingSession = {
+    kind: "vnc" as const,
+    host: "10.55.0.203",
+    port: 5900,
+    reachable: false,
+    webSocketPath: null,
+    browserPath: null,
+    display: "10.55.0.203:5900 pending VNC",
+  };
+  const provider: DesktopProvider = {
+    state: providerState,
+    refreshState() {
+      return this.state;
+    },
+    sampleHostTelemetry() {
+      return null;
+    },
+    sampleVmTelemetry() {
+      return null;
+    },
+    observeVmPowerState() {
+      return null;
+    },
+    async refreshVmSession() {
+      refreshCalls += 1;
+
+      if (createdAt === 0 || Date.now() - createdAt < 1200) {
+        return pendingSession;
+      }
+
+      return {
+        ...pendingSession,
+        reachable: true,
+        display: "10.55.0.203:5900",
+      };
+    },
+    async createVm() {
+      createdAt = Date.now();
+
+      return {
+        lastAction: "Provisioned from Ubuntu Agent Force",
+        activity: ["incus: launched pending-retry from ubuntu-agent-force"],
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        session: pendingSession,
+      };
+    },
+    async cloneVm() {
+      throw new Error("not implemented");
+    },
+    async startVm() {
+      throw new Error("not implemented");
+    },
+    async stopVm() {
+      throw new Error("not implemented");
+    },
+    async deleteVm() {
+      throw new Error("not implemented");
+    },
+    async resizeVm() {
+      throw new Error("not implemented");
+    },
+    async setDisplayResolution() {
+      throw new Error("not implemented");
+    },
+    async snapshotVm() {
+      throw new Error("not implemented");
+    },
+    async launchVmFromSnapshot() {
+      throw new Error("not implemented");
+    },
+    async restoreVmToSnapshot() {
+      throw new Error("not implemented");
+    },
+    async captureTemplate() {
+      throw new Error("not implemented");
+    },
+    async injectCommand() {
+      throw new Error("not implemented");
+    },
+    async readVmLogs() {
+      throw new Error("not implemented");
+    },
+    tickVm() {
+      return null;
+    },
+    renderFrame() {
+      return "";
+    },
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  context.after(() => {
+    manager.stop();
+  });
+
+  manager.start();
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "pending-retry",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  await wait(100);
+
+  const pendingVm = store.load().vms.find((entry) => entry.id === vm.id);
+  assert.equal(pendingVm?.status, "running");
+  assert.equal(pendingVm?.session?.display, "10.55.0.203:5900 pending VNC");
+  assert.equal(pendingVm?.session?.webSocketPath, null);
+  assert.equal(pendingVm?.session?.browserPath, null);
+
+  await wait(2700);
+
+  const readyVm = store.load().vms.find((entry) => entry.id === vm.id);
+  assert.ok(refreshCalls >= 1);
+  assert.equal(readyVm?.session?.display, "10.55.0.203:5900");
+  assert.equal(readyVm?.session?.webSocketPath, `/api/vms/${vm.id}/vnc`);
+  assert.equal(readyVm?.session?.browserPath, `/?vm=${vm.id}`);
 });
 
 test("incus provider refresh reruns guest desktop bootstrap when VNC is still missing", async () => {

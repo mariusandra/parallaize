@@ -28,6 +28,7 @@ import type {
   VmDetail,
   VmCommandResult,
   VmInstance,
+  VmLogsSnapshot,
   VmPortForward,
 } from "../../../packages/shared/src/types.js";
 import type {
@@ -214,6 +215,14 @@ export class DesktopManager {
       recentJobs: state.jobs.filter((job) => job.targetVmId === vm.id).slice(0, 8),
       generatedAt: nowIso(),
     };
+  }
+
+  async getVmLogs(vmId: string): Promise<VmLogsSnapshot> {
+    this.syncProviderState();
+    const state = this.store.load();
+    const vm = this.requireVm(state, vmId);
+    this.ensureActiveProvider(vm);
+    return this.provider.readVmLogs(vm);
   }
 
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {
@@ -1461,7 +1470,13 @@ function shouldRefreshVmSession(
 }
 
 function hasReachableVncSession(session: VmInstance["session"]): boolean {
-  return Boolean(session && session.kind === "vnc" && session.host && session.port);
+  return Boolean(
+    session &&
+      session.kind === "vnc" &&
+      session.reachable !== false &&
+      session.host &&
+      session.port,
+  );
 }
 
 function sameVmSession(
@@ -1480,6 +1495,7 @@ function sameVmSession(
     left.kind === right.kind &&
     left.host === right.host &&
     left.port === right.port &&
+    left.reachable === right.reachable &&
     left.webSocketPath === right.webSocketPath &&
     left.browserPath === right.browserPath &&
     left.display === right.display
@@ -1707,8 +1723,14 @@ function enrichVmSession(
 
   return {
     ...session,
-    webSocketPath: buildVncSocketPath(vmId),
-    browserPath: buildVmBrowserPath(vmId),
+    webSocketPath:
+      session.reachable !== false && session.host && session.port
+        ? buildVncSocketPath(vmId)
+        : null,
+    browserPath:
+      session.reachable !== false && session.host && session.port
+        ? buildVmBrowserPath(vmId)
+        : null,
   };
 }
 

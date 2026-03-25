@@ -10,6 +10,7 @@ import type {
   ResourceSpec,
   Snapshot,
   VmInstance,
+  VmLogsSnapshot,
   VmSession,
   VmWindow,
 } from "../../../packages/shared/src/types.js";
@@ -112,6 +113,7 @@ export interface DesktopProvider {
     report?: CaptureTemplateProgressReporter,
   ): Promise<ProviderSnapshot>;
   injectCommand(vm: VmInstance, command: string): Promise<ProviderMutation>;
+  readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot>;
   tickVm(vm: VmInstance, template: EnvironmentTemplate): ProviderTick | null;
   renderFrame(
     vm: VmInstance,
@@ -490,6 +492,33 @@ class MockProvider implements DesktopProvider {
         output: [reply],
         workspacePath: nextWorkspacePath,
       },
+    };
+  }
+
+  async readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot> {
+    const commandSections = (vm.commandHistory ?? []).flatMap((entry) => [
+      "",
+      `$ ${entry.command}`,
+      `cwd: ${entry.workspacePath}`,
+      ...entry.output,
+    ]);
+    const content = [
+      "provider: mock",
+      `provider ref: ${vm.providerRef}`,
+      `status: ${vm.status}`,
+      `workspace: ${vm.workspacePath}`,
+      "",
+      "activity:",
+      ...(vm.activityLog.length > 0 ? vm.activityLog : ["(no activity yet)"]),
+      ...(commandSections.length > 0 ? ["", "commands:", ...commandSections] : []),
+    ].join("\n");
+
+    return {
+      provider: "mock",
+      providerRef: vm.providerRef,
+      source: "mock activity log",
+      content,
+      fetchedAt: new Date().toISOString(),
     };
   }
 
@@ -1240,6 +1269,64 @@ class IncusProvider implements DesktopProvider {
     };
   }
 
+  async readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot> {
+    this.assertAvailable();
+    const consoleArgs = ["console", vm.providerRef, "--show-log"];
+    const consoleResult = await this.executeAsync(consoleArgs);
+    const consoleContent = normalizeVmLogContent(consoleResult.stdout);
+
+    if (consoleResult.status === 0 && consoleContent.trim().length > 0) {
+      return {
+        provider: "incus",
+        providerRef: vm.providerRef,
+        source: "incus console --show-log",
+        content: consoleContent,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    const infoArgs = ["info", vm.providerRef, "--show-log"];
+    const infoResult = await this.executeAsync(infoArgs);
+    const infoContent = normalizeVmLogContent(infoResult.stdout);
+
+    if (infoResult.status === 0 && infoContent.trim().length > 0) {
+      return {
+        provider: "incus",
+        providerRef: vm.providerRef,
+        source: "incus info --show-log",
+        content: infoContent,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    if (consoleResult.status === 0) {
+      return {
+        provider: "incus",
+        providerRef: vm.providerRef,
+        source: "incus console --show-log",
+        content: consoleContent,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    if (infoResult.status === 0) {
+      return {
+        provider: "incus",
+        providerRef: vm.providerRef,
+        source: "incus info --show-log",
+        content: infoContent,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    throw new Error(
+      [
+        formatCommandFailure(consoleArgs, consoleResult),
+        formatCommandFailure(infoArgs, infoResult),
+      ].filter(Boolean).join("\n"),
+    );
+  }
+
   tickVm(): ProviderTick | null {
     return null;
   }
@@ -1433,7 +1520,7 @@ class IncusProvider implements DesktopProvider {
       await sleep(5000);
     }
 
-    return address ? buildVncSession(address, this.guestVncPort) : null;
+    return buildVncSession(address, this.guestVncPort, false);
   }
 
   private async maybeEnsureGuestDesktopBootstrapAsync(instanceName: string): Promise<boolean> {
@@ -2239,14 +2326,20 @@ function buildSyntheticSession(): VmSession {
 function buildVncSession(
   host: string | null,
   port: number,
+  reachable = true,
 ): VmSession {
   return {
     kind: "vnc",
     host,
     port,
+    reachable,
     webSocketPath: null,
     browserPath: null,
-    display: host ? `${formatNetworkEndpoint(host, port)}` : `guest VNC on port ${port} pending DHCP`,
+    display: host
+      ? reachable
+        ? `${formatNetworkEndpoint(host, port)}`
+        : `${formatNetworkEndpoint(host, port)} pending VNC`
+      : `guest VNC on port ${port} pending DHCP`,
   };
 }
 
@@ -2981,6 +3074,10 @@ function estimateVmCreateDesktopWaitProgress(startedAt: number): number {
   return VM_CREATE_DESKTOP_WAIT_START_PERCENT + (
     fraction * (VM_CREATE_READY_PERCENT - VM_CREATE_DESKTOP_WAIT_START_PERCENT)
   );
+}
+
+function normalizeVmLogContent(content: string): string {
+  return content.replace(/\r\n?/g, "\n");
 }
 
 function mapPercentToRange(percent: number, start: number, end: number): number {

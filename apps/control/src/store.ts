@@ -549,22 +549,30 @@ function normalizeSession(
   provider: ProviderKind,
 ): VmSession | null {
   if (session) {
+    const reachable =
+      session.kind === "vnc"
+        ? session.reachable ?? Boolean(session.host && session.port)
+        : undefined;
+
     return {
       kind: session.kind,
       host: session.host ?? null,
       port: session.port ?? null,
+      reachable,
       webSocketPath:
-        session.kind === "vnc"
+        session.kind === "vnc" && reachable !== false && session.host && session.port
           ? buildVncSocketPath(vmId)
           : null,
       browserPath:
-        session.kind === "vnc"
+        session.kind === "vnc" && reachable !== false && session.host && session.port
           ? buildVmBrowserPath(vmId)
           : null,
       display:
         session.display ??
         (session.host && session.port
-          ? `${session.host}:${session.port}`
+          ? reachable !== false
+            ? `${session.host}:${session.port}`
+            : `${session.host}:${session.port} pending VNC`
           : provider === "mock"
             ? "Synthetic frame stream"
             : "Guest VNC pending"),
@@ -576,6 +584,7 @@ function normalizeSession(
       kind: "synthetic",
       host: null,
       port: null,
+      reachable: true,
       webSocketPath: null,
       browserPath: null,
       display: "Synthetic frame stream",
