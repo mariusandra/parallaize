@@ -23,6 +23,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    environment: default
     timeout-minutes: 90
     env:
       RELEASE_VERSION: ${{ github.event.inputs.version }}
