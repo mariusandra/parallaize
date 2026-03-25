@@ -157,6 +157,10 @@ export interface ProviderVmPowerState {
   status: "running" | "stopped";
 }
 
+interface ResolveSessionOptions {
+  requireBootstrapRepairBeforeReady?: boolean;
+}
+
 interface IncusCommandRunner {
   execute(args: string[], options?: CommandExecutionOptions): CommandResult;
   executeStreaming?(
@@ -815,7 +819,9 @@ class IncusProvider implements DesktopProvider {
     emitCreateProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await this.runAsync(["start", vm.providerRef]);
 
-    const session = await this.resolveSession(vm.providerRef, emitCreateProgress);
+    const session = await this.resolveSession(vm.providerRef, emitCreateProgress, {
+      requireBootstrapRepairBeforeReady: shouldRequireGuestBootstrapRepairBeforeReady(template),
+    });
 
     return {
       lastAction: `Provisioned from ${template.name}`,
@@ -860,7 +866,10 @@ class IncusProvider implements DesktopProvider {
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
     await this.runAsync(["start", targetVm.providerRef]);
 
-    const session = await this.resolveSession(targetVm.providerRef);
+    const session = await this.resolveSession(targetVm.providerRef, undefined, {
+      // Clones boot from an existing disk image, so cloud-init will not rewrite stale guest services.
+      requireBootstrapRepairBeforeReady: true,
+    });
 
     return {
       lastAction: `Cloned from ${sourceVm.name}`,
@@ -1047,7 +1056,10 @@ class IncusProvider implements DesktopProvider {
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
     await this.runAsync(["start", targetVm.providerRef]);
 
-    const session = await this.resolveSession(targetVm.providerRef);
+    const session = await this.resolveSession(targetVm.providerRef, undefined, {
+      // Snapshot launches also reuse an existing filesystem and need an in-guest bootstrap repair.
+      requireBootstrapRepairBeforeReady: true,
+    });
 
     return {
       lastAction: `Launched from snapshot ${snapshot.label}`,
@@ -1490,31 +1502,44 @@ class IncusProvider implements DesktopProvider {
   private async resolveSession(
     instanceName: string,
     report?: ProviderProgressReporter,
+    options?: ResolveSessionOptions,
   ): Promise<VmSession | null> {
     let address: string | null = null;
     const waitStartedAt = Date.now();
     const emitProgress = report;
+    let bootstrapConfirmed = !options?.requireBootstrapRepairBeforeReady;
 
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const info = await this.inspectInstanceAsync(instanceName);
       const addresses = findGuestAddressCandidates(info);
       address = addresses[0] ?? null;
+
+      if (!bootstrapConfirmed) {
+        bootstrapConfirmed = await this.ensureGuestDesktopBootstrapAsync(instanceName);
+      }
+
       const session = await this.probeReachableSessionForAddresses(addresses);
 
-      if (session) {
+      if (session && bootstrapConfirmed) {
         this.guestDesktopBootstrapAttemptAt.delete(instanceName);
         emitProgress?.("Desktop session ready", VM_CREATE_READY_PERCENT);
         return session;
       }
 
-      await this.maybeEnsureGuestDesktopBootstrapAsync(instanceName);
+      if (bootstrapConfirmed) {
+        await this.maybeEnsureGuestDesktopBootstrapAsync(instanceName);
+      }
 
       if (normalizeStatus(info.status ?? info.state?.status) !== "running") {
         break;
       }
 
       emitProgress?.(
-        address ? "Waiting for desktop" : "Waiting for guest network",
+        bootstrapConfirmed
+          ? address
+            ? "Waiting for desktop"
+            : "Waiting for guest network"
+          : "Preparing desktop bridge",
         estimateVmCreateDesktopWaitProgress(waitStartedAt),
       );
       await sleep(5000);
@@ -2367,28 +2392,28 @@ function buildEnsureGuestDesktopBootstrapScript(
   return `BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"
 BOOTSTRAP_SERVICE_FILE="/etc/systemd/system/parallaize-desktop-bootstrap.service"
 CURRENT_BOOTSTRAP="$(cat "$BOOTSTRAP_FILE" 2>/dev/null || true)"
-DESIRED_BOOTSTRAP="$(cat <<'SCRIPT'
+DESIRED_BOOTSTRAP="$(cat <<'PARALLAIZE_BOOTSTRAP_SCRIPT'
 ${buildGuestDesktopBootstrapScript(port)}
-SCRIPT
+PARALLAIZE_BOOTSTRAP_SCRIPT
 )"
 CURRENT_BOOTSTRAP_SERVICE="$(cat "$BOOTSTRAP_SERVICE_FILE" 2>/dev/null || true)"
-DESIRED_BOOTSTRAP_SERVICE="$(cat <<'UNIT'
+DESIRED_BOOTSTRAP_SERVICE="$(cat <<'PARALLAIZE_BOOTSTRAP_UNIT'
 ${buildGuestDesktopBootstrapServiceUnit()}
-UNIT
+PARALLAIZE_BOOTSTRAP_UNIT
 )"
 if [ "$CURRENT_BOOTSTRAP" != "$DESIRED_BOOTSTRAP" ] || [ "$CURRENT_BOOTSTRAP_SERVICE" != "$DESIRED_BOOTSTRAP_SERVICE" ]; then
   mkdir -p /usr/local/bin /etc/systemd/system
-  cat > "$BOOTSTRAP_FILE" <<'SCRIPT'
+  cat > "$BOOTSTRAP_FILE" <<'PARALLAIZE_BOOTSTRAP_SCRIPT'
 ${buildGuestDesktopBootstrapScript(port)}
-SCRIPT
+PARALLAIZE_BOOTSTRAP_SCRIPT
   chmod 0755 "$BOOTSTRAP_FILE"
-  cat > "$BOOTSTRAP_SERVICE_FILE" <<'UNIT'
+  cat > "$BOOTSTRAP_SERVICE_FILE" <<'PARALLAIZE_BOOTSTRAP_UNIT'
 ${buildGuestDesktopBootstrapServiceUnit()}
-UNIT
+PARALLAIZE_BOOTSTRAP_UNIT
 fi
 systemctl daemon-reload
 systemctl enable parallaize-desktop-bootstrap.service >/dev/null 2>&1 || true
-systemctl restart parallaize-desktop-bootstrap.service${strictStart ? "" : " || true"}`;
+"$BOOTSTRAP_FILE"${strictStart ? "" : " || true"}`;
 }
 
 function buildSetDisplayResolutionScript(
@@ -3078,6 +3103,12 @@ function estimateVmCreateDesktopWaitProgress(startedAt: number): number {
 
 function normalizeVmLogContent(content: string): string {
   return content.replace(/\r\n?/g, "\n");
+}
+
+function shouldRequireGuestBootstrapRepairBeforeReady(
+  template: EnvironmentTemplate,
+): boolean {
+  return template.launchSource.startsWith("parallaize-template-");
 }
 
 function mapPercentToRange(percent: number, start: number, end: number): number {

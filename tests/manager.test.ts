@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -1341,6 +1342,124 @@ test("incus provider degrades health when host internet checks fail", () => {
   assert.deepEqual(provider.state.nextSteps, [
     "Verify outbound IPv4 and DNS from the control-plane host.",
   ]);
+});
+
+test("incus provider repairs captured-template desktops before trusting guest VNC", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0100-captured-bootstrap";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        calls.push(args);
+
+        if (
+          args[0] === "list" &&
+          ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+        ) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.44",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+          return expandedRootDevice(args, "osdisk");
+        }
+
+        if (
+          args[0] === "exec" &&
+          args[1] === instanceName &&
+          (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+        ) {
+          return ok("", args);
+        }
+
+        return ok("", args);
+      },
+    },
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const template: EnvironmentTemplate = {
+    id: "tpl-captured-0100",
+    name: "Captured Desktop",
+    description: "Publishes an existing workspace image",
+    launchSource: "parallaize-template-tpl-captured-0100",
+    defaultResources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    defaultForwardedPorts: [],
+    tags: ["captured"],
+    notes: [],
+    snapshotIds: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const vm: VmInstance = {
+    id: "vm-0100",
+    name: "captured-bootstrap",
+    templateId: template.id,
+    provider: "incus",
+    providerRef: instanceName,
+    status: "creating",
+    resources: template.defaultResources,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Queued",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 10,
+    activeWindow: "editor",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.createVm(vm, template);
+  const bootstrapExecCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
+  );
+
+  assert.ok(bootstrapExecCall);
+  assert.equal(
+    spawnSync("sh", ["-n"], {
+      input: bootstrapExecCall?.[5] ?? "",
+      encoding: "utf8",
+    }).status,
+    0,
+  );
+  assert.equal(mutation.session?.display, "10.55.0.44:5900");
 });
 
 test("incus provider reads staged publish progress from the operations API", async () => {
@@ -3267,7 +3386,7 @@ test("incus provider triggers guest desktop bootstrap while waiting for VNC", as
   assert.ok(bootstrapExecCall);
   assert.match(
     bootstrapExecCall?.[5] ?? "",
-    /systemctl restart parallaize-desktop-bootstrap\.service \|\| true/,
+    /"\$BOOTSTRAP_FILE" \|\| true/,
   );
 });
 
