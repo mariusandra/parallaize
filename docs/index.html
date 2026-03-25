@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Parallaize</title>
+    <meta
+      name="description"
+      content="Run isolated agent workspaces on a beefy self-hosted server."
+    />
+    <link rel="stylesheet" href="./site.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header">
+        <a class="brand-lockup" href="./index.html" aria-label="Parallaize homepage">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-wordmark">
+            <span>Parall</span>
+            <span class="brand-wordmark__accent">ai</span>
+            <span>ze</span>
+          </span>
+        </a>
+      </header>
+
+      <main class="hero-shell">
+        <section class="hero-copy">
+          <p class="eyebrow">Server-first control plane</p>
+          <h1>Run isolated agent workspaces on a beefy self-hosted server.</h1>
+          <p class="hero-detail">
+            Parallaize keeps heavy agent desktops off your laptop and inside one managed host,
+            with browser access, packaged installs, and room to scale.
+          </p>
+        </section>
+
+        <section class="screencast-panel" aria-labelledby="screencast-title">
+          <div class="screencast-frame">
+            <div class="screencast-placeholder">
+              <p class="screencast-placeholder__eyebrow">Large Screencast Slot</p>
+              <p id="screencast-title" class="screencast-placeholder__title">
+                Drop your app GIF here.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section class="downloads" aria-labelledby="downloads-title">
+          <div class="section-heading">
+            <p class="eyebrow">Ubuntu 24.04 packages</p>
+            <h2 id="downloads-title">Download and install</h2>
+            <p class="section-copy">
+              Use the <code>amd64</code> package for standard x86_64 hosts. The
+              <code>arm64</code> build follows the same flow and remains experimental while
+              live-host validation catches up.
+            </p>
+          </div>
+
+          <div class="download-grid">
+            <article class="download-card download-card--featured">
+              <p class="download-card__status">Supported</p>
+              <h3>AMD64 .deb</h3>
+              <p>Ubuntu 24.04 package for x86_64 hosts.</p>
+              <a
+                class="button button--primary"
+                href="../artifacts/packages/parallaize_0.1.0-1_amd64.deb"
+                download
+              >
+                Download AMD64
+              </a>
+              <p class="download-card__file mono-font">parallaize_0.1.0-1_amd64.deb</p>
+            </article>
+
+            <article class="download-card">
+              <p class="download-card__status">Experimental</p>
+              <h3>ARM64 .deb</h3>
+              <p>Ubuntu 24.04 package for ARM64 hosts.</p>
+              <a
+                class="button button--secondary"
+                href="../artifacts/packages/parallaize_0.1.0-1_arm64.deb"
+                download
+              >
+                Download ARM64
+              </a>
+              <p class="download-card__file mono-font">parallaize_0.1.0-1_arm64.deb</p>
+            </article>
+          </div>
+
+          <div class="install-grid">
+            <article class="install-card">
+              <h3>1. Install the package</h3>
+              <p>Download the <code>.deb</code> that matches your host architecture, then install it.</p>
+              <pre><code>sudo apt install ./parallaize_0.1.0-1_amd64.deb
+# or
+sudo apt install ./parallaize_0.1.0-1_arm64.deb</code></pre>
+            </article>
+
+            <article class="install-card">
+              <h3>2. Review config and boot services</h3>
+              <p>The package ships the env file and systemd units. Review the env file first.</p>
+              <pre><code>sudoedit /etc/parallaize/parallaize.env
+sudo systemctl start parallaize.service
+sudo systemctl start parallaize-caddy.service</code></pre>
+            </article>
+
+            <article class="install-card install-card--note">
+              <h3>3. Notes</h3>
+              <ul>
+                <li><code>amd64</code> is the first supported Ubuntu 24.04 package path.</li>
+                <li><code>arm64</code> uses the same install flow and is still marked experimental.</li>
+                <li>
+                  If the ARM64 artifact is not present locally yet, generate it with
+                  <code>flox activate -d . -- pnpm package:deb:arm64</code>.
+                </li>
+              </ul>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

@@ -42,13 +42,14 @@ Bundled inside the package:
 Expected from the host:
 
 - `incus`
+- `btrfs-progs` for the packaged blank-host Btrfs bootstrap path
 - `attr`
 - `genisoimage`
 - QEMU and firmware helpers
 - `caddy` if you want the packaged front door
 - PostgreSQL only if you switch persistence from JSON to PostgreSQL
 
-Ubuntu 24.04 package metadata currently pins the VM helper packages directly:
+Ubuntu 24.04 package metadata currently pins the VM helper packages directly, plus `btrfs-progs` so the packaged bootstrap path can avoid `dir` on blank hosts:
 
 - `amd64`: `ovmf`, `qemu-system-x86`, `qemu-utils`
 - `arm64`: `qemu-efi-aarch64`, `qemu-system-arm`, `qemu-utils`
@@ -93,10 +94,12 @@ The post-install scripts create a dedicated `parallaize` system user, create `/v
 
 On a blank Ubuntu 24.04 host where Incus is installed but not initialized yet, the package now bootstraps a basic local Incus setup during install:
 
-- storage pool `default` with the `dir` driver
+- storage pool `default` with the `btrfs` driver when the host supports it, otherwise a `dir` fallback
 - bridge network `incusbr0`
 - `default` profile root disk pointing at pool `default`
 - `default` profile NIC attached to `incusbr0`
+
+That default Btrfs pool is loop-backed on blank hosts, which is still a compromise. It is materially better for snapshots and copy-on-write workflows than `dir`, but a dedicated `zfs`, `lvm`, or native `btrfs` pool remains the better production target.
 
 The packaged env file also defaults `PARALLAIZE_INCUS_STORAGE_POOL=default` so new VM creates and copies keep targeting the bootstrap pool until the operator changes it.
 
