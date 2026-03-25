@@ -178,6 +178,109 @@ test("manager marks a running VM stopped after the provider reports an external 
   );
 });
 
+test("manager marks a stopped VM running after the provider reports an external start", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-external-start-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const instanceName = "parallaize-vm-0104-external-start";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (
+          args[0] === "list" &&
+          ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+        ) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.104",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+    guestPortProbe: {
+      async probe(host: string) {
+        return host === "10.55.0.104";
+      },
+    },
+  });
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const now = new Date().toISOString();
+
+  store.update((draft) => {
+    draft.vms.unshift({
+      id: "vm-0104",
+      name: "external-start",
+      templateId: "tpl-0001",
+      provider: "incus",
+      providerRef: instanceName,
+      status: "stopped",
+      resources: {
+        cpu: 4,
+        ramMb: 8192,
+        diskGb: 60,
+      },
+      createdAt: now,
+      updatedAt: now,
+      liveSince: null,
+      lastAction: "Workspace stopped",
+      snapshotIds: [],
+      frameRevision: 1,
+      screenSeed: 104,
+      activeWindow: "logs",
+      workspacePath: "/root",
+      session: null,
+      forwardedPorts: [],
+      activityLog: [],
+      commandHistory: [],
+    });
+  });
+
+  await wait(80);
+
+  const runningDetail = manager.getVmDetail("vm-0104");
+
+  assert.equal(runningDetail.vm.status, "running");
+  assert.equal(runningDetail.vm.lastAction, "Workspace resumed");
+  assert.match(
+    runningDetail.vm.activityLog.at(-1) ?? "",
+    /detected .* running outside the dashboard/,
+  );
+
+  await wait(80);
+
+  const detail = manager.getVmDetail("vm-0104");
+
+  assert.equal(detail.vm.session?.display, "10.55.0.104:5900");
+  assert.equal(detail.vm.session?.webSocketPath, "/api/vms/vm-0104/vnc");
+  assert.equal(detail.vm.session?.browserPath, "/?vm=vm-0104");
+});
+
 test("manager treats an already-running incus start as a successful resume", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-start-already-running-"));
   context.after(() => {
@@ -284,7 +387,11 @@ test("manager treats an already-running incus start as a successful resume", asy
   assert.equal(detail.vm.session?.display, "10.55.0.104:5901");
   assert.ok(
     detail.recentJobs.some(
-      (job) => job.kind === "start" && job.status === "succeeded" && job.message === "already-running started",
+      (job) =>
+        job.kind === "start" &&
+        job.status === "succeeded" &&
+        (job.message === "already-running started" ||
+          job.message === "already-running is already running"),
     ),
   );
 });
@@ -670,6 +777,187 @@ test("manager marks queued or running jobs as failed after a server restart", (c
     detail.vm.activityLog.some(
       (entry) => entry === "error: Control server restarted before resize could finish.",
     ),
+  );
+});
+
+test("manager recovers interrupted create jobs when the VM is already running after restart", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-interrupted-create-recovery-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const providerState = {
+    kind: "incus" as const,
+    available: true,
+    detail: "Incus is reachable.",
+    hostStatus: "ready" as const,
+    binaryPath: "incus",
+    project: null,
+    desktopTransport: "novnc" as const,
+    nextSteps: [],
+  };
+  const provider: DesktopProvider = {
+    state: providerState,
+    refreshState() {
+      return this.state;
+    },
+    sampleHostTelemetry() {
+      return null;
+    },
+    sampleVmTelemetry() {
+      return null;
+    },
+    observeVmPowerState(vm) {
+      return vm.id === "vm-0001" ? { status: "running" } : null;
+    },
+    async refreshVmSession(vm) {
+      return vm.id === "vm-0001"
+        ? {
+            kind: "vnc",
+            host: "10.55.0.44",
+            port: 5900,
+            reachable: true,
+            webSocketPath: null,
+            browserPath: null,
+            display: "10.55.0.44:5900",
+          }
+        : null;
+    },
+    async createVm() {
+      throw new Error("not implemented");
+    },
+    async cloneVm() {
+      throw new Error("not implemented");
+    },
+    async startVm() {
+      throw new Error("not implemented");
+    },
+    async stopVm() {
+      throw new Error("not implemented");
+    },
+    async deleteVm() {
+      throw new Error("not implemented");
+    },
+    async resizeVm() {
+      throw new Error("not implemented");
+    },
+    async setDisplayResolution() {
+      throw new Error("not implemented");
+    },
+    async snapshotVm() {
+      throw new Error("not implemented");
+    },
+    async launchVmFromSnapshot() {
+      throw new Error("not implemented");
+    },
+    async restoreVmToSnapshot() {
+      throw new Error("not implemented");
+    },
+    async captureTemplate() {
+      throw new Error("not implemented");
+    },
+    async injectCommand() {
+      throw new Error("not implemented");
+    },
+    async readVmLogs() {
+      throw new Error("not implemented");
+    },
+    tickVm() {
+      return null;
+    },
+    renderFrame() {
+      return "";
+    },
+  };
+  const now = new Date().toISOString();
+  const state: AppState = {
+    sequence: 2,
+    provider: provider.state,
+    templates: [
+      {
+        id: "tpl-0001",
+        name: "Ubuntu Agent Forge",
+        description: "Seeded Ubuntu desktop template",
+        launchSource: "parallaize-template-tpl-0001",
+        defaultResources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        defaultForwardedPorts: [],
+        tags: [],
+        notes: [],
+        snapshotIds: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    vms: [
+      {
+        id: "vm-0001",
+        name: "restart-recovery",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: "parallaize-vm-0001-seeded",
+        status: "creating",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: null,
+        lastAction: "Action in progress",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 1,
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        session: null,
+        forwardedPorts: [],
+        activityLog: ["template: Ubuntu Agent Forge", "status: creating"],
+        commandHistory: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [
+      {
+        id: "job-create-interrupted",
+        kind: "create",
+        targetVmId: "vm-0001",
+        targetTemplateId: "tpl-0001",
+        status: "running",
+        message: "Waiting for desktop",
+        progressPercent: 89,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    lastUpdated: now,
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  store.save(state);
+
+  const manager = new DesktopManager(store, provider);
+
+  await wait(80);
+
+  const detail = manager.getVmDetail("vm-0001");
+  assert.equal(detail.vm.status, "running");
+  assert.equal(detail.vm.lastAction, "Workspace recovered after control server restart.");
+  assert.equal(detail.vm.session?.display, "10.55.0.44:5900");
+  assert.equal(detail.vm.session?.webSocketPath, "/api/vms/vm-0001/vnc");
+  assert.equal(detail.vm.session?.browserPath, "/?vm=vm-0001");
+  assert.ok(
+    detail.vm.activityLog.some(
+      (entry) => entry === "incus: recovered parallaize-vm-0001-seeded after interrupted create",
+    ),
+  );
+  assert.equal(detail.recentJobs[0]?.status, "failed");
+  assert.equal(
+    detail.recentJobs[0]?.message,
+    "Control server restarted before create could finish.",
   );
 });
 

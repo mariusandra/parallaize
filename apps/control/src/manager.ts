@@ -67,6 +67,7 @@ export class DesktopManager {
     this.syncProviderState();
     this.reconcileInterruptedJobs();
     this.reconcileFailedProvisioningJobs();
+    this.recoverInterruptedBootVms();
     this.hostTelemetry = appendTelemetrySample(
       emptyResourceTelemetry(),
       this.provider.sampleHostTelemetry(),
@@ -1154,6 +1155,54 @@ export class DesktopManager {
     });
   }
 
+  private recoverInterruptedBootVms(): void {
+    this.store.update((draft) => {
+      let dirty = false;
+
+      if (!draft.provider.available) {
+        return false;
+      }
+
+      for (const vm of draft.vms) {
+        if (vm.provider !== draft.provider.kind) {
+          continue;
+        }
+
+        const interruptedBootJob = draft.jobs.find(
+          (job) =>
+            job.targetVmId === vm.id &&
+            job.status === "failed" &&
+            isInterruptedBootJobFailure(job),
+        );
+
+        if (!interruptedBootJob) {
+          continue;
+        }
+
+        const observedPowerState = this.provider.observeVmPowerState(vm);
+
+        if (observedPowerState?.status !== "running") {
+          continue;
+        }
+
+        vm.status = "running";
+        vm.liveSince = vm.liveSince ?? nowIso();
+        vm.lastAction = "Workspace recovered after control server restart.";
+        vm.updatedAt = nowIso();
+        vm.session = null;
+
+        const recoveredLine = `${vm.provider}: recovered ${vm.providerRef} after interrupted ${interruptedBootJob.kind}`;
+        if (!vm.activityLog.includes(recoveredLine)) {
+          appendActivity(vm, recoveredLine);
+        }
+
+        dirty = true;
+      }
+
+      return dirty;
+    });
+  }
+
   private ensureActiveProvider(vm: VmInstance): void {
     if (vm.provider === this.provider.state.kind) {
       return;
@@ -1178,19 +1227,27 @@ export class DesktopManager {
       }
 
       for (const vm of draft.vms) {
-        if (vm.status !== "running" || vm.provider !== nextProviderState.kind) {
+        if (vm.provider !== nextProviderState.kind) {
           continue;
         }
 
         const observedPowerState = this.provider.observeVmPowerState(vm);
 
-        if (observedPowerState?.status !== "stopped") {
+        if (vm.status === "running") {
+          if (observedPowerState?.status !== "stopped") {
+            continue;
+          }
+
+          markVmStoppedOutsideControlPlane(vm);
+          this.vmTelemetry.delete(vm.id);
+          dirty = true;
           continue;
         }
 
-        markVmStoppedOutsideControlPlane(vm);
-        this.vmTelemetry.delete(vm.id);
-        dirty = true;
+        if (vm.status === "stopped" && observedPowerState?.status === "running") {
+          markVmRunningOutsideControlPlane(vm);
+          dirty = true;
+        }
       }
 
       return dirty;
@@ -1516,8 +1573,36 @@ function markVmStoppedOutsideControlPlane(vm: VmInstance): void {
   );
 }
 
+function markVmRunningOutsideControlPlane(vm: VmInstance): void {
+  vm.status = "running";
+  vm.liveSince = nowIso();
+  vm.lastAction = "Workspace resumed";
+  vm.updatedAt = nowIso();
+  vm.frameRevision += 1;
+  vm.activeWindow = "terminal";
+  vm.session = null;
+  appendActivity(
+    vm,
+    `${vm.provider}: detected ${vm.providerRef} running outside the dashboard`,
+  );
+}
+
 function trimJobs(state: AppState): void {
   state.jobs = state.jobs.slice(0, MAX_JOBS);
+}
+
+function isInterruptedBootJobFailure(job: ActionJob): boolean {
+  if (
+    job.kind !== "create" &&
+    job.kind !== "clone" &&
+    job.kind !== "launch-snapshot" &&
+    job.kind !== "start" &&
+    job.kind !== "restart"
+  ) {
+    return false;
+  }
+
+  return job.message === `Control server restarted before ${job.kind} could finish.`;
 }
 
 function buildCaptureNotes(

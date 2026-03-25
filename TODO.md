@@ -95,6 +95,7 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-25: Added startup recovery for interrupted boot/provision jobs so a control-plane restart no longer leaves a still-running Incus VM stranded in `error` without session/bootstrap refresh.
 - 2026-03-25: Fixed a control-plane regression where new Incus VMs with only a guest IP were being treated as live VNC sessions, which stopped the missing-session refresh loop from retrying the guest desktop bootstrap after agent-ready recovery.
 - 2026-03-25: Live-debugged a packaged `0.1.1` install on `devbox`, confirmed the Ubuntu desktop image had `cloud-init` disabled by generator, and moved the Incus guest desktop bootstrap retry into the normal missing-session refresh path so VNC self-heals after the guest agent becomes ready.
 - 2026-03-25: Added host internet/bootstrap diagnostics for the Incus provider, made `/api/health` degrade on host egress failures, and switched guest desktop bootstrap to a retrying systemd service so `x11vnc` and the X11 GDM config can recover after a failed first boot.
