@@ -34,31 +34,11 @@ export function createSeedState(provider: ProviderState): AppState {
       createdAt: now,
       updatedAt: now,
     },
-    {
-      id: "tpl-0002",
-      name: "Research Bench",
-      description:
-        "Heavier desktop profile for docs, browser automation, and parallel review sessions.",
-      launchSource: DEFAULT_UBUNTU_DESKTOP_IMAGE,
-      defaultResources: {
-        cpu: 10,
-        ramMb: 24576,
-        diskGb: 140,
-      },
-      defaultForwardedPorts: [],
-      tags: ["research", "browser", "analysis"],
-      notes: [
-        "Configured for large-browser workloads and long-running analysis tasks.",
-      ],
-      snapshotIds: provider.kind === "mock" ? ["snap-0002"] : [],
-      createdAt: now,
-      updatedAt: now,
-    },
   ];
 
   if (provider.kind === "incus") {
     return {
-      sequence: 3,
+      sequence: 2,
       provider,
       templates,
       vms: [],
@@ -87,7 +67,7 @@ export function createSeedState(provider: ProviderState): AppState {
       updatedAt: now,
       liveSince: now,
       lastAction: "Booted from Ubuntu Agent Forge",
-      snapshotIds: ["snap-0003"],
+      snapshotIds: ["snap-0002"],
       frameRevision: 1,
       screenSeed: 38,
       activeWindow: "editor",
@@ -98,35 +78,6 @@ export function createSeedState(provider: ProviderState): AppState {
         "boot: desktop session resumed",
         "workspace: /srv/workspaces/alpha-workbench",
         "agent: waiting for operator input",
-      ],
-      commandHistory: [],
-    },
-    {
-      id: "vm-0002",
-      name: "research-orbit",
-      templateId: "tpl-0002",
-      provider: provider.kind,
-      providerRef: "research-orbit",
-      status: "stopped",
-      resources: {
-        cpu: 12,
-        ramMb: 32768,
-        diskGb: 160,
-      },
-      createdAt: now,
-      updatedAt: now,
-      liveSince: null,
-      lastAction: "Stopped after last review session",
-      snapshotIds: [],
-      frameRevision: 1,
-      screenSeed: 212,
-      activeWindow: "browser",
-      workspacePath: "/srv/workspaces/research-orbit",
-      session: syntheticSession,
-      forwardedPorts: [],
-      activityLog: [
-        "boot: session checkpoint saved",
-        "browser: 16 tabs pinned for ongoing research",
       ],
       commandHistory: [],
     },
@@ -145,16 +96,6 @@ export function createSeedState(provider: ProviderState): AppState {
     },
     {
       id: "snap-0002",
-      vmId: "seed-template-research-bench",
-      templateId: "tpl-0002",
-      label: "Base research bench image",
-      summary: "Initial Research Bench template snapshot.",
-      providerRef: "seed://tpl-0002/base",
-      resources: templates[1].defaultResources,
-      createdAt: now,
-    },
-    {
-      id: "snap-0003",
       vmId: "vm-0001",
       templateId: "tpl-0001",
       label: "alpha checkpoint",
@@ -166,7 +107,7 @@ export function createSeedState(provider: ProviderState): AppState {
   ];
 
   return {
-    sequence: 4,
+    sequence: 3,
     provider,
     templates,
     vms,

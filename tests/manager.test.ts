@@ -1022,7 +1022,7 @@ test("template capture can refresh an existing template while preserving history
   const template = summary.templates.find((entry) => entry.id === "tpl-0001");
 
   assert.ok(template);
-  assert.equal(summary.templates.length, 2);
+  assert.equal(summary.templates.length, 1);
   assert.equal(template?.description, "Refreshed from alpha-workbench");
   assert.equal(template?.launchSource, "mock://templates/ubuntu-agent-forge");
   assert.equal(template?.snapshotIds.length, 2);
@@ -1783,6 +1783,11 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /-noshm/);
   assert.match(execCall?.[5] ?? "", /xset r on \|\| true/);
   assert.match(execCall?.[5] ?? "", /-repeat/);
+  assert.match(execCall?.[5] ?? "", /RESTART_VNC=0/);
+  assert.match(
+    execCall?.[5] ?? "",
+    /if \[ "\$RESTART_VNC" -eq 1 \] \|\| ! systemctl is-active --quiet parallaize-x11vnc\.service; then/,
+  );
   assert.match(execCall?.[5] ?? "", /TARGET_MODE="1366x768"/);
   assert.match(execCall?.[5] ?? "", /xrandr --query/);
   assert.match(execCall?.[5] ?? "", /cvt "\$WIDTH" "\$HEIGHT" 60/);

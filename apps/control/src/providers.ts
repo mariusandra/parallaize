@@ -2624,6 +2624,7 @@ ${buildGuestVncServiceUnit()}
 UNIT
 )"
 RESTART_GDM=0
+RESTART_VNC=0
 if [ "$CURRENT_GDM" != "$DESIRED_GDM" ]; then
   mkdir -p /etc/gdm3
   cat > "$GDM_FILE" <<'CONF'
@@ -2637,17 +2638,20 @@ if [ "$CURRENT_LAUNCHER" != "$DESIRED_LAUNCHER" ]; then
 ${buildGuestVncLauncherScript(port)}
 SCRIPT
   chmod 0755 "$LAUNCHER_FILE"
+  RESTART_VNC=1
 fi
 if [ "$CURRENT_SERVICE" != "$DESIRED_SERVICE" ]; then
   mkdir -p /etc/systemd/system
   cat > "$SERVICE_FILE" <<'UNIT'
 ${buildGuestVncServiceUnit()}
 UNIT
+  RESTART_VNC=1
 fi
 if ! command -v x11vnc >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
   apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y x11vnc
+  RESTART_VNC=1
 fi
 systemctl daemon-reload
 systemctl enable parallaize-x11vnc.service >/dev/null 2>&1 || true
@@ -2655,7 +2659,9 @@ if [ "$RESTART_GDM" -eq 1 ]; then
   systemctl restart gdm3 || true
   sleep 2
 fi
-systemctl restart parallaize-x11vnc.service`;
+if [ "$RESTART_VNC" -eq 1 ] || ! systemctl is-active --quiet parallaize-x11vnc.service; then
+  systemctl restart parallaize-x11vnc.service
+fi`;
 }
 
 function buildGuestDesktopBootstrapServiceUnit(): string {

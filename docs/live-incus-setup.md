@@ -57,7 +57,7 @@ Notes:
 
 Fresh VMs need DHCP, DNS, and outbound internet access.
 
-That is important for this repo because the seeded templates launch from `images:ubuntu/noble/desktop`, and the app injects cloud-init on first boot to update packages, install `x11vnc`, and enable the Incus agent.
+That is important for this repo because the seeded template launches from `images:ubuntu/noble/desktop`, and the app injects cloud-init on first boot to update packages, install `x11vnc`, and enable the Incus agent.
 
 If UFW is enabled on the host, allow the Incus bridge traffic:
 
@@ -83,7 +83,7 @@ Because the `start` script hardcodes `PARALLAIZE_DATA_FILE=data/incus-state.json
 mv data/incus-state.json data/incus-state.json.bak
 ```
 
-When the JSON state file is missing, Parallaize will create a fresh state with seeded templates that point at `images:ubuntu/noble/desktop`.
+When the JSON state file is missing, Parallaize will create a fresh state with a seeded template that points at `images:ubuntu/noble/desktop`.
 
 ## Set an explicit guest VNC port
 

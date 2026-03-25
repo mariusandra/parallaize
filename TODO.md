@@ -95,6 +95,7 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-25: Made guest display-resolution changes non-disruptive by only restarting `parallaize-x11vnc.service` when the launcher/unit actually changed or the bridge is inactive, which avoids noVNC reconnect churn during the first viewport-sync resize.
 - 2026-03-25: Changed captured-template, clone, and snapshot-launch boots to require a successful in-guest desktop bootstrap repair before VNC is treated as ready, so stale baked-in `x11vnc` units from old images cannot short-circuit first-boot provisioning.
 - 2026-03-25: Added startup recovery for interrupted boot/provision jobs so a control-plane restart no longer leaves a still-running Incus VM stranded in `error` without session/bootstrap refresh.
 - 2026-03-25: Fixed a control-plane regression where new Incus VMs with only a guest IP were being treated as live VNC sessions, which stopped the missing-session refresh loop from retrying the guest desktop bootstrap after agent-ready recovery.
