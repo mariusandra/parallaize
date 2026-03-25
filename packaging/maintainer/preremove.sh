@@ -8,5 +8,6 @@ case "${1:-}" in
 esac
 
 if command -v systemctl >/dev/null 2>&1; then
-  systemctl stop parallaize-caddy.service parallaize.service >/dev/null 2>&1 || true
+  systemctl stop parallaize-network-fix.service parallaize-caddy.service parallaize.service >/dev/null 2>&1 || true
+  systemctl disable parallaize-network-fix.service >/dev/null 2>&1 || true
 fi

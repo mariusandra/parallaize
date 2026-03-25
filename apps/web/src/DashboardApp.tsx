@@ -3766,9 +3766,6 @@ function VmTile({
             telemetry={vm.telemetry}
           />
 
-          <div className="vm-tile__meta">
-            <span>{formatForwardCount(vm.forwardedPorts.length)}</span>
-          </div>
         </div>
       </button>
       {menu}
@@ -5229,10 +5226,16 @@ function OverviewSidepanel({
                 <span
                   className={joinClassNames(
                     "surface-pill",
-                    summary.provider.available ? "surface-pill--success" : "surface-pill--warning",
+                    summary.provider.hostStatus === "ready"
+                      ? "surface-pill--success"
+                      : "surface-pill--warning",
                   )}
                 >
-                  {summary.provider.available ? "Ready" : "Blocked"}
+                  {summary.provider.hostStatus === "ready"
+                    ? "Ready"
+                    : summary.provider.hostStatus === "network-unreachable"
+                      ? "Warning"
+                      : "Blocked"}
                 </span>
               </div>
 
@@ -5731,6 +5734,8 @@ function providerStatusTitle(provider: DashboardSummary["provider"]): string {
   const status =
     provider.hostStatus === "ready"
       ? "Ready"
+      : provider.hostStatus === "network-unreachable"
+        ? "Internet unreachable"
       : provider.hostStatus === "missing-cli"
         ? "CLI missing"
         : provider.hostStatus === "daemon-unreachable"
@@ -5744,6 +5749,7 @@ function providerStatusDotClassName(provider: DashboardSummary["provider"]): str
   switch (provider.hostStatus) {
     case "ready":
       return "workspace-rail__status-dot--ready";
+    case "network-unreachable":
     case "missing-cli":
     case "daemon-unreachable":
       return "workspace-rail__status-dot--warning";
@@ -6077,14 +6083,6 @@ function noticeToneClassName(tone: Notice["tone"]): string {
     default:
       return "notice-bar--info";
   }
-}
-
-function formatForwardCount(count: number): string {
-  if (count === 0) {
-    return "No services";
-  }
-
-  return `${count} service${count === 1 ? "" : "s"}`;
 }
 
 function readThemeMode(): ThemeMode {

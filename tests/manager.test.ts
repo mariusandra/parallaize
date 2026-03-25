@@ -935,6 +935,16 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.ok(configSetCall);
   assert.match(configSetCall?.[4] ?? "", /x11vnc/);
   assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-x11vnc/);
+  assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-desktop-bootstrap/);
+  assert.match(configSetCall?.[4] ?? "", /parallaize-desktop-bootstrap\.service/);
+  assert.match(configSetCall?.[4] ?? "", /find_guest_auth_file\(\)/);
+  assert.match(configSetCall?.[4] ?? "", /find_guest_display_number\(\)/);
+  assert.match(configSetCall?.[4] ?? "", /loginctl list-sessions --no-legend/);
+  assert.match(configSetCall?.[4] ?? "", /ps -C x11vnc -o args=/);
+  assert.match(configSetCall?.[4] ?? "", /ps -C Xwayland -o args=/);
+  assert.match(configSetCall?.[4] ?? "", /\.mutter-Xwaylandauth\.\*/);
+  assert.match(configSetCall?.[4] ?? "", /\/var\/run\/gdm3\/auth-for-\*\/database/);
+  assert.match(configSetCall?.[4] ?? "", /Acquire::ForceIPv4=true/);
   assert.match(configSetCall?.[4] ?? "", /-xrandr newfbsize/);
   assert.match(configSetCall?.[4] ?? "", /-noshm/);
   assert.match(configSetCall?.[4] ?? "", /xset r on \|\| true/);
@@ -943,6 +953,7 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /fs\.inotify\.max_user_instances=4096/);
   assert.match(configSetCall?.[4] ?? "", /sysctl --load \/etc\/sysctl\.d\/60-parallaize-inotify\.conf/);
   assert.match(configSetCall?.[4] ?? "", /incus-agent\.service/);
+  assert.match(configSetCall?.[4] ?? "", /systemctl enable parallaize-desktop-bootstrap\.service/);
   assert.deepEqual(agentDeviceCall, [
     "config",
     "device",
@@ -1011,6 +1022,36 @@ test("incus provider treats a timed-out readiness probe as daemon-unreachable", 
   assert.equal(provider.state.available, false);
   assert.equal(provider.state.hostStatus, "daemon-unreachable");
   assert.match(provider.state.detail, /readiness probe timed out/i);
+});
+
+test("incus provider degrades health when host internet checks fail", () => {
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+    hostNetworkProbe: {
+      probe() {
+        return {
+          status: "unreachable",
+          detail: "Incus is reachable, but outbound internet checks failed.",
+          nextSteps: ["Verify outbound IPv4 and DNS from the control-plane host."],
+        };
+      },
+    },
+  });
+
+  assert.equal(provider.state.available, true);
+  assert.equal(provider.state.hostStatus, "network-unreachable");
+  assert.equal(provider.state.detail, "Incus is reachable, but outbound internet checks failed.");
+  assert.deepEqual(provider.state.nextSteps, [
+    "Verify outbound IPv4 and DNS from the control-plane host.",
+  ]);
 });
 
 test("incus provider reads staged publish progress from the operations API", async () => {
@@ -1317,8 +1358,19 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.equal(execCall?.[2], "--");
   assert.equal(execCall?.[3], "sh");
   assert.equal(execCall?.[4], "-lc");
+  assert.match(execCall?.[5] ?? "", /BOOTSTRAP_FILE="\/usr\/local\/bin\/parallaize-desktop-bootstrap"/);
+  assert.match(execCall?.[5] ?? "", /BOOTSTRAP_SERVICE_FILE="\/etc\/systemd\/system\/parallaize-desktop-bootstrap\.service"/);
   assert.match(execCall?.[5] ?? "", /LAUNCHER_FILE="\/usr\/local\/bin\/parallaize-x11vnc"/);
   assert.match(execCall?.[5] ?? "", /parallaize-x11vnc\.service/);
+  assert.match(execCall?.[5] ?? "", /parallaize-desktop-bootstrap\.service/);
+  assert.match(execCall?.[5] ?? "", /find_guest_auth_file\(\)/);
+  assert.match(execCall?.[5] ?? "", /find_guest_display_number\(\)/);
+  assert.match(execCall?.[5] ?? "", /loginctl list-sessions --no-legend/);
+  assert.match(execCall?.[5] ?? "", /ps -C x11vnc -o args=/);
+  assert.match(execCall?.[5] ?? "", /ps -C Xwayland -o args=/);
+  assert.match(execCall?.[5] ?? "", /Acquire::ForceIPv4=true/);
+  assert.match(execCall?.[5] ?? "", /ATTEMPT=0/);
+  assert.match(execCall?.[5] ?? "", /sleep 2/);
   assert.match(execCall?.[5] ?? "", /-xrandr newfbsize/);
   assert.match(execCall?.[5] ?? "", /-noshm/);
   assert.match(execCall?.[5] ?? "", /xset r on \|\| true/);
@@ -2773,6 +2825,100 @@ test("incus provider refreshes an existing agent device before resuming a VM", a
     "agent",
   ]);
   assert.deepEqual(startCall, ["start", instanceName]);
+});
+
+test("incus provider triggers guest desktop bootstrap while waiting for VNC", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0110-bootstrap-retry";
+  let probeAttempts = 0;
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (
+        args[0] === "list" &&
+        ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+      ) {
+        return ok(
+          JSON.stringify([
+            {
+              name: instanceName,
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address: "10.55.0.111",
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5901,
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        probeAttempts += 1;
+        return probeAttempts >= 2;
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0110",
+    name: "bootstrap-retry",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "stopped",
+    resources: {
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 30,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Stopped",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 11,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.startVm(vm);
+  const bootstrapExecCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
+  );
+
+  assert.equal(mutation.session?.display, "10.55.0.111:5901");
+  assert.ok(bootstrapExecCall);
+  assert.match(
+    bootstrapExecCall?.[5] ?? "",
+    /systemctl restart parallaize-desktop-bootstrap\.service \|\| true/,
+  );
 });
 
 test("incus provider treats an already-running instance as a successful resume", async () => {

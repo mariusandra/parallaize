@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+if command -v bash >/dev/null 2>&1 && ! timeout 3 bash -lc 'getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 && exec 3<>/dev/tcp/archive.ubuntu.com/80'; then
+  echo "parallaize-network-fix: warning: outbound internet checks failed; new guest package installs may fail until host connectivity is restored" >&2
+fi
+
+if ! command -v iptables >/dev/null 2>&1; then
+  exit 0
+fi
+
+if ! command -v incus >/dev/null 2>&1; then
+  exit 0
+fi
+
+if ! incus network show incusbr0 >/dev/null 2>&1; then
+  exit 0
+fi
+
+FORWARD_POLICY="$(iptables -S FORWARD 2>/dev/null | sed -n 's/^-P FORWARD //p' | head -n 1)"
+
+if [ "$FORWARD_POLICY" != "DROP" ]; then
+  exit 0
+fi
+
+RULES_CHANGED=0
+
+iptables -C FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null ||
+  {
+    iptables -I FORWARD 1 -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    RULES_CHANGED=1
+  }
+iptables -C FORWARD -i incusbr0 -j ACCEPT 2>/dev/null ||
+  {
+    iptables -I FORWARD 1 -i incusbr0 -j ACCEPT
+    RULES_CHANGED=1
+  }
+
+if [ "$RULES_CHANGED" -eq 1 ]; then
+  echo "parallaize-network-fix: inserted FORWARD accept rules for incusbr0 because the host policy is DROP" >&2
+fi

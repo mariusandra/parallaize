@@ -1,0 +1,12 @@
+[Unit]
+Description=Parallaize Incus bridge forwarding repair
+After=network-online.target docker.service incus.service incus.socket
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/parallaize-network-fix
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

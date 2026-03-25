@@ -90,7 +90,7 @@ const server = createServer(async (request, response) => {
       const providerState = manager.getProviderState();
       const persistence = store.getDiagnostics();
       const status =
-        providerState.available && persistence.status === "ready"
+        providerState.hostStatus === "ready" && persistence.status === "ready"
           ? "ok"
           : "degraded";
 

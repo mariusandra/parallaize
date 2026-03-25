@@ -202,6 +202,11 @@ async function stageRootFilesystem({
     join(rootfsDir, "usr", "bin", "parallaize-smoke-incus"),
     0o755,
   );
+  await copyFileWithMode(
+    join(root, "packaging", "bin", "parallaize-network-fix"),
+    join(rootfsDir, "usr", "bin", "parallaize-network-fix"),
+    0o755,
+  );
 
   await copyFileWithMode(
     join(root, "packaging", "systemd", "parallaize.service"),
@@ -210,6 +215,10 @@ async function stageRootFilesystem({
   await copyFileWithMode(
     join(root, "packaging", "systemd", "parallaize-caddy.service"),
     join(rootfsDir, "usr", "lib", "systemd", "system", "parallaize-caddy.service"),
+  );
+  await copyFileWithMode(
+    join(root, "packaging", "systemd", "parallaize-network-fix.service"),
+    join(rootfsDir, "usr", "lib", "systemd", "system", "parallaize-network-fix.service"),
   );
 
   await copyFileWithMode(

@@ -79,6 +79,32 @@ The package build flow does this:
 5. Emits `.deb` via `dpkg-deb`.
 6. Emits `.rpm` via local `rpmbuild` on native-architecture hosts, or a Fedora container when `rpmbuild` is unavailable or the target RPM architecture differs from the host.
 
+## GitHub Release Workflow
+
+Use `.github/workflows/release.yml` when you want GitHub Actions to cut and publish a new packaged release from `main`.
+
+Inputs:
+
+- `version`: required stable semver such as `0.1.1`
+- `package_release`: optional package revision suffix, defaults to `1`
+
+Required GitHub repository secrets:
+
+- `R2_ACCOUNT_ID`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET`
+
+The workflow does this:
+
+1. Installs dependencies.
+2. Updates `package.json`, `docs/index.html`, and this packaging note to the requested release version.
+3. Builds `.deb` and `.rpm` packages for `amd64` and `arm64`.
+4. Uploads everything from `artifacts/packages/` to `s3://$R2_BUCKET/packages/` through the Cloudflare R2 endpoint so the public files stay available at `https://archive.parallaize.com/packages/`.
+5. Commits the versioned-file changes back to `main`.
+
+If branch protection blocks `github-actions[bot]` from pushing to `main`, allow workflow pushes or change the final step to open a pull request instead.
+
 ## Install And Boot
 
 Ubuntu 24.04 `amd64` example:

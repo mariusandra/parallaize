@@ -32,6 +32,8 @@ const TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT = 78;
 const TEMPLATE_PUBLISH_COMPLETE_PERCENT = 92;
 const BYTES_PER_GIB = 1024 ** 3;
 const INCUS_PROBE_TIMEOUT_MS = 1_000;
+const HOST_NETWORK_PROBE_CACHE_MS = 60_000;
+const HOST_NETWORK_PROBE_TIMEOUT_MS = 2_500;
 
 export interface CaptureTemplateTarget {
   templateId: string;
@@ -46,6 +48,7 @@ export interface CreateProviderOptions {
   guestInotifyMaxUserInstances?: number;
   commandRunner?: IncusCommandRunner;
   guestPortProbe?: GuestPortProbe;
+  hostNetworkProbe?: HostNetworkProbe;
   templatePublishHeartbeatMs?: number;
   templateCompression?: IncusImageCompression;
 }
@@ -177,6 +180,16 @@ interface CommandStreamListeners {
 
 interface GuestPortProbe {
   probe(host: string, port: number): Promise<boolean>;
+}
+
+interface HostNetworkProbe {
+  probe(): HostNetworkDiagnostic;
+}
+
+interface HostNetworkDiagnostic {
+  status: "ready" | "unreachable" | "unknown";
+  detail: string | null;
+  nextSteps: string[];
 }
 
 interface IncusListInstance {
@@ -513,11 +526,18 @@ class IncusProvider implements DesktopProvider {
   private readonly project: string | null;
   private readonly storagePool: string | null;
   private readonly guestPortProbe: GuestPortProbe;
+  private readonly hostNetworkProbe: HostNetworkProbe;
   private readonly templatePublishHeartbeatMs: number;
   private readonly templateCompression: IncusImageCompression | null;
   private telemetrySnapshotAt = 0;
   private telemetryInstances = new Map<string, IncusListInstance>();
   private readonly vmCpuUsage = new Map<string, { capturedAt: number; usage: number }>();
+  private hostNetworkDiagnosticAt = 0;
+  private hostNetworkDiagnostic: HostNetworkDiagnostic = {
+    status: "unknown",
+    detail: null,
+    nextSteps: [],
+  };
 
   constructor(
     private readonly incusBinary: string,
@@ -534,6 +554,9 @@ class IncusProvider implements DesktopProvider {
       options.commandRunner ??
       new SpawnIncusCommandRunner(this.incusBinary, options.project);
     this.guestPortProbe = options.guestPortProbe ?? new TcpGuestPortProbe();
+    this.hostNetworkProbe =
+      options.hostNetworkProbe ??
+      (options.commandRunner ? new NoopHostNetworkProbe() : new ShellHostNetworkProbe());
     this.templatePublishHeartbeatMs = Math.max(
       options.templatePublishHeartbeatMs ?? DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS,
       50,
@@ -1218,7 +1241,34 @@ class IncusProvider implements DesktopProvider {
       this.captureTelemetrySnapshot(probe.stdout);
     }
 
-    return buildIncusProviderState(this.incusBinary, this.project, probe);
+    return buildIncusProviderState(
+      this.incusBinary,
+      this.project,
+      probe,
+      this.getHostNetworkDiagnostic(),
+    );
+  }
+
+  private getHostNetworkDiagnostic(): HostNetworkDiagnostic {
+    const now = Date.now();
+
+    if (now - this.hostNetworkDiagnosticAt < HOST_NETWORK_PROBE_CACHE_MS) {
+      return this.hostNetworkDiagnostic;
+    }
+
+    this.hostNetworkDiagnosticAt = now;
+
+    try {
+      this.hostNetworkDiagnostic = this.hostNetworkProbe.probe();
+    } catch {
+      this.hostNetworkDiagnostic = {
+        status: "unknown",
+        detail: null,
+        nextSteps: [],
+      };
+    }
+
+    return this.hostNetworkDiagnostic;
   }
 
   private assertLaunchSource(template: EnvironmentTemplate): void {
@@ -1324,6 +1374,7 @@ class IncusProvider implements DesktopProvider {
     let address: string | null = null;
     const waitStartedAt = Date.now();
     const emitProgress = report;
+    let bootstrapTriggered = false;
 
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const info = await this.inspectInstanceAsync(instanceName);
@@ -1334,6 +1385,10 @@ class IncusProvider implements DesktopProvider {
       if (session) {
         emitProgress?.("Desktop session ready", VM_CREATE_READY_PERCENT);
         return session;
+      }
+
+      if (!bootstrapTriggered) {
+        bootstrapTriggered = await this.ensureGuestDesktopBootstrapAsync(instanceName);
       }
 
       if (normalizeStatus(info.status ?? info.state?.status) !== "running") {
@@ -1348,6 +1403,20 @@ class IncusProvider implements DesktopProvider {
     }
 
     return address ? buildVncSession(address, this.guestVncPort) : null;
+  }
+
+  private async ensureGuestDesktopBootstrapAsync(instanceName: string): Promise<boolean> {
+    const args = [
+      "exec",
+      instanceName,
+      "--",
+      "sh",
+      "-lc",
+      buildEnsureGuestDesktopBootstrapScript(this.guestVncPort, false),
+    ];
+    const result = await this.executeAsync(args);
+
+    return result.status === 0;
   }
 
   private async probeReachableSession(instance: IncusListInstance): Promise<VmSession | null> {
@@ -1745,6 +1814,74 @@ class TcpGuestPortProbe implements GuestPortProbe {
   }
 }
 
+class NoopHostNetworkProbe implements HostNetworkProbe {
+  probe(): HostNetworkDiagnostic {
+    return {
+      status: "unknown",
+      detail: null,
+      nextSteps: [],
+    };
+  }
+}
+
+class ShellHostNetworkProbe implements HostNetworkProbe {
+  probe(): HostNetworkDiagnostic {
+    const hostEgress = this.runCheck("exec 3<>/dev/tcp/1.1.1.1/443");
+    const ubuntuMirror = this.runCheck(
+      "getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 && exec 3<>/dev/tcp/archive.ubuntu.com/80",
+    );
+
+    if (hostEgress === "unknown" || ubuntuMirror === "unknown") {
+      return {
+        status: "unknown",
+        detail: null,
+        nextSteps: [],
+      };
+    }
+
+    if (hostEgress === "ok" && ubuntuMirror === "ok") {
+      return {
+        status: "ready",
+        detail: null,
+        nextSteps: [],
+      };
+    }
+
+    const failures: string[] = [];
+
+    if (hostEgress !== "ok") {
+      failures.push("host TCP egress to 1.1.1.1:443 failed");
+    }
+
+    if (ubuntuMirror !== "ok") {
+      failures.push("Ubuntu mirror resolution/connectivity to archive.ubuntu.com:80 failed");
+    }
+
+    return {
+      status: "unreachable",
+      detail: `Incus is reachable, but outbound internet checks failed: ${failures.join("; ")}. New guests may fail to install x11vnc or other packages until connectivity is restored.`,
+      nextSteps: [
+        "Verify outbound IPv4 and DNS from the control-plane host, especially access to archive.ubuntu.com.",
+        "If Docker is installed, ensure FORWARD rules still allow traffic from incusbr0; packaged installs ship parallaize-network-fix.service for this case.",
+        "If a guest still boots without VNC, inspect `journalctl -u parallaize-desktop-bootstrap.service` inside the VM for the current bootstrap failure.",
+      ],
+    };
+  }
+
+  private runCheck(script: string): "ok" | "failed" | "unknown" {
+    const result = spawnSync("bash", ["-lc", script], {
+      encoding: "utf8",
+      timeout: HOST_NETWORK_PROBE_TIMEOUT_MS,
+    });
+
+    if (result.error?.message.includes("ENOENT")) {
+      return "unknown";
+    }
+
+    return result.status === 0 ? "ok" : "failed";
+  }
+}
+
 function buildCommandReply(command: string, currentWorkspace: string): string {
   if (command.startsWith("cd ")) {
     return `cwd: ${command.slice(3).trim() || currentWorkspace}`;
@@ -1795,8 +1932,24 @@ function buildIncusProviderState(
   incusBinary: string,
   project: string | null,
   result: CommandResult,
+  hostNetworkDiagnostic: HostNetworkDiagnostic,
 ): ProviderState {
   if (result.status === 0) {
+    if (hostNetworkDiagnostic.status === "unreachable") {
+      return {
+        kind: "incus",
+        available: true,
+        detail:
+          hostNetworkDiagnostic.detail ??
+          "Incus is reachable, but outbound internet checks failed for the host.",
+        hostStatus: "network-unreachable",
+        binaryPath: incusBinary,
+        project,
+        desktopTransport: "novnc",
+        nextSteps: hostNetworkDiagnostic.nextSteps,
+      };
+    }
+
     return {
       kind: "incus",
       available: true,
@@ -2064,6 +2217,44 @@ function validateDisplayResolution(width: number, height: number): void {
   }
 }
 
+function buildGuestGdmCustomConfig(): string {
+  return `[daemon]
+AutomaticLoginEnable=true
+AutomaticLogin=ubuntu
+WaylandEnable=false`;
+}
+
+function buildEnsureGuestDesktopBootstrapScript(
+  port: number,
+  strictStart: boolean,
+): string {
+  return `BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"
+BOOTSTRAP_SERVICE_FILE="/etc/systemd/system/parallaize-desktop-bootstrap.service"
+CURRENT_BOOTSTRAP="$(cat "$BOOTSTRAP_FILE" 2>/dev/null || true)"
+DESIRED_BOOTSTRAP="$(cat <<'SCRIPT'
+${buildGuestDesktopBootstrapScript(port)}
+SCRIPT
+)"
+CURRENT_BOOTSTRAP_SERVICE="$(cat "$BOOTSTRAP_SERVICE_FILE" 2>/dev/null || true)"
+DESIRED_BOOTSTRAP_SERVICE="$(cat <<'UNIT'
+${buildGuestDesktopBootstrapServiceUnit()}
+UNIT
+)"
+if [ "$CURRENT_BOOTSTRAP" != "$DESIRED_BOOTSTRAP" ] || [ "$CURRENT_BOOTSTRAP_SERVICE" != "$DESIRED_BOOTSTRAP_SERVICE" ]; then
+  mkdir -p /usr/local/bin /etc/systemd/system
+  cat > "$BOOTSTRAP_FILE" <<'SCRIPT'
+${buildGuestDesktopBootstrapScript(port)}
+SCRIPT
+  chmod 0755 "$BOOTSTRAP_FILE"
+  cat > "$BOOTSTRAP_SERVICE_FILE" <<'UNIT'
+${buildGuestDesktopBootstrapServiceUnit()}
+UNIT
+fi
+systemctl daemon-reload
+systemctl enable parallaize-desktop-bootstrap.service >/dev/null 2>&1 || true
+systemctl restart parallaize-desktop-bootstrap.service${strictStart ? "" : " || true"}`;
+}
+
 function buildSetDisplayResolutionScript(
   width: number,
   height: number,
@@ -2072,47 +2263,36 @@ function buildSetDisplayResolutionScript(
   return `set -eu
 WIDTH=${width}
 HEIGHT=${height}
+${buildEnsureGuestDesktopBootstrapScript(port, true)}
+${buildGuestDisplayDiscoveryScript()}
+ATTEMPT=0
+AUTH_FILE=""
 DISPLAY_NUMBER=":0"
-SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
-LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
-CURRENT_SERVICE="$(cat "$SERVICE_FILE" 2>/dev/null || true)"
-DESIRED_SERVICE="$(cat <<'UNIT'
-${buildGuestVncServiceUnit()}
-UNIT
-)"
-CURRENT_LAUNCHER="$(cat "$LAUNCHER_FILE" 2>/dev/null || true)"
-DESIRED_LAUNCHER="$(cat <<'SCRIPT'
-${buildGuestVncLauncherScript(port)}
-SCRIPT
-)"
-if [ "$CURRENT_SERVICE" != "$DESIRED_SERVICE" ] || [ "$CURRENT_LAUNCHER" != "$DESIRED_LAUNCHER" ]; then
-  cat > "$LAUNCHER_FILE" <<'SCRIPT'
-${buildGuestVncLauncherScript(port)}
-SCRIPT
-  chmod 0755 "$LAUNCHER_FILE"
-  cat > "$SERVICE_FILE" <<'UNIT'
-${buildGuestVncServiceUnit()}
-UNIT
-  systemctl daemon-reload
-  systemctl restart parallaize-x11vnc.service
-  sleep 1
-fi
-AUTH_FILE="$(ps -eo args | sed -n 's/.*x11vnc .* -auth \\([^ ]*\\) .*/\\1/p' | head -n 1)"
-if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
-  for candidate in /run/user/*/gdm/Xauthority /run/user/*/Xauthority /home/*/.Xauthority; do
-    if [ -f "$candidate" ]; then
-      AUTH_FILE="$candidate"
-      break
-    fi
-  done
-fi
+while [ "$ATTEMPT" -lt 30 ]; do
+  DISPLAY_NUMBER="$(find_guest_display_number)"
+  AUTH_FILE="$(find_guest_auth_file || true)"
+  if [ -n "$AUTH_FILE" ] && [ -f "$AUTH_FILE" ]; then
+    break
+  fi
+  ATTEMPT=$((ATTEMPT + 1))
+  sleep 2
+done
 if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
   echo "Unable to locate an Xauthority file for the desktop session." >&2
   exit 1
 fi
 export DISPLAY="$DISPLAY_NUMBER"
 export XAUTHORITY="$AUTH_FILE"
-OUTPUT="$(xrandr --query | awk '/ connected/ { print $1; exit }')"
+ATTEMPT=0
+OUTPUT=""
+while [ "$ATTEMPT" -lt 15 ]; do
+  OUTPUT="$(xrandr --query | awk '/ connected/ { print $1; exit }')"
+  if [ -n "$OUTPUT" ]; then
+    break
+  fi
+  ATTEMPT=$((ATTEMPT + 1))
+  sleep 2
+done
 if [ -z "$OUTPUT" ]; then
   echo "No connected XRANDR output was found." >&2
   exit 1
@@ -2140,36 +2320,195 @@ else
 fi`;
 }
 
+function buildGuestDisplayDiscoveryScript(): string {
+  return `find_guest_display_number() {
+  CURRENT_DISPLAY="$(ps -C x11vnc -o args= 2>/dev/null | sed -n 's/.* -display \\([^ ]*\\).*/\\1/p' | head -n 1)"
+  if [ -n "$CURRENT_DISPLAY" ]; then
+    printf '%s\\n' "$CURRENT_DISPLAY"
+    return 0
+  fi
+  CURRENT_DISPLAY="$(ps -C Xorg -o args= 2>/dev/null | sed -n 's/.* \\(:[0-9][0-9]*\\)\\( \\|$\\).*/\\1/p' | head -n 1)"
+  if [ -n "$CURRENT_DISPLAY" ]; then
+    printf '%s\\n' "$CURRENT_DISPLAY"
+    return 0
+  fi
+  CURRENT_DISPLAY="$(ps -C Xwayland -o args= 2>/dev/null | sed -n 's/.* \\(:[0-9][0-9]*\\)\\( \\|$\\).*/\\1/p' | head -n 1)"
+  if [ -n "$CURRENT_DISPLAY" ]; then
+    printf '%s\\n' "$CURRENT_DISPLAY"
+    return 0
+  fi
+  printf '%s\\n' ':0'
+}
+
+find_guest_auth_file() {
+  CURRENT_AUTH_FILE="$(ps -C x11vnc -o args= 2>/dev/null | sed -n 's/.* -auth \\([^ ]*\\).*/\\1/p' | head -n 1)"
+  if [ -n "$CURRENT_AUTH_FILE" ] && [ -f "$CURRENT_AUTH_FILE" ]; then
+    printf '%s\\n' "$CURRENT_AUTH_FILE"
+    return 0
+  fi
+  for CURRENT_AUTH_FILE in $(ps -C Xorg -o args= 2>/dev/null | sed -n 's/.* -auth \\([^ ]*\\).*/\\1/p'; ps -C Xwayland -o args= 2>/dev/null | sed -n 's/.* -auth \\([^ ]*\\).*/\\1/p'); do
+    if [ -f "$CURRENT_AUTH_FILE" ]; then
+      printf '%s\\n' "$CURRENT_AUTH_FILE"
+      return 0
+    fi
+  done
+  if command -v loginctl >/dev/null 2>&1; then
+    for CURRENT_SESSION in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+      CURRENT_UID="$(loginctl show-session "$CURRENT_SESSION" -p User --value 2>/dev/null || true)"
+      CURRENT_NAME="$(loginctl show-session "$CURRENT_SESSION" -p Name --value 2>/dev/null || true)"
+      CURRENT_TYPE="$(loginctl show-session "$CURRENT_SESSION" -p Type --value 2>/dev/null || true)"
+      CURRENT_STATE="$(loginctl show-session "$CURRENT_SESSION" -p State --value 2>/dev/null || true)"
+      CURRENT_REMOTE="$(loginctl show-session "$CURRENT_SESSION" -p Remote --value 2>/dev/null || true)"
+      if [ -z "$CURRENT_UID" ] || [ "$CURRENT_REMOTE" = "yes" ]; then
+        continue
+      fi
+      if [ "$CURRENT_STATE" != "active" ] && [ "$CURRENT_TYPE" != "x11" ] && [ "$CURRENT_TYPE" != "wayland" ]; then
+        continue
+      fi
+      for CURRENT_AUTH_FILE in \
+        /run/user/"$CURRENT_UID"/gdm/Xauthority \
+        /run/user/"$CURRENT_UID"/Xauthority \
+        /run/user/"$CURRENT_UID"/.Xauthority \
+        /run/user/"$CURRENT_UID"/.mutter-Xwaylandauth.* \
+        /run/user/"$CURRENT_UID"/gdm/.mutter-Xwaylandauth.* \
+        /home/"$CURRENT_NAME"/.Xauthority; do
+        if [ -f "$CURRENT_AUTH_FILE" ]; then
+          printf '%s\\n' "$CURRENT_AUTH_FILE"
+          return 0
+        fi
+      done
+    done
+  fi
+  for CURRENT_AUTH_FILE in \
+    /run/user/*/gdm/Xauthority \
+    /run/user/*/Xauthority \
+    /run/user/*/.Xauthority \
+    /run/user/*/.mutter-Xwaylandauth.* \
+    /run/user/*/gdm/.mutter-Xwaylandauth.* \
+    /var/run/gdm3/auth-for-*/database \
+    /var/lib/gdm3/.local/share/xorg/Xauthority \
+    /home/*/.Xauthority; do
+    if [ -f "$CURRENT_AUTH_FILE" ]; then
+      printf '%s\\n' "$CURRENT_AUTH_FILE"
+      return 0
+    fi
+  done
+  return 1
+}`;
+}
+
 function buildGuestVncLauncherScript(port: number): string {
   return `#!/bin/sh
 set -eu
+${buildGuestDisplayDiscoveryScript()}
+ATTEMPT=0
 AUTH_FILE=""
-for candidate in /run/user/*/gdm/Xauthority /run/user/*/Xauthority /home/*/.Xauthority; do
-  if [ -f "$candidate" ]; then
-    AUTH_FILE="$candidate"
+DISPLAY_NUMBER=":0"
+while [ "$ATTEMPT" -lt 45 ]; do
+  DISPLAY_NUMBER="$(find_guest_display_number)"
+  AUTH_FILE="$(find_guest_auth_file || true)"
+  if [ -n "$AUTH_FILE" ] && [ -f "$AUTH_FILE" ]; then
     break
   fi
+  ATTEMPT=$((ATTEMPT + 1))
+  sleep 2
 done
 if [ -z "$AUTH_FILE" ]; then
   echo "Unable to locate an Xauthority file for the desktop session." >&2
   exit 1
 fi
+export DISPLAY="$DISPLAY_NUMBER"
+export XAUTHORITY="$AUTH_FILE"
 export HOME="\${HOME:-/root}"
 xset r on || true
-exec /usr/bin/x11vnc -display :0 -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noshm -nopw -repeat -rfbport ${port} -o /var/log/x11vnc.log`;
+exec /usr/bin/x11vnc -display "$DISPLAY_NUMBER" -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noshm -nopw -repeat -rfbport ${port} -o /var/log/x11vnc.log`;
 }
 
 function buildGuestVncServiceUnit(): string {
   return `[Unit]
 Description=Parallaize x11vnc bridge
-After=display-manager.service
+After=display-manager.service parallaize-desktop-bootstrap.service
 Wants=display-manager.service
+ConditionPathExists=/usr/bin/x11vnc
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/parallaize-x11vnc
 Restart=always
 RestartSec=3
+
+[Install]
+WantedBy=multi-user.target`;
+}
+
+function buildGuestDesktopBootstrapScript(port: number): string {
+  return `#!/bin/sh
+set -eu
+GDM_FILE="/etc/gdm3/custom.conf"
+LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
+SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
+CURRENT_GDM="$(cat "$GDM_FILE" 2>/dev/null || true)"
+DESIRED_GDM="$(cat <<'CONF'
+${buildGuestGdmCustomConfig()}
+CONF
+)"
+CURRENT_LAUNCHER="$(cat "$LAUNCHER_FILE" 2>/dev/null || true)"
+DESIRED_LAUNCHER="$(cat <<'SCRIPT'
+${buildGuestVncLauncherScript(port)}
+SCRIPT
+)"
+CURRENT_SERVICE="$(cat "$SERVICE_FILE" 2>/dev/null || true)"
+DESIRED_SERVICE="$(cat <<'UNIT'
+${buildGuestVncServiceUnit()}
+UNIT
+)"
+RESTART_GDM=0
+if [ "$CURRENT_GDM" != "$DESIRED_GDM" ]; then
+  mkdir -p /etc/gdm3
+  cat > "$GDM_FILE" <<'CONF'
+${buildGuestGdmCustomConfig()}
+CONF
+  RESTART_GDM=1
+fi
+if [ "$CURRENT_LAUNCHER" != "$DESIRED_LAUNCHER" ]; then
+  mkdir -p /usr/local/bin
+  cat > "$LAUNCHER_FILE" <<'SCRIPT'
+${buildGuestVncLauncherScript(port)}
+SCRIPT
+  chmod 0755 "$LAUNCHER_FILE"
+fi
+if [ "$CURRENT_SERVICE" != "$DESIRED_SERVICE" ]; then
+  mkdir -p /etc/systemd/system
+  cat > "$SERVICE_FILE" <<'UNIT'
+${buildGuestVncServiceUnit()}
+UNIT
+fi
+if ! command -v x11vnc >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+  apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y x11vnc
+fi
+systemctl daemon-reload
+systemctl enable parallaize-x11vnc.service >/dev/null 2>&1 || true
+if [ "$RESTART_GDM" -eq 1 ]; then
+  systemctl restart gdm3 || true
+  sleep 2
+fi
+systemctl restart parallaize-x11vnc.service`;
+}
+
+function buildGuestDesktopBootstrapServiceUnit(): string {
+  return `[Unit]
+Description=Parallaize desktop bootstrap
+After=network-online.target display-manager.service
+Wants=network-online.target display-manager.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/parallaize-desktop-bootstrap
+Restart=on-failure
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target`;
@@ -2191,17 +2530,11 @@ function buildGuestVncCloudInit(
   inotifySettings: GuestInotifySettings,
 ): string {
   return `#cloud-config
-package_update: true
-packages:
-  - x11vnc
 write_files:
   - path: /etc/gdm3/custom.conf
     permissions: '0644'
     content: |
-      [daemon]
-      AutomaticLoginEnable=true
-      AutomaticLogin=ubuntu
-      WaylandEnable=false
+${indentBlock(buildGuestGdmCustomConfig(), "      ")}
   - path: /usr/local/bin/parallaize-x11vnc
     permissions: '0755'
     content: |
@@ -2210,6 +2543,14 @@ ${indentBlock(buildGuestVncLauncherScript(port), "      ")}
     permissions: '0644'
     content: |
 ${indentBlock(buildGuestVncServiceUnit(), "      ")}
+  - path: /usr/local/bin/parallaize-desktop-bootstrap
+    permissions: '0755'
+    content: |
+${indentBlock(buildGuestDesktopBootstrapScript(port), "      ")}
+  - path: /etc/systemd/system/parallaize-desktop-bootstrap.service
+    permissions: '0644'
+    content: |
+${indentBlock(buildGuestDesktopBootstrapServiceUnit(), "      ")}
   - path: /etc/sysctl.d/60-parallaize-inotify.conf
     permissions: '0644'
     content: |
@@ -2244,9 +2585,9 @@ runcmd:
         fi
         systemctl start incus-agent.service || true
       fi
-  - systemctl enable parallaize-x11vnc.service
+  - systemctl enable parallaize-desktop-bootstrap.service
   - systemctl restart gdm3 || true
-  - systemctl start parallaize-x11vnc.service
+  - systemctl start parallaize-desktop-bootstrap.service || true
 `;
 }
 
@@ -2747,6 +3088,12 @@ function classifyProbeFailure(result: CommandResult): ProviderState["hostStatus"
 
 function buildProbeNextSteps(status: ProviderState["hostStatus"]): string[] {
   switch (status) {
+    case "network-unreachable":
+      return [
+        "Verify outbound IPv4 and DNS from the control-plane host, especially access to archive.ubuntu.com.",
+        "If Docker is installed, ensure FORWARD rules still allow traffic from incusbr0; packaged installs ship parallaize-network-fix.service for this case.",
+        "Inspect `journalctl -u parallaize-desktop-bootstrap.service` inside the guest if VNC still never appears after host connectivity is restored.",
+      ];
     case "missing-cli":
       return [
         "Run the control plane inside Flox or set PARALLAIZE_INCUS_BIN to a valid Incus binary.",

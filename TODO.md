@@ -28,6 +28,8 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` 
 - [x] Browser-to-guest and guest-to-browser clipboard flow for the main noVNC session, with browser-API fallback handling
 - [x] Configurable guest bootstrap defaults for higher inotify watcher limits in new Incus VMs
 - [x] Packaged-install foundation with bundled Node runtime, staged `.deb` and `.rpm` builders, packaged systemd/Caddy assets, and a packaging decision note
+- [x] Dispatch-driven release automation that bumps versioned package/docs references, builds package artifacts, uploads them to the archive bucket, and pushes the release commit back to GitHub
+- [x] Host internet/bootstrap diagnostics plus guest desktop self-heal for packaged Incus VMs so X11/VNC converge even after a bad first boot
 
 ## Priority Backlog
 
@@ -66,7 +68,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep `.rpm` 
 - [ ] Install the generated Ubuntu 24.04 `amd64` `.deb` on a live host that uses a clean distro-managed Incus daemon and verify the packaged service units against real Incus, optional Caddy, and the packaged env file.
 - [ ] Decide whether the RPM output should stay generic or target a specific RPM family with concrete dependency metadata once a live RPM host is available.
 - [ ] Validate the generated `arm64` packages on a real `arm64` Incus/QEMU host before promoting them beyond experimental.
-- [ ] Add package-signing and tagged-release publishing once the package formats and support matrix settle.
+- [ ] Add package-signing and git-tag creation to the release workflow once the package formats and support matrix settle.
 
 ### P2: Forwarded Service Routing
 
@@ -91,7 +93,9 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-25: Added host internet/bootstrap diagnostics for the Incus provider, made `/api/health` degrade on host egress failures, and switched guest desktop bootstrap to a retrying systemd service so `x11vnc` and the X11 GDM config can recover after a failed first boot.
 - 2026-03-25: Documented the dedicated Hetzner packaged-install workflow for Ubuntu 24.04, including SSH-only UFW rules, localhost binding, and SSH port forwarding, and clarified the basic VM-to-template-or-fleet usage on the docs landing page.
+- 2026-03-25: Added a dispatch-driven GitHub release workflow that updates package/docs version references, builds `.deb` and `.rpm` artifacts, uploads them to Cloudflare R2, and pushes the release commit back to `main`.
 - 2026-03-24: Installed the Ubuntu 24.04 `amd64` `.deb` on the live host, confirmed the packaged systemd units boot, and found two follow-ups: the package must add `parallaize` to `incus-admin` on Ubuntu, and full Incus-path validation should happen on a clean distro-managed Incus host because this machine already had a manual Flox `incusd` bound to the same socket path.
 - 2026-03-24: Chose packaged host installs over npm-only deploys for real deployments, bundled the Node 24 runtime into the package, and made Ubuntu 24.04 `amd64` `.deb` the first supported package target while keeping `.rpm` and `arm64` outputs experimental.
 - 2026-03-22: Verified the real `incus` server boots cleanly against both JSON and PostgreSQL persistence; the PostgreSQL backend seeded and served state from the local Docker PostgreSQL stack.

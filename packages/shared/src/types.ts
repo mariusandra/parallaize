@@ -2,6 +2,7 @@ export type ProviderKind = "mock" | "incus";
 export type PersistenceKind = "json" | "postgres";
 export type ProviderHostStatus =
   | "ready"
+  | "network-unreachable"
   | "missing-cli"
   | "daemon-unreachable"
   | "error";

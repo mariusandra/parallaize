@@ -696,25 +696,11 @@ textarea {
   line-height: 1;
 }
 
-.vm-tile__resources,
-.vm-tile__meta {
+.vm-tile__resources {
   margin: 0;
   color: var(--ink-soft);
   font-size: 0.82rem;
   line-height: 1.4;
-}
-
-.vm-tile__meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.6rem;
-}
-
-.vm-tile__meta span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .vm-tile--compact {
@@ -736,10 +722,6 @@ textarea {
 
 .vm-tile--compact .vm-tile__title {
   font-size: 0.96rem;
-}
-
-.vm-tile--compact .vm-tile__meta {
-  font-size: 0.74rem;
 }
 
 .vm-tile--compact .status-badge {
@@ -2338,25 +2320,11 @@ section.workspace-shell {
   line-height: 1.05;
 }
 
-.vm-tile__resources,
-.vm-tile__meta {
+.vm-tile__resources {
   margin: 0;
   color: var(--ink-soft);
   font-size: 0.8rem;
   line-height: 1.45;
-}
-
-.vm-tile__meta {
-  display: flex;
-  justify-content: flex-start;
-  gap: 0.6rem;
-}
-
-.vm-tile__meta span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .vm-tile__compact-trigger {
