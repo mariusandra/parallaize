@@ -123,12 +123,12 @@
               <p>Ubuntu 24.04 package for x86_64 hosts.</p>
               <a
                 class="button button--primary"
-                href="https://archive.parallaize.com/packages/parallaize_0.1.5-1_amd64.deb"
+                href="https://archive.parallaize.com/packages/parallaize_0.1.6-1_amd64.deb"
                 download
               >
                 Download AMD64
               </a>
-              <p class="download-card__file mono-font">parallaize_0.1.5-1_amd64.deb</p>
+              <p class="download-card__file mono-font">parallaize_0.1.6-1_amd64.deb</p>
             </article>
 
             <article class="download-card">
@@ -137,12 +137,12 @@
               <p>Ubuntu 24.04 package for ARM64 hosts.</p>
               <a
                 class="button button--secondary"
-                href="https://archive.parallaize.com/packages/parallaize_0.1.5-1_arm64.deb"
+                href="https://archive.parallaize.com/packages/parallaize_0.1.6-1_arm64.deb"
                 download
               >
                 Download ARM64
               </a>
-              <p class="download-card__file mono-font">parallaize_0.1.5-1_arm64.deb</p>
+              <p class="download-card__file mono-font">parallaize_0.1.6-1_arm64.deb</p>
             </article>
           </div>
 
@@ -150,9 +150,9 @@
             <article class="install-card">
               <h3>1. Install the package</h3>
               <p>Download the <code>.deb</code> that matches your host architecture, then install it.</p>
-              <pre><code>sudo apt install ./parallaize_0.1.5-1_amd64.deb
+              <pre><code>sudo apt install ./parallaize_0.1.6-1_amd64.deb
 # or
-sudo apt install ./parallaize_0.1.5-1_arm64.deb</code></pre>
+sudo apt install ./parallaize_0.1.6-1_arm64.deb</code></pre>
             </article>
 
             <article class="install-card">
@@ -196,9 +196,9 @@ sudo systemctl start parallaize.service</code></pre>
               <pre><code>sudo apt-get update
 sudo apt-get install -y curl pwgen ufw
 
-curl -fLo /tmp/parallaize_0.1.5-1_amd64.deb \
-  https://archive.parallaize.com/packages/parallaize_0.1.5-1_amd64.deb
-sudo apt-get install -y /tmp/parallaize_0.1.5-1_amd64.deb
+curl -fLo /tmp/parallaize_0.1.6-1_amd64.deb \
+  https://archive.parallaize.com/packages/parallaize_0.1.6-1_amd64.deb
+sudo apt-get install -y /tmp/parallaize_0.1.6-1_amd64.deb
 
 sudo cp /etc/parallaize/parallaize.env /etc/parallaize/parallaize.env.bak
 PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"
