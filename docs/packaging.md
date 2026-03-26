@@ -107,7 +107,7 @@ If branch protection blocks `github-actions[bot]` from pushing to `main`, allow 
 Ubuntu 24.04 `amd64` example:
 
 ```bash
-sudo apt install ./artifacts/packages/parallaize_0.1.5-1_amd64.deb
+sudo apt install ./artifacts/packages/parallaize_0.1.6-1_amd64.deb
 sudo apt-get install -y pwgen
 PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"
 printf 'Generated Parallaize admin password: %s\n' "$PARALLAIZE_ADMIN_PASSWORD"
@@ -134,9 +134,9 @@ On Ubuntu 24.04 `amd64`, this is the full command-line flow:
 sudo apt-get update
 sudo apt-get install -y curl pwgen ufw
 
-curl -fLo /tmp/parallaize_0.1.5-1_amd64.deb \
-  https://archive.parallaize.com/packages/parallaize_0.1.5-1_amd64.deb
-sudo apt-get install -y /tmp/parallaize_0.1.5-1_amd64.deb
+curl -fLo /tmp/parallaize_0.1.6-1_amd64.deb \
+  https://archive.parallaize.com/packages/parallaize_0.1.6-1_amd64.deb
+sudo apt-get install -y /tmp/parallaize_0.1.6-1_amd64.deb
 
 sudo cp /etc/parallaize/parallaize.env /etc/parallaize/parallaize.env.bak
 sudo sed -i 's/^PARALLAIZE_ADMIN_USERNAME=.*/PARALLAIZE_ADMIN_USERNAME=admin/' \
