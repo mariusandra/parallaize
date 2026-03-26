@@ -158,6 +158,14 @@ PARALLAIZE_DATABASE_URL=postgresql://parallaize:parallaize@127.0.0.1:5432/parall
 flox activate -d . -- pnpm start
 ```
 
+When admin auth is enabled, Parallaize now stores sessions in app state instead of keeping them in memory only. Sessions survive control-plane restarts, rotate automatically, and are invalidated when the shared admin credentials change. The defaults are usually fine, but these knobs exist when you need them:
+
+```bash
+PARALLAIZE_SESSION_MAX_AGE_SECONDS=604800
+PARALLAIZE_SESSION_IDLE_TIMEOUT_SECONDS=86400
+PARALLAIZE_SESSION_ROTATION_SECONDS=21600
+```
+
 ## Recommended first verification
 
 After the app is up:
@@ -187,6 +195,25 @@ flox activate -d . -- pnpm smoke:incus
 This smoke test creates a throwaway VM, validates the VNC bridge, injects a guest HTTP service, verifies Caddy forwarding, and cleans the VM up afterward unless told not to.
 
 It assumes the current user can run `sudo` for the temporary guest-disk mount operations.
+
+Notes from the live PostgreSQL-backed run on March 26, 2026:
+
+- Captured templates can outlive their published `parallaize-template-*` Incus image aliases. The control plane now recovers those creates from the newest compatible template snapshot instead of failing immediately on `Image "..." not found`.
+- Compatibility matters during that recovery. If the newest snapshot was captured from a larger disk than the requested VM size, Parallaize now skips it and uses the newest snapshot that still fits. If none fit, increase the requested disk or recapture the template.
+- On this host, the smoke path exercised the PostgreSQL-backed create, stop, start, and cleanup paths successfully, but host-to-guest HTTP verification remained the step to watch most closely during follow-up debugging.
+
+## DMZ Mode
+
+DMZ mode applies a managed Incus ACL to a VM's bridge NIC.
+
+- Guest egress keeps working for public internet access and public DNS resolution.
+- Guest egress to host addresses, other private RFC1918 ranges, CGNAT ranges, loopback, link-local, multicast, and IPv6 ULA/link-local ranges is dropped.
+- Host-initiated TCP from the bridge address stays allowed so the control plane can keep reaching guest VNC and forwarded-service ports.
+
+Live notes from March 26, 2026:
+
+- Earlier builds still let DMZ guests query the bridge resolver at `10.36.140.1:53`, which meant split-horizon names could still resolve even though private-range traffic stayed blocked. Current builds switch DMZ guests to public resolvers and drop bridge DNS entirely.
+- That host was still carrying an older managed ACL named `parallaize-airgap` whose ingress allow only covered TCP `5900`. That preserved host VNC reachability but blocked forwarded guest HTTP. Re-applying DMZ mode from a current build rewrites the managed ACL to the broader host-ingress rule set.
 
 ## Copy-paste bootstrap sequence
 

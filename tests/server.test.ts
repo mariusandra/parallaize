@@ -183,6 +183,152 @@ test("login issues a session cookie that unlocks protected APIs and event stream
   eventsResponse.destroy();
 });
 
+test("auth status rotates persisted sessions and invalidates the previous cookie", async (context) => {
+  const { port } = await startServer(context, {
+    adminPassword: "change-me",
+    tempDirPrefix: "parallaize-server-session-rotation-",
+    extraEnv: {
+      PARALLAIZE_SESSION_MAX_AGE_SECONDS: "120",
+      PARALLAIZE_SESSION_IDLE_TIMEOUT_SECONDS: "30",
+      PARALLAIZE_SESSION_ROTATION_SECONDS: "1",
+    },
+  });
+
+  const loginResponse = await sendRequest(port, {
+    path: "/api/auth/login",
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      username: "admin",
+      password: "change-me",
+    }),
+  });
+  assert.equal(loginResponse.statusCode, 200);
+
+  const sessionCookie = extractCookieHeader(loginResponse);
+  await waitForTimeout(1_100);
+
+  const rotatedStatusResponse = await sendRequest(port, {
+    path: "/api/auth/status",
+    method: "GET",
+    headers: {
+      cookie: sessionCookie,
+      accept: "application/json",
+    },
+  });
+  assert.equal(rotatedStatusResponse.statusCode, 200);
+  const rotatedCookie = extractCookieHeader(rotatedStatusResponse);
+  assert.notEqual(rotatedCookie, sessionCookie);
+  assert.deepEqual(JSON.parse(rotatedStatusResponse.body), {
+    ok: true,
+    data: {
+      authEnabled: true,
+      authenticated: true,
+      username: "admin",
+      mode: "session",
+    },
+  });
+
+  const staleSummaryResponse = await sendRequest(port, {
+    path: "/api/summary",
+    method: "GET",
+    headers: {
+      cookie: sessionCookie,
+      accept: "application/json",
+    },
+  });
+  assert.equal(staleSummaryResponse.statusCode, 401);
+
+  const rotatedSummaryResponse = await sendRequest(port, {
+    path: "/api/summary",
+    method: "GET",
+    headers: {
+      cookie: rotatedCookie,
+      accept: "application/json",
+    },
+  });
+  assert.equal(rotatedSummaryResponse.statusCode, 200);
+});
+
+test("persisted sessions survive a control-plane restart", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-server-session-restart-"));
+  const dataFilePath = join(tempDir, "state.json");
+
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const first = await startServer(context, {
+    adminPassword: "change-me",
+    tempDirPrefix: "parallaize-server-session-restart-unused-",
+    dataFilePath,
+    cleanupTempDir: false,
+  });
+
+  const loginResponse = await sendRequest(first.port, {
+    path: "/api/auth/login",
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      username: "admin",
+      password: "change-me",
+    }),
+  });
+  assert.equal(loginResponse.statusCode, 200);
+  const sessionCookie = extractCookieHeader(loginResponse);
+
+  const firstExit = once(first.serverProcess, "exit");
+  first.serverProcess.kill("SIGTERM");
+  await Promise.race([
+    firstExit,
+    waitForTimeout(3_000).then(() => {
+      throw new Error("Server did not exit within 3 seconds during restart validation.");
+    }),
+  ]);
+
+  const second = await startServer(context, {
+    adminPassword: "change-me",
+    tempDirPrefix: "parallaize-server-session-restart-unused-",
+    dataFilePath,
+    cleanupTempDir: false,
+  });
+
+  const statusResponse = await sendRequest(second.port, {
+    path: "/api/auth/status",
+    method: "GET",
+    headers: {
+      cookie: sessionCookie,
+      accept: "application/json",
+    },
+  });
+  assert.equal(statusResponse.statusCode, 200);
+  assert.deepEqual(JSON.parse(statusResponse.body), {
+    ok: true,
+    data: {
+      authEnabled: true,
+      authenticated: true,
+      username: "admin",
+      mode: "session",
+    },
+  });
+
+  const summaryResponse = await sendRequest(second.port, {
+    path: "/api/summary",
+    method: "GET",
+    headers: {
+      cookie: sessionCookie,
+      accept: "application/json",
+    },
+  });
+  assert.equal(summaryResponse.statusCode, 200);
+});
+
 test("resolution control claims stay pinned to one client until another client takes over", async (context) => {
   const { port } = await startServer(context, {
     adminPassword: "change-me",
@@ -459,16 +605,22 @@ async function startServer(
   {
     adminPassword,
     tempDirPrefix,
+    dataFilePath,
+    extraEnv,
+    cleanupTempDir = true,
   }: {
     adminPassword: string;
     tempDirPrefix: string;
+    dataFilePath?: string;
+    extraEnv?: Record<string, string>;
+    cleanupTempDir?: boolean;
   },
 ): Promise<{
   port: number;
   serverProcess: SpawnedServerProcess;
   startupOutput: string;
 }> {
-  const tempDir = mkdtempSync(join(tmpdir(), tempDirPrefix));
+  const tempDir = dataFilePath ? join(dataFilePath, "..") : mkdtempSync(join(tmpdir(), tempDirPrefix));
   const port = await reservePort();
   const serverProcess = spawn(process.execPath, ["dist/apps/control/src/server.js"], {
     cwd: process.cwd(),
@@ -477,8 +629,9 @@ async function startServer(
       HOST: "127.0.0.1",
       PORT: String(port),
       PARALLAIZE_PROVIDER: "mock",
-      PARALLAIZE_DATA_FILE: join(tempDir, "state.json"),
+      PARALLAIZE_DATA_FILE: dataFilePath ?? join(tempDir, "state.json"),
       PARALLAIZE_ADMIN_PASSWORD: adminPassword,
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -489,7 +642,9 @@ async function startServer(
       await once(serverProcess, "exit");
     }
 
-    rmSync(tempDir, { recursive: true, force: true });
+    if (cleanupTempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   const startupOutput = await waitForStdoutLine(

@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import { slugify } from "../../../packages/shared/src/helpers.js";
 import type {
   ActionJob,
+  AdminSessionRecord,
   AppState,
   EnvironmentTemplate,
   PersistenceDiagnostics,
@@ -15,6 +16,7 @@ import type {
   TemplatePortForward,
   VmCommandResult,
   VmInstance,
+  VmNetworkMode,
   VmSession,
   VmPortForward,
 } from "../../../packages/shared/src/types.js";
@@ -36,6 +38,7 @@ type LegacyVm = Partial<VmInstance>;
 type LegacyProviderState = Partial<ProviderState>;
 type LegacySnapshot = Partial<Snapshot>;
 type LegacyJob = Partial<ActionJob>;
+type LegacyAdminSession = Partial<AdminSessionRecord>;
 
 type LegacyAppState = Partial<Omit<AppState, "provider" | "templates" | "vms">> & {
   provider?: LegacyProviderState;
@@ -43,6 +46,7 @@ type LegacyAppState = Partial<Omit<AppState, "provider" | "templates" | "vms">> 
   vms?: LegacyVm[];
   snapshots?: LegacySnapshot[];
   jobs?: LegacyJob[];
+  adminSessions?: LegacyAdminSession[];
 };
 
 export interface StateStore {
@@ -329,6 +333,11 @@ function normalizeState(rawState: LegacyAppState): AppState {
           .map(normalizeJob)
           .filter((job): job is ActionJob => job !== null)
       : [],
+    adminSessions: Array.isArray(rawState.adminSessions)
+      ? rawState.adminSessions
+          .map(normalizeAdminSession)
+          .filter((session): session is AdminSessionRecord => session !== null)
+      : [],
     lastUpdated:
       typeof rawState.lastUpdated === "string" && rawState.lastUpdated
         ? rawState.lastUpdated
@@ -393,6 +402,7 @@ function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
     defaultForwardedPorts: normalizeTemplateForwardedPorts(
       template.defaultForwardedPorts,
     ),
+    defaultNetworkMode: normalizeVmNetworkMode(template.defaultNetworkMode),
     initCommands: normalizeTemplateInitCommands(template.initCommands),
     tags: Array.isArray(template.tags) ? template.tags : [],
     notes: Array.isArray(template.notes) ? template.notes : [],
@@ -433,6 +443,7 @@ function normalizeVm(vm: LegacyVm): VmInstance {
     screenSeed: vm.screenSeed ?? 1,
     activeWindow: vm.activeWindow ?? "editor",
     workspacePath,
+    networkMode: normalizeVmNetworkMode(vm.networkMode),
     session: normalizeSession(vm.id ?? "vm-missing", vm.session, provider),
     forwardedPorts: normalizeVmForwardedPorts(
       vm.id ?? "vm-missing",
@@ -483,6 +494,41 @@ function normalizeJob(job: LegacyJob): ActionJob | null {
         : null,
     createdAt: job.createdAt ?? nowIso(),
     updatedAt: job.updatedAt ?? job.createdAt ?? nowIso(),
+  };
+}
+
+function normalizeAdminSession(
+  session: LegacyAdminSession,
+): AdminSessionRecord | null {
+  if (
+    !session ||
+    typeof session.id !== "string" ||
+    session.id.length === 0 ||
+    typeof session.username !== "string" ||
+    session.username.length === 0 ||
+    typeof session.credentialFingerprint !== "string" ||
+    session.credentialFingerprint.length === 0 ||
+    typeof session.secretHash !== "string" ||
+    session.secretHash.length === 0 ||
+    typeof session.createdAt !== "string" ||
+    typeof session.lastAuthenticatedAt !== "string" ||
+    typeof session.lastRotatedAt !== "string" ||
+    typeof session.expiresAt !== "string" ||
+    typeof session.idleExpiresAt !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    id: session.id,
+    username: session.username,
+    credentialFingerprint: session.credentialFingerprint,
+    secretHash: session.secretHash,
+    createdAt: session.createdAt,
+    lastAuthenticatedAt: session.lastAuthenticatedAt,
+    lastRotatedAt: session.lastRotatedAt,
+    expiresAt: session.expiresAt,
+    idleExpiresAt: session.idleExpiresAt,
   };
 }
 
@@ -597,6 +643,10 @@ function normalizeSession(
 
 function normalizeProviderKind(value: VmInstance["provider"] | undefined): ProviderKind {
   return value === "incus" ? "incus" : "mock";
+}
+
+function normalizeVmNetworkMode(value: VmNetworkMode | undefined): VmNetworkMode {
+  return value === "dmz" ? "dmz" : "default";
 }
 
 function normalizeTemplateForwardedPorts(

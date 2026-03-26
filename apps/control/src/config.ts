@@ -23,6 +23,9 @@ export interface AppConfig {
   guestInotifyMaxUserInstances: number;
   adminUsername: string;
   adminPassword: string | null;
+  sessionMaxAgeSeconds: number;
+  sessionIdleTimeoutSeconds: number;
+  sessionRotationSeconds: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -39,6 +42,25 @@ export function loadConfig(): AppConfig {
   if (persistenceKind === "postgres" && !databaseUrl) {
     throw new Error(
       "PARALLAIZE_DATABASE_URL or DATABASE_URL is required when PostgreSQL persistence is enabled.",
+    );
+  }
+
+  const sessionMaxAgeSeconds = parsePositiveInteger(
+    process.env.PARALLAIZE_SESSION_MAX_AGE_SECONDS,
+    60 * 60 * 24 * 7,
+  );
+  const sessionIdleTimeoutSeconds = parsePositiveInteger(
+    process.env.PARALLAIZE_SESSION_IDLE_TIMEOUT_SECONDS,
+    60 * 60 * 24,
+  );
+  const sessionRotationSeconds = parsePositiveInteger(
+    process.env.PARALLAIZE_SESSION_ROTATION_SECONDS,
+    60 * 60 * 6,
+  );
+
+  if (sessionRotationSeconds >= sessionIdleTimeoutSeconds) {
+    throw new Error(
+      "PARALLAIZE_SESSION_ROTATION_SECONDS must be lower than PARALLAIZE_SESSION_IDLE_TIMEOUT_SECONDS.",
     );
   }
 
@@ -67,6 +89,9 @@ export function loadConfig(): AppConfig {
     ),
     adminUsername: process.env.PARALLAIZE_ADMIN_USERNAME?.trim() || "admin",
     adminPassword,
+    sessionMaxAgeSeconds,
+    sessionIdleTimeoutSeconds,
+    sessionRotationSeconds,
   };
 }
 

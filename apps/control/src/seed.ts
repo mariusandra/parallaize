@@ -25,6 +25,7 @@ export function createSeedState(provider: ProviderState): AppState {
         diskGb: 80,
       },
       defaultForwardedPorts: [],
+      defaultNetworkMode: "default",
       initCommands: [],
       tags: ["coding", "agents", "ubuntu"],
       notes: [
@@ -45,6 +46,7 @@ export function createSeedState(provider: ProviderState): AppState {
       vms: [],
       snapshots: [],
       jobs: [],
+      adminSessions: [],
       lastUpdated: now,
     };
   }
@@ -73,6 +75,7 @@ export function createSeedState(provider: ProviderState): AppState {
       screenSeed: 38,
       activeWindow: "editor",
       workspacePath: "/srv/workspaces/alpha-workbench",
+      networkMode: "default",
       session: syntheticSession,
       forwardedPorts: [],
       activityLog: [
@@ -114,6 +117,7 @@ export function createSeedState(provider: ProviderState): AppState {
     vms,
     snapshots,
     jobs: [],
+    adminSessions: [],
     lastUpdated: now,
   };
 }

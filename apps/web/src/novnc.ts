@@ -33,7 +33,16 @@ interface RfbClipboardEventLike {
   };
 }
 
+interface ClipboardShortcutKeyboardEventLike {
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  key?: string;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+}
+
 export type RfbViewportMode = "fit" | "remote" | "scale";
+export type ClipboardShortcutAction = "copy" | "paste";
 
 export type RfbConstructor = new (
   target: Element,
@@ -72,6 +81,7 @@ interface RfbInternalLike {
 }
 
 const x11BackspaceKeysym = 0xff08;
+const x11KeyCKeysym = 0x0063;
 const x11TabKeysym = 0xff09;
 const x11ControlLeftKeysym = 0xffe3;
 const x11ReturnKeysym = 0xff0d;
@@ -106,17 +116,42 @@ export function buildRfbSocketUrls(
 export function clipboardPasteShortcutLabel(
   platform: string | null | undefined,
 ): string {
-  const normalizedPlatform = platform?.toLowerCase() ?? "";
-
-  if (
-    normalizedPlatform.includes("mac") ||
-    normalizedPlatform.includes("iphone") ||
-    normalizedPlatform.includes("ipad")
-  ) {
+  if (isApplePlatform(platform)) {
     return "Cmd+V";
   }
 
   return "Ctrl+V";
+}
+
+export function resolveClipboardShortcutAction(
+  event: ClipboardShortcutKeyboardEventLike,
+  platform: string | null | undefined,
+): ClipboardShortcutAction | null {
+  const key = event.key?.toLowerCase();
+
+  if (!key || event.altKey || event.shiftKey) {
+    return null;
+  }
+
+  const expectsMeta = isApplePlatform(platform);
+  const hasPrimaryModifier =
+    expectsMeta
+      ? Boolean(event.metaKey) && !event.ctrlKey
+      : Boolean(event.ctrlKey) && !event.metaKey;
+
+  if (!hasPrimaryModifier) {
+    return null;
+  }
+
+  if (key === "c") {
+    return "copy";
+  }
+
+  if (key === "v") {
+    return "paste";
+  }
+
+  return null;
 }
 
 export async function readBrowserClipboardText(
@@ -214,6 +249,13 @@ export function sendGuestPasteShortcut(rfb: RfbLike): void {
   rfb.sendKey(x11ControlLeftKeysym, "ControlLeft", false);
 }
 
+export function sendGuestCopyShortcut(rfb: RfbLike): void {
+  rfb.sendKey(x11ControlLeftKeysym, "ControlLeft", true);
+  rfb.sendKey(x11KeyCKeysym, "KeyC", true);
+  rfb.sendKey(x11KeyCKeysym, "KeyC", false);
+  rfb.sendKey(x11ControlLeftKeysym, "ControlLeft", false);
+}
+
 export function viewportSettingsForMode(mode: RfbViewportMode): RfbViewportSettings {
   switch (mode) {
     case "fit":
@@ -267,6 +309,15 @@ export function readRfbFramebufferSize(rfb: unknown): {
 
 function isNestedModule(value: unknown): value is NestedNoVncModule {
   return typeof value === "object" && value !== null;
+}
+
+function isApplePlatform(platform: string | null | undefined): boolean {
+  const normalizedPlatform = platform?.toLowerCase() ?? "";
+  return (
+    normalizedPlatform.includes("mac") ||
+    normalizedPlatform.includes("iphone") ||
+    normalizedPlatform.includes("ipad")
+  );
 }
 
 function readPositiveNumber(value: unknown): number | null {

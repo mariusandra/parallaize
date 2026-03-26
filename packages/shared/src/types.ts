@@ -22,6 +22,7 @@ export type VmWindow = "editor" | "terminal" | "browser" | "logs";
 export type VmSessionKind = "synthetic" | "vnc";
 export type VmForwardProtocol = "http";
 export type VmPowerAction = "start" | "stop" | "restart";
+export type VmNetworkMode = "default" | "dmz";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -90,6 +91,18 @@ export interface VmCommandResult {
   createdAt: string;
 }
 
+export interface AdminSessionRecord {
+  id: string;
+  username: string;
+  credentialFingerprint: string;
+  secretHash: string;
+  createdAt: string;
+  lastAuthenticatedAt: string;
+  lastRotatedAt: string;
+  expiresAt: string;
+  idleExpiresAt: string;
+}
+
 export interface EnvironmentTemplate {
   id: string;
   name: string;
@@ -97,6 +110,7 @@ export interface EnvironmentTemplate {
   launchSource: string;
   defaultResources: ResourceSpec;
   defaultForwardedPorts: TemplatePortForward[];
+  defaultNetworkMode?: VmNetworkMode;
   initCommands: string[];
   tags: string[];
   notes: string[];
@@ -122,6 +136,7 @@ export interface VmInstance {
   screenSeed: number;
   activeWindow: VmWindow;
   workspacePath: string;
+  networkMode?: VmNetworkMode;
   session: VmSession | null;
   forwardedPorts: VmPortForward[];
   activityLog: string[];
@@ -159,6 +174,7 @@ export interface AppState {
   vms: VmInstance[];
   snapshots: Snapshot[];
   jobs: ActionJob[];
+  adminSessions: AdminSessionRecord[];
   lastUpdated: string;
 }
 
@@ -247,6 +263,7 @@ export interface CreateVmInput {
   name: string;
   resources: ResourceSpec;
   forwardedPorts?: TemplatePortForward[];
+  networkMode?: VmNetworkMode;
   initCommands?: string[];
 }
 
@@ -321,6 +338,10 @@ export interface InjectCommandInput {
 
 export interface UpdateVmForwardedPortsInput {
   forwardedPorts: TemplatePortForward[];
+}
+
+export interface UpdateVmNetworkInput {
+  networkMode: VmNetworkMode;
 }
 
 export interface LoginInput {

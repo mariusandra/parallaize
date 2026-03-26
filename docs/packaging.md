@@ -203,15 +203,15 @@ The packaged env file also defaults `PARALLAIZE_INCUS_STORAGE_POOL=default` so n
 
 ## Live Verification Note
 
-The Ubuntu 24.04 `amd64` package has been installed and boot-tested on a live host:
+As of March 26, 2026, the Ubuntu 24.04 `amd64` package has been installed and boot-tested on a live host:
 
 - `dpkg -i` succeeds
 - `parallaize.service` starts from the packaged bundle and env file
 - `parallaize-caddy.service` starts and serves the packaged front door
 
-One host-specific caveat showed up during validation: this machine already had a manually started Flox `incusd` process before the distro `incus` package was installed. Installing Ubuntu's `incus` package also enabled `incus.socket`, so the host ended up with a mixed daemon setup on `/var/lib/incus/unix.socket`. In that state, the packaged Parallaize service wiring is correct, but clean Incus API verification is blocked by the host daemon conflict itself.
+One host-specific caveat still blocks calling this path fully supported: this machine already had a manually started Flox `incusd` process before the distro `incus` package was installed. Installing Ubuntu's `incus` package also enabled `incus.socket`, so the host ended up with a mixed daemon setup on `/var/lib/incus/unix.socket`. In that state, the packaged Parallaize service wiring is correct, but clean Incus API verification is blocked by the host daemon conflict itself.
 
-For the first supported path, validate packaged Incus access on a host that is either:
+The clean distro-managed validation still needs to be repeated on a host that is either:
 
 - fully managed by the distro `incus` package, or
 - still using the manual Flox daemon without also enabling the distro socket-activated units

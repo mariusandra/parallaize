@@ -15,14 +15,22 @@ Current focus: close the remaining deployment-validation gaps, harden security a
 ## Now
 
 - [ ] Repeat the Ubuntu 24.04 `amd64` packaged install validation on a clean distro-managed Incus host and close the remaining daemon-conflict ambiguity before calling that path fully supported.
-- [ ] Run live `pnpm smoke:incus` against PostgreSQL-backed state and capture any host-specific fixes or recovery steps.
-- [ ] Replace the in-memory admin session token set with server-side sessions that have expiry, rotation, and a documented restart story.
-- [ ] Design a DMZ network mode for VMs: guest-initiated traffic should reach the public internet, DNS, DHCP, and package mirrors, but not the host, other guests, or private RFC1918 and ULA networks unless explicitly allowed.
-- [ ] Validate how the DMZ mode is enforced on real hosts and keep required host-initiated control-plane access working for VNC, guest agent operations, and forwarded services.
+- [x] Run live `pnpm smoke:incus` against PostgreSQL-backed state and capture any host-specific fixes or recovery steps.
+- [x] Replace the in-memory admin session token set with server-side sessions that have expiry, rotation, and a documented restart story.
+- [x] Design a DMZ network mode for VMs: guest-initiated traffic should reach the public internet, DNS, DHCP, and package mirrors, but not the host, other guests, or private RFC1918 and ULA networks unless explicitly allowed.
+- [x] Validate how the DMZ mode is enforced on real hosts and keep required host-initiated control-plane access working for VNC, guest agent operations, and forwarded services.
+
+Current notes:
+
+- On March 26, 2026, the PostgreSQL-backed live smoke run needed two fixes on this host: `smoke:incus` now sizes the create request from template metadata, and captured-template creates now recover from the newest compatible snapshot when the published `parallaize-template-*` image alias is missing.
+- On March 26, 2026, live DMZ validation on `parallaize-vm-0048-ubuntu-agent-forge-01-clone` confirmed the intended guest-side isolation: DNS to `10.36.140.1:53` still worked, while guest TCP to `10.36.140.1:3000` timed out. It also exposed that the legacy managed `parallaize-airgap` ACL on this host still only allowed host TCP ingress to `5900`, which blocks forwarded guest HTTP until a current DMZ re-apply rewrites that ACL.
+- The clean packaged `amd64` validation item remains open because the March 26, 2026 live host is still mixed between a manually started Flox `incusd` and distro `incus.socket` on `/var/lib/incus/unix.socket`.
 
 ## Next
 
 - [ ] Turn guest and template prep into a repeatable scripted flow or tight checklist instead of relying on scattered bootstrap notes.
+- [ ] Tune the default Ubuntu VM desktop defaults during template prep: set the Ubuntu dock on the right, use 32px dock icons, and start each VM with a random wallpaper chosen from the installed Ubuntu wallpaper set.
+- [ ] On first boot of the default Ubuntu VM, install `indicator-multiload` via `sudo apt install indicator-multiload` and make sure it starts automatically as part of the default desktop session.
 - [ ] Improve template lifecycle ergonomics: clearer provenance, better update and capture flow, and more useful snapshot and note history.
 - [ ] Add a UI file browser for the VM, starting at `workspacePath` instead of trying to expose the whole guest filesystem on day one.
 - [ ] Add a best-effort "files touched in this session" view. Start with something explainable such as a launch-time manifest plus `mtime` and `ctime` diffs or command-history-aware scans, and be explicit about the limits.
@@ -51,3 +59,4 @@ Target slice: run agents against Git-backed codebases inside untrusted worker VM
 - [ ] Validate the generated `arm64` `.deb` on a real `arm64` Incus and QEMU host before promoting it beyond experimental.
 - [ ] Add package signing once the supported package matrix is stable.
 - [ ] Document wildcard DNS and Tailscale expectations for hostname-based forwarded routing.
+- [ ] Add some way to monitor actual guest disk usage and surface low-space warnings before the Ubuntu desktop hits "1 GB left" conditions inside the VM.

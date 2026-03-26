@@ -679,6 +679,174 @@ test("captured templates reject create requests that undersize the source disk",
   );
 });
 
+test("manager falls back to the newest compatible template snapshot when a captured image alias is missing", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-alias-recovery-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let createCalls = 0;
+  let snapshotLaunchCalls = 0;
+  let recoveredSnapshotId: string | null = null;
+
+  const providerState = {
+    kind: "incus" as const,
+    available: true,
+    detail: "Incus is reachable.",
+    hostStatus: "ready" as const,
+    binaryPath: "incus",
+    project: null,
+    desktopTransport: "novnc" as const,
+    nextSteps: [],
+  };
+  const provider: DesktopProvider = {
+    state: providerState,
+    refreshState() {
+      return this.state;
+    },
+    sampleHostTelemetry() {
+      return null;
+    },
+    sampleVmTelemetry() {
+      return null;
+    },
+    observeVmPowerState() {
+      return null;
+    },
+    async refreshVmSession() {
+      return null;
+    },
+    async createVm(vm, template) {
+      createCalls += 1;
+      throw new Error(
+        `incus init ${template.launchSource} ${vm.providerRef} --vm failed: Error: Image "${template.launchSource}" not found`,
+      );
+    },
+    async cloneVm() {
+      throw new Error("not implemented");
+    },
+    async startVm() {
+      throw new Error("not implemented");
+    },
+    async stopVm() {
+      throw new Error("not implemented");
+    },
+    async deleteVm() {
+      throw new Error("not implemented");
+    },
+    async resizeVm() {
+      throw new Error("not implemented");
+    },
+    async setNetworkMode() {
+      throw new Error("not implemented");
+    },
+    async setDisplayResolution() {
+      throw new Error("not implemented");
+    },
+    async snapshotVm() {
+      throw new Error("not implemented");
+    },
+    async launchVmFromSnapshot(snapshot, targetVm) {
+      snapshotLaunchCalls += 1;
+      recoveredSnapshotId = snapshot.id;
+
+      return {
+        lastAction: `Launched from snapshot ${snapshot.label}`,
+        activity: [`incus: launched ${targetVm.providerRef} from ${snapshot.providerRef}`],
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        session: null,
+      };
+    },
+    async restoreVmToSnapshot() {
+      throw new Error("not implemented");
+    },
+    async captureTemplate() {
+      throw new Error("not implemented");
+    },
+    async injectCommand() {
+      throw new Error("not implemented");
+    },
+    async readVmLogs() {
+      throw new Error("not implemented");
+    },
+    tickVm() {
+      return null;
+    },
+    renderFrame() {
+      return "";
+    },
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const now = new Date();
+
+  store.update((draft) => {
+    const template = draft.templates.find((entry) => entry.id === "tpl-0001");
+
+    if (!template) {
+      throw new Error("Seed template tpl-0001 was not found.");
+    }
+
+    template.launchSource = "parallaize-template-tpl-0001";
+    template.snapshotIds = ["snap-0900", "snap-0901"];
+    draft.snapshots.push(
+      {
+        id: "snap-0900",
+        vmId: "vm-source-older",
+        templateId: template.id,
+        label: "compatible recovery point",
+        summary: "Newest snapshot that still fits the requested disk size.",
+        providerRef: "parallaize-vm-old/parallaize-snap-old",
+        resources: { ...template.defaultResources },
+        createdAt: new Date(now.getTime() - 60_000).toISOString(),
+      },
+      {
+        id: "snap-0901",
+        vmId: "vm-source-newer",
+        templateId: template.id,
+        label: "oversized recovery point",
+        summary: "Newest captured snapshot, but it needs a larger disk.",
+        providerRef: "parallaize-vm-new/parallaize-snap-new",
+        resources: {
+          ...template.defaultResources,
+          diskGb: 100,
+        },
+        createdAt: now.toISOString(),
+      },
+    );
+
+    return true;
+  });
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "alias-recovery",
+    resources: {
+      cpu: 6,
+      ramMb: 12288,
+      diskGb: 80,
+    },
+  });
+
+  await wait(50);
+
+  const detail = manager.getVmDetail(vm.id);
+  assert.equal(createCalls, 1);
+  assert.equal(snapshotLaunchCalls, 1);
+  assert.equal(recoveredSnapshotId, "snap-0900");
+  assert.equal(detail.vm.status, "running");
+  assert.equal(detail.vm.lastAction, "Launched from snapshot compatible recovery point");
+  assert.ok(
+    detail.vm.activityLog.some((entry) =>
+      entry.includes("template image missing: recovered from snapshot compatible recovery point"),
+    ),
+  );
+  assert.equal(detail.recentJobs[0]?.status, "succeeded");
+});
+
 test("vms can be renamed without changing their provider identity", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-rename-vm-"));
   context.after(() => {
@@ -929,6 +1097,9 @@ test("manager recovers interrupted create jobs when the VM is already running af
     async resizeVm() {
       throw new Error("not implemented");
     },
+    async setNetworkMode() {
+      throw new Error("not implemented");
+    },
     async setDisplayResolution() {
       throw new Error("not implemented");
     },
@@ -1023,6 +1194,7 @@ test("manager recovers interrupted create jobs when the VM is already running af
         updatedAt: now,
       },
     ],
+    adminSessions: [],
     lastUpdated: now,
   };
   const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
@@ -1449,6 +1621,191 @@ test("incus provider treats a timed-out readiness probe as daemon-unreachable", 
   assert.equal(provider.state.available, false);
   assert.equal(provider.state.hostStatus, "daemon-unreachable");
   assert.match(provider.state.detail, /readiness probe timed out/i);
+});
+
+test("incus provider applies a managed DMZ ACL and NIC override for dmz VMs", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0100-dmz";
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (
+        args[0] === "query" &&
+        typeof args[1] === "string" &&
+        args[1] === `/1.0/instances/${instanceName}`
+      ) {
+        return expandedRootAndNicDevice(args);
+      }
+
+      if (
+        args[0] === "query" &&
+        typeof args[1] === "string" &&
+        args[1] === "/1.0/networks/incusbr0"
+      ) {
+        return ok(
+          JSON.stringify({
+            managed: true,
+            type: "bridge",
+            config: {
+              "ipv4.address": "10.36.140.1/24",
+              "ipv6.address": "fd42:f551:1c4c:bffd::1/64",
+            },
+          }),
+          args,
+        );
+      }
+
+      if (
+        args[0] === "query" &&
+        typeof args[1] === "string" &&
+        (
+          args[1] === "/1.0/network-acls/parallaize-dmz" ||
+          args[1] === "/1.0/network-acls/parallaize-airgap"
+        )
+      ) {
+        return {
+          args,
+          status: 1,
+          stdout: "",
+          stderr: "not found",
+        };
+      }
+
+      if (args[0] === "list" && args[1] === instanceName && args[2] === "--format" && args[3] === "json") {
+        return ok(
+          JSON.stringify([
+            {
+              name: instanceName,
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address: "10.55.0.45",
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const template: EnvironmentTemplate = {
+    id: "tpl-dmz-0001",
+    name: "DMZ Template",
+    description: "Validates managed Incus ACL wiring",
+    launchSource: "images:ubuntu/noble/desktop",
+    defaultResources: {
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 30,
+    },
+    defaultForwardedPorts: [],
+    defaultNetworkMode: "dmz",
+    initCommands: [],
+    tags: [],
+    notes: [],
+    snapshotIds: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const vm: VmInstance = {
+    id: "vm-dmz-0001",
+    name: "dmz-check",
+    templateId: template.id,
+    provider: "incus",
+    providerRef: instanceName,
+    status: "creating",
+    resources: template.defaultResources,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Queued",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 1,
+    activeWindow: "editor",
+    workspacePath: "/root",
+    networkMode: "dmz",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.createVm(vm, template);
+  const aclCreateCall = calls.find(
+    (args) =>
+      args[0] === "network" &&
+      args[1] === "acl" &&
+      args[2] === "create" &&
+      args[3] === "parallaize-dmz",
+  );
+  const aclPutCall = calls.find(
+    (args) =>
+      args[0] === "query" &&
+      args[1] === "-X" &&
+      args[2] === "PUT" &&
+      args[6] === "/1.0/network-acls/parallaize-dmz",
+  );
+  const nicOverrideCall = calls.find(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "device" &&
+      args[2] === "override" &&
+      args[3] === instanceName &&
+      args[4] === "eth0",
+  );
+  const guestDnsCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      (args[5] ?? "").includes("DNS=1.1.1.1 1.0.0.1 2606:4700:4700::1111 2606:4700:4700::1001"),
+  );
+
+  assert.ok(aclCreateCall);
+  assert.ok(aclPutCall);
+  assert.match(aclPutCall?.[5] ?? "", /"user\.parallaize\.profile":"dmz"/);
+  assert.match(aclPutCall?.[5] ?? "", /10\.36\.140\.1\/32/);
+  assert.match(aclPutCall?.[5] ?? "", /fd42:f551:1c4c:bffd::1\/128/);
+  assert.doesNotMatch(aclPutCall?.[5] ?? "", /"destination_port":"53"/);
+  assert.ok(nicOverrideCall?.includes("security.acls=parallaize-dmz"));
+  assert.ok(nicOverrideCall?.includes("security.acls.default.egress.action=reject"));
+  assert.ok(nicOverrideCall?.includes("security.acls.default.ingress.action=reject"));
+  assert.ok(nicOverrideCall?.includes("security.port_isolation=true"));
+  assert.ok(nicOverrideCall?.includes("security.mac_filtering=true"));
+  assert.ok(guestDnsCall);
+  assert.ok(mutation.activity.includes("network: dmz via parallaize-dmz"));
+  assert.ok(
+    mutation.activity.includes(
+      "dns: public resolvers 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001",
+    ),
+  );
 });
 
 test("incus provider degrades health when host internet checks fail", () => {
@@ -3274,6 +3631,7 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
     ],
     snapshots: [],
     jobs: [],
+    adminSessions: [],
     lastUpdated: now,
   };
 
@@ -3829,6 +4187,9 @@ test("manager keeps refreshing newly created VMs while guest VNC is still pendin
     async resizeVm() {
       throw new Error("not implemented");
     },
+    async setNetworkMode() {
+      throw new Error("not implemented");
+    },
     async setDisplayResolution() {
       throw new Error("not implemented");
     },
@@ -4089,6 +4450,98 @@ test("incus provider prefers the primary guest NIC over bridge interfaces for VN
   assert.equal(session?.display, "10.55.0.202:5900");
 });
 
+test("incus provider restores guest DNS defaults when starting a default-network VM", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0203-default-dns";
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5900,
+    commandRunner: {
+      execute(args: string[]) {
+        calls.push(args);
+
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+          return expandedRootAndNicDevice(args);
+        }
+
+        if (args[0] === "list" && args[1] === instanceName) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.203",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const mutation = await provider.startVm({
+    id: "vm-0203",
+    name: "default-dns",
+    templateId: "tpl-0203",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "stopped",
+    resources: {
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 40,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Workspace stopped",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 203,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    networkMode: "default",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  });
+
+  const guestDnsResetCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      (args[5] ?? "").includes("rm -f /etc/systemd/resolved.conf.d/60-parallaize-dmz.conf"),
+  );
+
+  assert.ok(guestDnsResetCall);
+  assert.equal(mutation.session?.display, "10.55.0.203:5900");
+  assert.ok(!mutation.activity.some((entry) => entry.startsWith("dns: public resolvers")));
+});
+
 function ok(stdout: string, args: string[]) {
   return {
     args,
@@ -4103,6 +4556,30 @@ function expandedRootDevice(args: string[], deviceName = "root") {
     JSON.stringify({
       expanded_devices: {
         [deviceName]: {
+          type: "disk",
+          path: "/",
+          pool: "default",
+        },
+      },
+    }),
+    args,
+  );
+}
+
+function expandedRootAndNicDevice(
+  args: string[],
+  nicDeviceName = "eth0",
+  networkName = "incusbr0",
+  rootDeviceName = "root",
+) {
+  return ok(
+    JSON.stringify({
+      expanded_devices: {
+        [nicDeviceName]: {
+          type: "nic",
+          network: networkName,
+        },
+        [rootDeviceName]: {
           type: "disk",
           path: "/",
           pool: "default",

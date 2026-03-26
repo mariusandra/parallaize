@@ -10,6 +10,8 @@ import {
   readClipboardTransferText,
   readRfbFramebufferSize,
   resolveRfbConstructor,
+  resolveClipboardShortcutAction,
+  sendGuestCopyShortcut,
   sendGuestText,
   sendGuestPasteShortcut,
   viewportSettingsForMode,
@@ -83,6 +85,87 @@ test("clipboardPasteShortcutLabel prefers the Mac shortcut for Apple platforms",
 test("clipboardPasteShortcutLabel falls back to Ctrl+V elsewhere", () => {
   assert.equal(clipboardPasteShortcutLabel("Linux x86_64"), "Ctrl+V");
   assert.equal(clipboardPasteShortcutLabel(undefined), "Ctrl+V");
+});
+
+test("resolveClipboardShortcutAction prefers Cmd on Apple platforms", () => {
+  assert.equal(
+    resolveClipboardShortcutAction(
+      {
+        key: "c",
+        metaKey: true,
+      },
+      "MacIntel",
+    ),
+    "copy",
+  );
+  assert.equal(
+    resolveClipboardShortcutAction(
+      {
+        key: "V",
+        metaKey: true,
+      },
+      "MacIntel",
+    ),
+    "paste",
+  );
+});
+
+test("resolveClipboardShortcutAction prefers Ctrl on non-Apple platforms", () => {
+  assert.equal(
+    resolveClipboardShortcutAction(
+      {
+        ctrlKey: true,
+        key: "c",
+      },
+      "Linux x86_64",
+    ),
+    "copy",
+  );
+  assert.equal(
+    resolveClipboardShortcutAction(
+      {
+        ctrlKey: true,
+        key: "v",
+      },
+      undefined,
+    ),
+    "paste",
+  );
+});
+
+test("resolveClipboardShortcutAction ignores modified or unsupported shortcuts", () => {
+  assert.equal(
+    resolveClipboardShortcutAction(
+      {
+        altKey: true,
+        ctrlKey: true,
+        key: "c",
+      },
+      "Linux x86_64",
+    ),
+    null,
+  );
+  assert.equal(
+    resolveClipboardShortcutAction(
+      {
+        key: "c",
+        metaKey: true,
+        shiftKey: true,
+      },
+      "MacIntel",
+    ),
+    null,
+  );
+  assert.equal(
+    resolveClipboardShortcutAction(
+      {
+        ctrlKey: true,
+        key: "x",
+      },
+      "Linux x86_64",
+    ),
+    null,
+  );
 });
 
 test("readBrowserClipboardText requires a readable clipboard implementation", async () => {
@@ -211,6 +294,44 @@ test("sendGuestPasteShortcut emits a Ctrl+V key sequence", () => {
       code: "KeyV",
       down: false,
       keysym: 0x0076,
+    },
+    {
+      code: "ControlLeft",
+      down: false,
+      keysym: 0xffe3,
+    },
+  ]);
+});
+
+test("sendGuestCopyShortcut emits a Ctrl+C key sequence", () => {
+  const calls: Array<{ code: string; down: boolean | undefined; keysym: number }> = [];
+  const rfb = {
+    sendKey(keysym: number, code: string, down?: boolean) {
+      calls.push({
+        code,
+        down,
+        keysym,
+      });
+    },
+  } as Pick<FakeRfb, "sendKey"> as Parameters<typeof sendGuestCopyShortcut>[0];
+
+  sendGuestCopyShortcut(rfb);
+
+  assert.deepEqual(calls, [
+    {
+      code: "ControlLeft",
+      down: true,
+      keysym: 0xffe3,
+    },
+    {
+      code: "KeyC",
+      down: true,
+      keysym: 0x0063,
+    },
+    {
+      code: "KeyC",
+      down: false,
+      keysym: 0x0063,
     },
     {
       code: "ControlLeft",

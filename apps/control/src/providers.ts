@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { connect as connectTcp } from "node:net";
-import { cpus, freemem, loadavg, totalmem } from "node:os";
+import { cpus, freemem, loadavg, networkInterfaces, totalmem } from "node:os";
 
 import { slugify } from "../../../packages/shared/src/helpers.js";
 import type {
@@ -11,6 +11,7 @@ import type {
   Snapshot,
   VmInstance,
   VmLogsSnapshot,
+  VmNetworkMode,
   VmSession,
   VmWindow,
 } from "../../../packages/shared/src/types.js";
@@ -37,6 +38,16 @@ const BYTES_PER_GIB = 1024 ** 3;
 const INCUS_PROBE_TIMEOUT_MS = 1_000;
 const HOST_NETWORK_PROBE_CACHE_MS = 60_000;
 const HOST_NETWORK_PROBE_TIMEOUT_MS = 2_500;
+const PARALLAIZE_DMZ_ACL_NAME = "parallaize-dmz";
+const LEGACY_PARALLAIZE_DMZ_ACL_NAME = "parallaize-airgap";
+const PARALLAIZE_DMZ_GUEST_DNS_DROPIN_PATH =
+  "/etc/systemd/resolved.conf.d/60-parallaize-dmz.conf";
+const PARALLAIZE_DMZ_PUBLIC_DNS_SERVERS = [
+  "1.1.1.1",
+  "1.0.0.1",
+  "2606:4700:4700::1111",
+  "2606:4700:4700::1001",
+];
 
 export interface CaptureTemplateTarget {
   templateId: string;
@@ -97,6 +108,7 @@ export interface DesktopProvider {
   stopVm(vm: VmInstance): Promise<ProviderMutation>;
   deleteVm(vm: VmInstance): Promise<ProviderMutation>;
   resizeVm(vm: VmInstance, resources: ResourceSpec): Promise<ProviderMutation>;
+  setNetworkMode(vm: VmInstance, networkMode: VmNetworkMode): Promise<ProviderMutation>;
   setDisplayResolution(vm: VmInstance, width: number, height: number): Promise<void>;
   snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot>;
   launchVmFromSnapshot(
@@ -233,9 +245,34 @@ interface IncusListInstance {
 
 interface IncusInstanceDevice {
   path?: string;
+  network?: string;
+  parent?: string;
   pool?: string;
   source?: string;
   type?: string;
+}
+
+interface IncusNetwork {
+  config?: Record<string, string>;
+  managed?: boolean;
+  name?: string;
+  type?: string;
+}
+
+interface IncusNetworkAclRule {
+  action: "allow" | "drop";
+  destination?: string;
+  destination_port?: string;
+  protocol?: string;
+  source?: string;
+  state: "enabled";
+}
+
+interface IncusNetworkAclPayload {
+  config: Record<string, string>;
+  description: string;
+  egress: IncusNetworkAclRule[];
+  ingress: IncusNetworkAclRule[];
 }
 
 interface IncusOperationProgressMetadata {
@@ -344,6 +381,7 @@ class MockProvider implements DesktopProvider {
               `init-log: ${DEFAULT_GUEST_INIT_LOG_PATH}`,
             ]
           : []),
+        `network: ${describeVmNetworkMode(vm.networkMode)}`,
         `workspace: /srv/workspaces/${slugify(vm.name)}`,
       ],
       activeWindow: "editor",
@@ -362,6 +400,7 @@ class MockProvider implements DesktopProvider {
       activity: [
         `clone: copied disks and metadata from ${vm.name}`,
         `template: ${template.name}`,
+        `network: ${describeVmNetworkMode(targetVm.networkMode)}`,
         `workspace: /srv/workspaces/${slugify(targetVm.name)}`,
       ],
       activeWindow: vm.activeWindow,
@@ -414,6 +453,18 @@ class MockProvider implements DesktopProvider {
       ],
       activeWindow: "logs",
       session: buildSyntheticSession(),
+    };
+  }
+
+  async setNetworkMode(
+    vm: VmInstance,
+    networkMode: VmNetworkMode,
+  ): Promise<ProviderMutation> {
+    return {
+      lastAction: `Network mode updated for ${vm.name}`,
+      activity: [`network: ${describeVmNetworkMode(networkMode)}`],
+      activeWindow: "logs",
+      session: vm.session,
     };
   }
 
@@ -823,12 +874,18 @@ class IncusProvider implements DesktopProvider {
     ]);
     emitCreateProgress("Preparing guest agent", VM_CREATE_GUEST_AGENT_PERCENT);
     await this.ensureAgentDeviceAsync(vm.providerRef);
+    const networkMode = normalizeVmNetworkMode(vm.networkMode);
+    const networkActivity =
+      networkMode === "dmz"
+        ? await this.ensureInstanceNetworkModeAsync(vm.providerRef, networkMode)
+        : `network: ${describeVmNetworkMode(networkMode)}`;
     emitCreateProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await this.runAsync(["start", vm.providerRef]);
 
     const session = await this.resolveSession(vm.providerRef, emitCreateProgress, {
       requireBootstrapRepairBeforeReady: shouldRequireGuestBootstrapRepairBeforeReady(template),
     });
+    await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
 
     if (template.initCommands.length > 0) {
       emitCreateProgress("Running init commands", 98);
@@ -846,8 +903,10 @@ class IncusProvider implements DesktopProvider {
               `init-log: ${DEFAULT_GUEST_INIT_LOG_PATH}`,
             ]
           : []),
+        networkActivity,
+        ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
         session ? `vnc: ${session.display}` : "vnc: guest network pending",
-      ],
+      ].filter((entry): entry is string => Boolean(entry)),
       activeWindow: "terminal",
       workspacePath: DEFAULT_GUEST_WORKSPACE,
       session,
@@ -882,20 +941,28 @@ class IncusProvider implements DesktopProvider {
     await this.runAsync(copyArgs);
     await this.setRootDiskSizeAsync(targetVm.providerRef, targetVm.resources.diskGb);
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
+    const networkMode = normalizeVmNetworkMode(targetVm.networkMode);
+    const networkActivity =
+      networkMode === "dmz"
+        ? await this.ensureInstanceNetworkModeAsync(targetVm.providerRef, networkMode)
+        : `network: ${describeVmNetworkMode(networkMode)}`;
     await this.runAsync(["start", targetVm.providerRef]);
 
     const session = await this.resolveSession(targetVm.providerRef, undefined, {
       // Clones boot from an existing disk image, so cloud-init will not rewrite stale guest services.
       requireBootstrapRepairBeforeReady: true,
     });
+    await this.syncGuestDnsProfileAsync(targetVm.providerRef, networkMode);
 
     return {
       lastAction: `Cloned from ${sourceVm.name}`,
       activity: [
         `incus: cloned ${sourceVm.providerRef} to ${targetVm.providerRef}`,
         `template: ${template.name}`,
+        networkActivity,
+        ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
         session ? `vnc: ${session.display}` : "vnc: guest network pending",
-      ],
+      ].filter((entry): entry is string => Boolean(entry)),
       activeWindow: "terminal",
       workspacePath: sourceVm.workspacePath || DEFAULT_GUEST_WORKSPACE,
       session,
@@ -905,6 +972,11 @@ class IncusProvider implements DesktopProvider {
   async startVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
     await this.ensureAgentDeviceAsync(vm.providerRef);
+    const networkMode = normalizeVmNetworkMode(vm.networkMode);
+    const networkActivity =
+      networkMode === "dmz"
+        ? await this.ensureInstanceNetworkModeAsync(vm.providerRef, networkMode)
+        : `network: ${describeVmNetworkMode(networkMode)}`;
     const startArgs = ["start", vm.providerRef];
     const startResult = await this.executeAsync(startArgs);
 
@@ -917,13 +989,16 @@ class IncusProvider implements DesktopProvider {
     }
 
     const session = await this.resolveSession(vm.providerRef);
+    await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
 
     return {
       lastAction: "Workspace resumed",
       activity: [
         `incus: started ${vm.providerRef}`,
+        networkActivity,
+        ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
         session ? `vnc: ${session.display}` : "vnc: guest network pending",
-      ],
+      ].filter((entry): entry is string => Boolean(entry)),
       activeWindow: "terminal",
       workspacePath: vm.workspacePath || DEFAULT_GUEST_WORKSPACE,
       session,
@@ -1005,6 +1080,41 @@ class IncusProvider implements DesktopProvider {
     };
   }
 
+  async setNetworkMode(
+    vm: VmInstance,
+    networkMode: VmNetworkMode,
+  ): Promise<ProviderMutation> {
+    this.assertAvailable();
+    const nextNetworkMode = normalizeVmNetworkMode(networkMode);
+    let networkActivity: string;
+    let dnsActivity: string;
+
+    if (vm.status === "running" && nextNetworkMode === "dmz") {
+      await this.syncGuestDnsProfileAsync(vm.providerRef, nextNetworkMode);
+      networkActivity = await this.ensureInstanceNetworkModeAsync(vm.providerRef, nextNetworkMode);
+      dnsActivity = describeGuestDnsProfileActivity(nextNetworkMode);
+    } else {
+      networkActivity = await this.ensureInstanceNetworkModeAsync(vm.providerRef, nextNetworkMode);
+
+      if (vm.status === "running") {
+        await this.syncGuestDnsProfileAsync(vm.providerRef, nextNetworkMode);
+        dnsActivity = describeGuestDnsProfileActivity(nextNetworkMode);
+      } else {
+        dnsActivity = describePendingGuestDnsProfileActivity(nextNetworkMode);
+      }
+    }
+
+    return {
+      lastAction: `Network mode updated for ${vm.name}`,
+      activity:
+        nextNetworkMode === "dmz"
+          ? [dnsActivity, networkActivity]
+          : [networkActivity, dnsActivity],
+      activeWindow: "logs",
+      session: vm.session,
+    };
+  }
+
   async setDisplayResolution(
     vm: VmInstance,
     width: number,
@@ -1063,20 +1173,28 @@ class IncusProvider implements DesktopProvider {
     await this.runAsync(copyArgs);
     await this.setRootDiskSizeAsync(targetVm.providerRef, targetVm.resources.diskGb);
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
+    const networkMode = normalizeVmNetworkMode(targetVm.networkMode);
+    const networkActivity =
+      networkMode === "dmz"
+        ? await this.ensureInstanceNetworkModeAsync(targetVm.providerRef, networkMode)
+        : `network: ${describeVmNetworkMode(networkMode)}`;
     await this.runAsync(["start", targetVm.providerRef]);
 
     const session = await this.resolveSession(targetVm.providerRef, undefined, {
       // Snapshot launches also reuse an existing filesystem and need an in-guest bootstrap repair.
       requireBootstrapRepairBeforeReady: true,
     });
+    await this.syncGuestDnsProfileAsync(targetVm.providerRef, networkMode);
 
     return {
       lastAction: `Launched from snapshot ${snapshot.label}`,
       activity: [
         `incus: launched ${targetVm.providerRef} from ${snapshot.providerRef}`,
         `template: ${template.name}`,
+        networkActivity,
+        ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
         session ? `vnc: ${session.display}` : "vnc: guest network pending",
-      ],
+      ].filter((entry): entry is string => Boolean(entry)),
       activeWindow: "terminal",
       workspacePath: DEFAULT_GUEST_WORKSPACE,
       session,
@@ -1100,16 +1218,21 @@ class IncusProvider implements DesktopProvider {
     await this.ensureAgentDeviceAsync(vm.providerRef);
 
     let session: VmSession | null = null;
+    const networkMode = normalizeVmNetworkMode(vm.networkMode);
 
     if (wasRunning) {
       await this.runAsync(["start", vm.providerRef]);
       session = await this.resolveSession(vm.providerRef);
+      await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
     }
 
     return {
       lastAction: `Restored ${vm.name} to ${snapshot.label}`,
       activity: [
         `incus: restored ${vm.providerRef} to ${snapshotName}`,
+        ...(wasRunning && networkMode === "dmz"
+          ? [describeGuestDnsProfileActivity(networkMode)]
+          : []),
         wasRunning
           ? session
             ? `vnc: ${session.display}`
@@ -1504,6 +1627,229 @@ class IncusProvider implements DesktopProvider {
 
     await this.runAsync(["config", "device", "remove", instanceName, "agent"]);
     await this.runAsync(addArgs);
+  }
+
+  private async ensureInstanceNetworkModeAsync(
+    instanceName: string,
+    networkMode: VmNetworkMode,
+  ): Promise<string> {
+    const nic = await this.resolvePrimaryNetworkDeviceAsync(instanceName);
+
+    if (!nic) {
+      return `network: ${describeVmNetworkMode(networkMode)}`;
+    }
+
+    if (networkMode !== "dmz") {
+      await this.clearNicSecurityOverridesAsync(instanceName, nic.deviceName);
+      return `network: ${describeVmNetworkMode(networkMode)}`;
+    }
+
+    const aclName = await this.ensureManagedDmzAclAsync(nic.networkName);
+    await this.applyNicSecurityOverridesAsync(instanceName, nic.deviceName, [
+      `security.acls=${aclName}`,
+      "security.acls.default.egress.action=reject",
+      "security.acls.default.ingress.action=reject",
+      "security.port_isolation=true",
+      "security.mac_filtering=true",
+    ]);
+
+    return `network: ${describeVmNetworkMode(networkMode)} via ${aclName}`;
+  }
+
+  private async resolvePrimaryNetworkDeviceAsync(
+    instanceName: string,
+  ): Promise<{ deviceName: string; networkName: string } | null> {
+    const devices = await this.inspectInstanceExpandedDevicesAsync(instanceName);
+    const match = Object.entries(devices).find(([, device]) => {
+      const networkName = device.network ?? device.parent;
+      return device.type === "nic" && typeof networkName === "string" && networkName.length > 0;
+    });
+
+    if (!match) {
+      return null;
+    }
+
+    return {
+      deviceName: match[0],
+      networkName: match[1].network ?? match[1].parent ?? "",
+    };
+  }
+
+  private async inspectNetworkAsync(networkName: string): Promise<IncusNetwork> {
+    const result = await this.runAsync([
+      "query",
+      `/1.0/networks/${encodeURIComponent(networkName)}`,
+    ]);
+
+    return parseJson<IncusNetwork>(result.stdout);
+  }
+
+  private async ensureManagedDmzAclAsync(networkName: string): Promise<string> {
+    const network = await this.inspectNetworkAsync(networkName);
+
+    if (network.managed !== true || network.type !== "bridge") {
+      throw new Error(
+        `DMZ mode requires a managed bridge network, but ${networkName} is not a managed bridge.`,
+      );
+    }
+
+    const bridgeIpv4 = normalizeAclHostAddress(network.config?.["ipv4.address"]);
+    const bridgeIpv6 = normalizeAclHostAddress(network.config?.["ipv6.address"]);
+
+    if (!bridgeIpv4 && !bridgeIpv6) {
+      throw new Error(`Managed bridge ${networkName} does not expose an IPv4 or IPv6 address.`);
+    }
+
+    const aclName = await this.resolveManagedDmzAclNameAsync();
+    await this.upsertNetworkAclAsync(
+      aclName,
+      buildDmzAclPayload({
+        bridgeIpv4,
+        bridgeIpv6,
+        hostAddresses: collectHostAclAddresses(),
+      }),
+    );
+
+    return aclName;
+  }
+
+  private async resolveManagedDmzAclNameAsync(): Promise<string> {
+    const primary = await this.inspectNetworkAclAsync(PARALLAIZE_DMZ_ACL_NAME);
+
+    if (primary) {
+      return PARALLAIZE_DMZ_ACL_NAME;
+    }
+
+    const legacy = await this.inspectNetworkAclAsync(LEGACY_PARALLAIZE_DMZ_ACL_NAME);
+
+    if (legacy?.config["user.parallaize.managed"] === "true") {
+      return LEGACY_PARALLAIZE_DMZ_ACL_NAME;
+    }
+
+    return PARALLAIZE_DMZ_ACL_NAME;
+  }
+
+  private async inspectNetworkAclAsync(
+    aclName: string,
+  ): Promise<IncusNetworkAclPayload | null> {
+    const result = await this.executeAsync([
+      "query",
+      `/1.0/network-acls/${encodeURIComponent(aclName)}`,
+    ]);
+
+    if (result.status !== 0) {
+      return null;
+    }
+
+    return parseJson<IncusNetworkAclPayload>(result.stdout);
+  }
+
+  private async upsertNetworkAclAsync(
+    aclName: string,
+    payload: IncusNetworkAclPayload,
+  ): Promise<void> {
+    if (!(await this.inspectNetworkAclAsync(aclName))) {
+      await this.runAsync([
+        "network",
+        "acl",
+        "create",
+        aclName,
+        "--description",
+        payload.description,
+      ]);
+    }
+
+    await this.runAsync([
+      "query",
+      "-X",
+      "PUT",
+      "--wait",
+      "-d",
+      JSON.stringify(payload),
+      `/1.0/network-acls/${encodeURIComponent(aclName)}`,
+    ]);
+  }
+
+  private async applyNicSecurityOverridesAsync(
+    instanceName: string,
+    deviceName: string,
+    values: string[],
+  ): Promise<void> {
+    const overrideArgs = [
+      "config",
+      "device",
+      "override",
+      instanceName,
+      deviceName,
+      ...values,
+    ];
+    const result = await this.executeAsync(overrideArgs);
+
+    if (result.status === 0) {
+      return;
+    }
+
+    const detail = `${result.stderr}\n${result.stdout}`;
+
+    if (!detail.includes("already exists")) {
+      throw new Error(formatCommandFailure(overrideArgs, result));
+    }
+
+    await this.runAsync([
+      "config",
+      "device",
+      "set",
+      instanceName,
+      deviceName,
+      ...values,
+    ]);
+  }
+
+  private async clearNicSecurityOverridesAsync(
+    instanceName: string,
+    deviceName: string,
+  ): Promise<void> {
+    for (const key of [
+      "security.acls",
+      "security.acls.default.egress.action",
+      "security.acls.default.ingress.action",
+      "security.port_isolation",
+      "security.mac_filtering",
+    ]) {
+      const args = [
+        "config",
+        "device",
+        "unset",
+        instanceName,
+        deviceName,
+        key,
+      ];
+      const result = await this.executeAsync(args);
+
+      if (result.status === 0) {
+        continue;
+      }
+
+      const failure = formatCommandFailure(args, result);
+
+      if (!isMissingDeviceConfigFailure(failure)) {
+        throw new Error(failure);
+      }
+    }
+  }
+
+  private async syncGuestDnsProfileAsync(
+    instanceName: string,
+    networkMode: VmNetworkMode,
+  ): Promise<void> {
+    await this.runAsync([
+      "exec",
+      instanceName,
+      "--",
+      "sh",
+      "-lc",
+      buildGuestDnsProfileScript(networkMode),
+    ]);
   }
 
   private stopInstance(instanceName: string): void {
@@ -3401,6 +3747,218 @@ function buildProbeNextSteps(status: ProviderState["hostStatus"]): string[] {
   }
 }
 
+function normalizeVmNetworkMode(mode: VmNetworkMode | undefined): VmNetworkMode {
+  return mode === "dmz" ? "dmz" : "default";
+}
+
+function describeVmNetworkMode(mode: VmNetworkMode | undefined): string {
+  return normalizeVmNetworkMode(mode) === "dmz" ? "dmz" : "default bridge";
+}
+
+function describeGuestDnsProfileActivity(mode: VmNetworkMode): string {
+  return normalizeVmNetworkMode(mode) === "dmz"
+    ? `dns: public resolvers ${PARALLAIZE_DMZ_PUBLIC_DNS_SERVERS.join(", ")}`
+    : "dns: guest defaults restored";
+}
+
+function describePendingGuestDnsProfileActivity(mode: VmNetworkMode): string {
+  return normalizeVmNetworkMode(mode) === "dmz"
+    ? `dns: public resolvers ${PARALLAIZE_DMZ_PUBLIC_DNS_SERVERS.join(", ")} will apply on next boot`
+    : "dns: guest defaults will restore on next boot";
+}
+
+function normalizeAclHostAddress(addressWithPrefix: string | undefined): string | null {
+  const value = addressWithPrefix?.trim();
+
+  if (!value || value === "none") {
+    return null;
+  }
+
+  const [address] = value.split("/", 2);
+
+  if (!address) {
+    return null;
+  }
+
+  return address.includes(":") ? `${address}/128` : `${address}/32`;
+}
+
+function collectHostAclAddresses(): string[] {
+  const addresses = new Set<string>();
+
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (!entry || entry.internal) {
+        continue;
+      }
+
+      if (entry.family !== "IPv4" && entry.family !== "IPv6") {
+        continue;
+      }
+
+      const normalized = normalizeAclHostAddress(entry.cidr ?? entry.address);
+
+      if (!normalized) {
+        continue;
+      }
+
+      addresses.add(normalized);
+    }
+  }
+
+  return [...addresses].sort((left, right) => left.localeCompare(right));
+}
+
+function buildDmzAclPayload(input: {
+  bridgeIpv4: string | null;
+  bridgeIpv6: string | null;
+  hostAddresses: string[];
+}): IncusNetworkAclPayload {
+  const egress: IncusNetworkAclRule[] = [];
+  const ingress: IncusNetworkAclRule[] = [];
+  const seenEgress = new Set<string>();
+  const seenIngress = new Set<string>();
+  const hostDestinations = new Set(input.hostAddresses);
+
+  if (input.bridgeIpv4) {
+    hostDestinations.add(input.bridgeIpv4);
+    pushAclRule(
+      ingress,
+      seenIngress,
+      {
+        action: "allow",
+        source: input.bridgeIpv4,
+        protocol: "tcp",
+        state: "enabled",
+      },
+    );
+  }
+
+  if (input.bridgeIpv6) {
+    hostDestinations.add(input.bridgeIpv6);
+    pushAclRule(
+      ingress,
+      seenIngress,
+      {
+        action: "allow",
+        source: input.bridgeIpv6,
+        protocol: "tcp",
+        state: "enabled",
+      },
+    );
+  }
+
+  for (const destination of [...hostDestinations].sort((left, right) => left.localeCompare(right))) {
+    pushAclRule(
+      egress,
+      seenEgress,
+      {
+        action: "drop",
+        destination,
+        state: "enabled",
+      },
+    );
+  }
+
+  for (const destination of [
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+  ]) {
+    pushAclRule(
+      egress,
+      seenEgress,
+      {
+        action: "drop",
+        destination,
+        state: "enabled",
+      },
+    );
+  }
+
+  pushAclRule(
+    egress,
+    seenEgress,
+    {
+      action: "allow",
+      destination: "0.0.0.0/0",
+      state: "enabled",
+    },
+  );
+  pushAclRule(
+    egress,
+    seenEgress,
+    {
+      action: "allow",
+      destination: "::/0",
+      state: "enabled",
+    },
+  );
+
+  return {
+    config: {
+      "user.parallaize.managed": "true",
+      "user.parallaize.profile": "dmz",
+    },
+    description:
+      "Managed by Parallaize for DMZ VM egress and host-initiated control-plane access.",
+    egress,
+    ingress,
+  };
+}
+
+function buildGuestDnsProfileScript(networkMode: VmNetworkMode): string {
+  const normalizedMode = normalizeVmNetworkMode(networkMode);
+  const publicDnsServers = PARALLAIZE_DMZ_PUBLIC_DNS_SERVERS.join(" ");
+
+  if (normalizedMode === "dmz") {
+    return [
+      "set -eu",
+      "install -d -m 0755 /etc/systemd/resolved.conf.d",
+      `cat <<'EOF' > ${PARALLAIZE_DMZ_GUEST_DNS_DROPIN_PATH}`,
+      "[Resolve]",
+      `DNS=${publicDnsServers}`,
+      "Domains=~.",
+      "EOF",
+      "ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf",
+      "systemctl restart systemd-resolved.service",
+      "resolvectl flush-caches >/dev/null 2>&1 || true",
+    ].join("\n");
+  }
+
+  return [
+    "set -eu",
+    `rm -f ${PARALLAIZE_DMZ_GUEST_DNS_DROPIN_PATH}`,
+    "ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf",
+    "systemctl restart systemd-resolved.service",
+    "resolvectl flush-caches >/dev/null 2>&1 || true",
+  ].join("\n");
+}
+
+function pushAclRule(
+  rules: IncusNetworkAclRule[],
+  seen: Set<string>,
+  rule: IncusNetworkAclRule,
+): void {
+  const key = JSON.stringify(rule);
+
+  if (seen.has(key)) {
+    return;
+  }
+
+  seen.add(key);
+  rules.push(rule);
+}
+
 function formatCommandFailure(args: string[], result: CommandResult): string {
   if (result.error?.message.includes("ENOENT")) {
     return "Incus mode requested, but the incus CLI was not found on this host.";
@@ -3427,6 +3985,15 @@ function isMissingInstanceFailure(message: string): boolean {
   return (
     message.includes("Instance not found") ||
     message.includes("Failed to fetch instance")
+  );
+}
+
+function isMissingDeviceConfigFailure(message: string): boolean {
+  return (
+    message.includes("The device doesn't exist") ||
+    message.includes("Device doesn't exist") ||
+    message.includes("Unknown configuration key") ||
+    isMissingInstanceFailure(message)
   );
 }
 

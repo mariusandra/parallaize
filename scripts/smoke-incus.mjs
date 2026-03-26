@@ -36,9 +36,10 @@ async function main() {
   try {
     logStep(`Using control plane ${CONTROL_URL} and public entrypoint ${PUBLIC_URL}`);
     await assertApiHealthy();
+    const templateResources = await getTemplateResources();
 
     vmName = `${VM_NAME_PREFIX}-${Date.now()}`;
-    const createdVm = await createVm(vmName);
+    const createdVm = await createVm(vmName, templateResources);
     vmId = createdVm.id;
     logStep(`Created ${vmId} (${vmName})`);
 
@@ -107,7 +108,7 @@ async function assertApiHealthy() {
   }
 }
 
-async function createVm(name) {
+async function createVm(name, templateResources) {
   const response = await fetchJson("/api/vms", {
     method: "POST",
     body: JSON.stringify({
@@ -116,12 +117,27 @@ async function createVm(name) {
       resources: {
         cpu: 2,
         ramMb: 4096,
-        diskGb: 30,
+        diskGb: Math.max(30, templateResources.diskGb ?? 30),
       },
     }),
   });
 
   return response.data;
+}
+
+async function getTemplateResources() {
+  const summary = await fetchJson("/api/summary");
+  const template = summary.data.templates.find((entry) => entry.id === TEMPLATE_ID);
+
+  if (!template) {
+    throw new Error(`Smoke template ${TEMPLATE_ID} was not found.`);
+  }
+
+  return template.defaultResources ?? {
+    cpu: 2,
+    ramMb: 4096,
+    diskGb: 30,
+  };
 }
 
 async function stopVm(vmId) {

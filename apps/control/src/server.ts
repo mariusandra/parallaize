@@ -1,6 +1,6 @@
 import { createReadStream, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { extname, join, normalize } from "node:path";
@@ -28,6 +28,7 @@ import type {
   UpdateTemplateInput,
   UpdateVmInput,
   UpdateVmForwardedPortsInput,
+  UpdateVmNetworkInput,
   VmDetail,
   VmLogsSnapshot,
   VmResolutionControlSnapshot,
@@ -65,9 +66,8 @@ const staticRoot = join(config.appHome, "dist", "apps", "web", "static");
 const htmlPath = join(staticRoot, "index.html");
 const faviconPath = join(staticRoot, "favicon.svg");
 const sessionCookieName = "parallaize_session";
-const sessionMaxAgeSeconds = 60 * 60 * 24 * 7;
 const resolutionControlLeaseTtlMs = 5_000;
-const activeSessionTokens = new Set<string>();
+const maxAdminSessions = 32;
 const activeSockets = new Set<Socket>();
 const activeEventStreams = new Set<ServerResponse>();
 const resolutionControlLeases = new Map<string, ResolutionControlLeaseRecord>();
@@ -77,6 +77,17 @@ interface ResolutionControlLeaseRecord {
   claimedAtMs: number;
   heartbeatAtMs: number;
   vmId: string;
+}
+
+interface ParsedSessionCookie {
+  sessionId: string;
+  secret: string;
+}
+
+interface AuthContext {
+  sessionId: string | null;
+  setCookie: string | null;
+  status: AuthStatus;
 }
 
 const server = createServer(async (request, response) => {
@@ -89,9 +100,11 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "GET" && url.pathname === "/api/auth/status") {
+      const authContext = resolveAuthContext(request);
+      applyAuthContext(response, authContext);
       return writeJson<AuthStatus>(response, 200, {
         ok: true,
-        data: buildAuthStatus(request),
+        data: authContext.status,
       });
     }
 
@@ -127,7 +140,10 @@ const server = createServer(async (request, response) => {
       }
     }
 
-    if (!isAuthorized(request)) {
+    const authContext = resolveAuthContext(request);
+    applyAuthContext(response, authContext);
+
+    if (!authContext.status.authenticated) {
       writeAuthRequired(response);
       return;
     }
@@ -261,6 +277,13 @@ const server = createServer(async (request, response) => {
     if (method === "POST" && forwardsMatch) {
       const payload = await readJsonBody<UpdateVmForwardedPortsInput>(request);
       manager.updateVmForwardedPorts(forwardsMatch[1], payload);
+      return writeAccepted(response);
+    }
+
+    const networkModeMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/network$/);
+    if (method === "POST" && networkModeMatch) {
+      const payload = await readJsonBody<UpdateVmNetworkInput>(request);
+      await manager.setVmNetworkMode(networkModeMatch[1], payload);
       return writeAccepted(response);
     }
 
@@ -398,7 +421,7 @@ server.on("connection", (socket) => {
 });
 
 server.on("upgrade", (request, socket, head) => {
-  if (!isAuthorized(request)) {
+  if (!resolveAuthContext(request).status.authenticated) {
     writeSocketAuthRequired(socket as Socket);
     return;
   }
@@ -421,7 +444,7 @@ server.listen(config.port, config.host, () => {
   );
   if (config.adminPassword) {
     process.stdout.write(
-      `single-admin auth enabled for ${config.adminUsername} (cookie session login)\n`,
+      `single-admin auth enabled for ${config.adminUsername} (persisted cookie sessions)\n`,
     );
   }
 });
@@ -568,32 +591,98 @@ function writeJson<T>(
   response.end(`${JSON.stringify(payload)}\n`);
 }
 
-function isAuthorized(request: IncomingMessage): boolean {
-  return resolveAuthMode(request) !== "unauthenticated";
+function applyAuthContext(response: ServerResponse, authContext: AuthContext): void {
+  if (authContext.setCookie) {
+    response.setHeader("set-cookie", authContext.setCookie);
+  }
 }
 
-function resolveAuthMode(request: IncomingMessage): AuthStatus["mode"] {
+function resolveAuthContext(request: IncomingMessage): AuthContext {
   if (!config.adminPassword) {
-    return "none";
+    return {
+      sessionId: null,
+      setCookie: null,
+      status: buildNoAuthStatus(),
+    };
   }
 
-  const sessionToken = parseCookies(request.headers.cookie)[sessionCookieName];
+  const sessionCookie = parseCookies(request.headers.cookie)[sessionCookieName];
 
-  if (sessionToken && activeSessionTokens.has(sessionToken)) {
-    return "session";
+  if (!sessionCookie) {
+    return {
+      sessionId: null,
+      setCookie: null,
+      status: buildUnauthenticatedStatus(),
+    };
   }
 
-  return "unauthenticated";
-}
+  const parsedSession = parseSessionCookie(sessionCookie);
 
-function buildAuthStatus(request: IncomingMessage): AuthStatus {
-  const mode = resolveAuthMode(request);
+  if (!parsedSession) {
+    return {
+      sessionId: null,
+      setCookie: clearSessionCookie(),
+      status: buildUnauthenticatedStatus(),
+    };
+  }
+
+  const now = new Date();
+  const credentialFingerprint = buildCredentialFingerprint(
+    config.adminUsername,
+    config.adminPassword,
+  );
+  let sessionId: string | null = null;
+  let setCookie: string | null = null;
+
+  store.update((draft) => {
+    let dirty = pruneAdminSessions(draft, now, credentialFingerprint);
+    const session = draft.adminSessions.find((entry) => entry.id === parsedSession.sessionId);
+
+    if (!session) {
+      return dirty;
+    }
+
+    if (
+      !safeEqual(hashSessionSecret(parsedSession.secret), session.secretHash) ||
+      !safeEqual(session.username, config.adminUsername)
+    ) {
+      return dirty;
+    }
+
+    sessionId = session.id;
+
+    if (shouldRotateAdminSession(session, now)) {
+      const rotatedSecret = createSessionSecret();
+      const nowIso = now.toISOString();
+
+      session.secretHash = hashSessionSecret(rotatedSecret);
+      session.lastAuthenticatedAt = nowIso;
+      session.lastRotatedAt = nowIso;
+      session.idleExpiresAt = addSeconds(now, config.sessionIdleTimeoutSeconds).toISOString();
+      setCookie = serializeSessionCookie(buildSessionCookieValue(session.id, rotatedSecret));
+      dirty = true;
+    }
+
+    return dirty;
+  });
+
+  if (!sessionId) {
+    return {
+      sessionId: null,
+      setCookie: clearSessionCookie(),
+      status: buildUnauthenticatedStatus(),
+    };
+  }
 
   return {
-    authEnabled: Boolean(config.adminPassword),
-    authenticated: mode !== "unauthenticated",
-    username: mode === "session" ? config.adminUsername : null,
-    mode,
+    sessionId,
+    setCookie,
+    status: {
+      authEnabled: true,
+      authenticated: true,
+      username: config.adminUsername,
+      mode: "session",
+    },
   };
 }
 
@@ -604,7 +693,7 @@ async function handleLogin(
   if (!config.adminPassword) {
     writeJson<AuthStatus>(response, 200, {
       ok: true,
-      data: buildAuthStatus(request),
+      data: buildNoAuthStatus(),
     });
     return;
   }
@@ -622,9 +711,29 @@ async function handleLogin(
     return;
   }
 
-  const token = createSessionToken();
-  activeSessionTokens.clear();
-  activeSessionTokens.add(token);
+  const now = new Date();
+  const sessionId = createSessionId();
+  const sessionSecret = createSessionSecret();
+  const credentialFingerprint = buildCredentialFingerprint(
+    config.adminUsername,
+    config.adminPassword,
+  );
+
+  store.update((draft) => {
+    pruneAdminSessions(draft, now, credentialFingerprint);
+    draft.adminSessions.unshift({
+      id: sessionId,
+      username: config.adminUsername,
+      credentialFingerprint,
+      secretHash: hashSessionSecret(sessionSecret),
+      createdAt: now.toISOString(),
+      lastAuthenticatedAt: now.toISOString(),
+      lastRotatedAt: now.toISOString(),
+      expiresAt: addSeconds(now, config.sessionMaxAgeSeconds).toISOString(),
+      idleExpiresAt: addSeconds(now, config.sessionIdleTimeoutSeconds).toISOString(),
+    });
+    draft.adminSessions = draft.adminSessions.slice(0, maxAdminSessions);
+  });
 
   writeJson<AuthStatus>(
     response,
@@ -639,7 +748,7 @@ async function handleLogin(
       },
     },
     {
-      "set-cookie": serializeSessionCookie(token),
+      "set-cookie": serializeSessionCookie(buildSessionCookieValue(sessionId, sessionSecret)),
     },
   );
 }
@@ -648,10 +757,21 @@ function handleLogout(
   request: IncomingMessage,
   response: ServerResponse,
 ): void {
-  const sessionToken = parseCookies(request.headers.cookie)[sessionCookieName];
+  const parsedSession = parseSessionCookie(
+    parseCookies(request.headers.cookie)[sessionCookieName] ?? "",
+  );
 
-  if (sessionToken) {
-    activeSessionTokens.delete(sessionToken);
+  if (parsedSession) {
+    store.update((draft) => {
+      const nextSessions = draft.adminSessions.filter((entry) => entry.id !== parsedSession.sessionId);
+
+      if (nextSessions.length === draft.adminSessions.length) {
+        return false;
+      }
+
+      draft.adminSessions = nextSessions;
+      return true;
+    });
   }
 
   writeJson<AuthStatus>(
@@ -659,12 +779,7 @@ function handleLogout(
     200,
     {
       ok: true,
-      data: {
-        authEnabled: Boolean(config.adminPassword),
-        authenticated: !config.adminPassword,
-        username: null,
-        mode: config.adminPassword ? "unauthenticated" : "none",
-      },
+      data: config.adminPassword ? buildUnauthenticatedStatus() : buildNoAuthStatus(),
     },
     {
       "set-cookie": clearSessionCookie(),
@@ -699,12 +814,186 @@ function writeSocketAuthRequired(socket: Socket): void {
   socket.destroy();
 }
 
-function createSessionToken(): string {
+function buildNoAuthStatus(): AuthStatus {
+  return {
+    authEnabled: false,
+    authenticated: true,
+    username: null,
+    mode: "none",
+  };
+}
+
+function buildUnauthenticatedStatus(): AuthStatus {
+  return {
+    authEnabled: true,
+    authenticated: false,
+    username: null,
+    mode: "unauthenticated",
+  };
+}
+
+function createSessionId(): string {
+  return randomBytes(12).toString("base64url");
+}
+
+function createSessionSecret(): string {
   return randomBytes(24).toString("base64url");
 }
 
+function buildSessionCookieValue(sessionId: string, secret: string): string {
+  return `${sessionId}.${secret}`;
+}
+
+function parseSessionCookie(raw: string): ParsedSessionCookie | null {
+  const separatorIndex = raw.indexOf(".");
+
+  if (separatorIndex <= 0 || separatorIndex === raw.length - 1) {
+    return null;
+  }
+
+  return {
+    sessionId: raw.slice(0, separatorIndex),
+    secret: raw.slice(separatorIndex + 1),
+  };
+}
+
+function hashSessionSecret(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+function buildCredentialFingerprint(username: string, password: string): string {
+  return createHash("sha256").update(`${username}\n${password}`).digest("hex");
+}
+
+function shouldRotateAdminSession(
+  session: {
+    idleExpiresAt: string;
+    lastRotatedAt: string;
+  },
+  now: Date,
+): boolean {
+  const lastRotatedAtMs = Date.parse(session.lastRotatedAt);
+  const idleExpiresAtMs = Date.parse(session.idleExpiresAt);
+
+  if (!Number.isFinite(lastRotatedAtMs) || !Number.isFinite(idleExpiresAtMs)) {
+    return true;
+  }
+
+  return (
+    now.getTime() >= lastRotatedAtMs + config.sessionRotationSeconds * 1000 ||
+    now.getTime() >= idleExpiresAtMs - config.sessionRotationSeconds * 1000
+  );
+}
+
+function pruneAdminSessions(
+  draft: {
+    adminSessions: Array<{
+      credentialFingerprint: string;
+      createdAt: string;
+      expiresAt: string;
+      idleExpiresAt: string;
+      lastAuthenticatedAt: string;
+      lastRotatedAt: string;
+      secretHash: string;
+      username: string;
+      id: string;
+    }>;
+  },
+  now: Date,
+  credentialFingerprint: string,
+): boolean {
+  const nextSessions = draft.adminSessions
+    .filter(
+      (session) =>
+        session.credentialFingerprint === credentialFingerprint &&
+        !isExpiredAdminSession(session, now),
+    )
+    .sort((left, right) => {
+      const rightMs = Date.parse(right.lastAuthenticatedAt);
+      const leftMs = Date.parse(left.lastAuthenticatedAt);
+      return (Number.isFinite(rightMs) ? rightMs : 0) - (Number.isFinite(leftMs) ? leftMs : 0);
+    })
+    .slice(0, maxAdminSessions);
+
+  if (
+    nextSessions.length === draft.adminSessions.length &&
+    nextSessions.every((session, index) => sameAdminSessionRecord(session, draft.adminSessions[index]))
+  ) {
+    return false;
+  }
+
+  draft.adminSessions = nextSessions;
+  return true;
+}
+
+function sameAdminSessionRecord(
+  left: {
+    credentialFingerprint: string;
+    createdAt: string;
+    expiresAt: string;
+    idleExpiresAt: string;
+    lastAuthenticatedAt: string;
+    lastRotatedAt: string;
+    secretHash: string;
+    username: string;
+    id: string;
+  } | undefined,
+  right: {
+    credentialFingerprint: string;
+    createdAt: string;
+    expiresAt: string;
+    idleExpiresAt: string;
+    lastAuthenticatedAt: string;
+    lastRotatedAt: string;
+    secretHash: string;
+    username: string;
+    id: string;
+  } | undefined,
+): boolean {
+  return (
+    Boolean(left) &&
+    Boolean(right) &&
+    left?.id === right?.id &&
+    left?.username === right?.username &&
+    left?.credentialFingerprint === right?.credentialFingerprint &&
+    left?.secretHash === right?.secretHash &&
+    left?.createdAt === right?.createdAt &&
+    left?.lastAuthenticatedAt === right?.lastAuthenticatedAt &&
+    left?.lastRotatedAt === right?.lastRotatedAt &&
+    left?.expiresAt === right?.expiresAt &&
+    left?.idleExpiresAt === right?.idleExpiresAt
+  );
+}
+
+function isExpiredAdminSession(
+  session: {
+    createdAt: string;
+    expiresAt: string;
+    idleExpiresAt: string;
+  },
+  now: Date,
+): boolean {
+  const createdAtMs = Date.parse(session.createdAt);
+  const expiresAtMs = Date.parse(session.expiresAt);
+  const idleExpiresAtMs = Date.parse(session.idleExpiresAt);
+
+  if (
+    !Number.isFinite(createdAtMs) ||
+    !Number.isFinite(expiresAtMs) ||
+    !Number.isFinite(idleExpiresAtMs)
+  ) {
+    return true;
+  }
+
+  return now.getTime() >= expiresAtMs || now.getTime() >= idleExpiresAtMs;
+}
+
+function addSeconds(date: Date, seconds: number): Date {
+  return new Date(date.getTime() + seconds * 1000);
+}
+
 function serializeSessionCookie(token: string): string {
-  return `${sessionCookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionMaxAgeSeconds}`;
+  return `${sessionCookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${config.sessionMaxAgeSeconds}`;
 }
 
 function clearSessionCookie(): string {

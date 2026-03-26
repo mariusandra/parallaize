@@ -9,6 +9,8 @@ import {
   readClipboardTransferText,
   readRfbFramebufferSize,
   resolveRfbConstructor,
+  resolveClipboardShortcutAction,
+  sendGuestCopyShortcut,
   sendGuestText,
   viewportSettingsForMode,
   writeBrowserClipboardText,
@@ -356,10 +358,48 @@ export function NoVncViewport({
       setTransientClipboardNotice("Sent local text to the guest.", "success");
     }
 
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.target === hiddenPasteCaptureRef.current) {
+        return;
+      }
+
+      const action = resolveClipboardShortcutAction(
+        event,
+        globalThis.navigator?.platform,
+      );
+
+      if (!action) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (action === "paste") {
+        void handlePasteFromBrowserClipboard();
+        return;
+      }
+
+      const rfb = rfbRef.current;
+
+      if (!rfb || connectionState !== "connected") {
+        setTransientClipboardNotice(
+          "Desktop not ready yet. Retry once the session reconnects.",
+          "warning",
+        );
+        return;
+      }
+
+      sendGuestCopyShortcut(rfb);
+      focusRemoteDesktop();
+    }
+
     mountNode.addEventListener("paste", handlePaste);
+    mountNode.addEventListener("keydown", handleKeyDown);
 
     return () => {
       mountNode.removeEventListener("paste", handlePaste);
+      mountNode.removeEventListener("keydown", handleKeyDown);
     };
   }, [clipboardEnabled, connectionState]);
 
@@ -676,7 +716,7 @@ export function NoVncViewport({
                 return;
               }
 
-      setTransientClipboardNotice("Sent local text to the guest.", "success");
+              setTransientClipboardNotice("Sent local text to the guest.", "success");
             }}
             spellCheck={false}
             style={{

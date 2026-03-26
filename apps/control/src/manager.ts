@@ -26,10 +26,12 @@ import type {
   UpdateTemplateInput,
   UpdateVmInput,
   UpdateVmForwardedPortsInput,
+  UpdateVmNetworkInput,
   VmDetail,
   VmCommandResult,
   VmInstance,
   VmLogsSnapshot,
+  VmNetworkMode,
   VmPortForward,
 } from "../../../packages/shared/src/types.js";
 import type {
@@ -251,7 +253,7 @@ export class DesktopManager {
     let createdJob: ActionJob | null = null;
     let launchTemplate: EnvironmentTemplate | null = null;
 
-    const { state } = this.store.update((draft) => {
+    this.store.update((draft) => {
       const template = requireTemplate(draft, input.templateId);
       validateResources(input.resources);
       validateTemplateCreateResources(template, input.resources);
@@ -268,6 +270,7 @@ export class DesktopManager {
         name,
         input.resources,
         input.forwardedPorts ?? template.defaultForwardedPorts,
+        normalizeVmNetworkMode(input.networkMode ?? template.defaultNetworkMode),
         draft.provider.kind,
         "creating",
       );
@@ -299,8 +302,16 @@ export class DesktopManager {
 
     void this.runJob(jobRecord.id, async (report) => {
       try {
-        const template = launchTemplate ?? requireTemplate(state, vmRecord.templateId);
-        const mutation = await this.provider.createVm(vmRecord, template, report);
+        const templateRecord = requireTemplate(this.store.load(), vmRecord.templateId);
+        const template =
+          launchTemplate
+            ? {
+                ...templateRecord,
+                ...launchTemplate,
+                snapshotIds: [...templateRecord.snapshotIds],
+              }
+            : templateRecord;
+        const mutation = await this.createVmWithTemplateRecovery(vmRecord, template, report);
 
         this.store.update((draft) => {
           const vm = this.requireVm(draft, vmRecord.id);
@@ -339,6 +350,7 @@ export class DesktopManager {
         cloneName,
         source.resources,
         source.forwardedPorts.map(copyForwardAsTemplatePort),
+        normalizeVmNetworkMode(source.networkMode ?? template.defaultNetworkMode),
         draft.provider.kind,
         "creating",
       );
@@ -575,6 +587,7 @@ export class DesktopManager {
         name,
         snapshot.resources,
         source.forwardedPorts.map(copyForwardAsTemplatePort),
+        normalizeVmNetworkMode(source.networkMode ?? template.defaultNetworkMode),
         draft.provider.kind,
         "creating",
       );
@@ -759,6 +772,7 @@ export class DesktopManager {
           existingTemplate.defaultForwardedPorts = current.forwardedPorts.map(
             copyForwardAsTemplatePort,
           );
+          existingTemplate.defaultNetworkMode = normalizeVmNetworkMode(current.networkMode);
           existingTemplate.snapshotIds.unshift(snapshot.id);
           existingTemplate.tags = Array.from(
             new Set(["captured", slugify(current.name), ...existingTemplate.tags]),
@@ -773,6 +787,7 @@ export class DesktopManager {
             launchSource,
             defaultResources: { ...current.resources },
             defaultForwardedPorts: current.forwardedPorts.map(copyForwardAsTemplatePort),
+            defaultNetworkMode: normalizeVmNetworkMode(current.networkMode),
             initCommands: [...(detail.template?.initCommands ?? [])],
             tags: ["captured", slugify(current.name)],
             notes: captureNotes,
@@ -823,6 +838,7 @@ export class DesktopManager {
         defaultForwardedPorts: sourceTemplate.defaultForwardedPorts.map(
           copyTemplatePortForward,
         ),
+        defaultNetworkMode: normalizeVmNetworkMode(sourceTemplate.defaultNetworkMode),
         initCommands: nextInitCommands,
         tags: Array.from(
           new Set([
@@ -1008,6 +1024,27 @@ export class DesktopManager {
     }
 
     await this.provider.setDisplayResolution(vm, width, height);
+  }
+
+  async setVmNetworkMode(vmId: string, input: UpdateVmNetworkInput): Promise<void> {
+    const vm = this.getVmDetail(vmId).vm;
+    this.ensureActiveProvider(vm);
+    const nextNetworkMode = normalizeVmNetworkMode(input.networkMode);
+    const currentNetworkMode = normalizeVmNetworkMode(vm.networkMode);
+
+    if (currentNetworkMode === nextNetworkMode) {
+      return;
+    }
+
+    const mutation = await this.provider.setNetworkMode(vm, nextNetworkMode);
+
+    this.store.update((draft) => {
+      const current = this.requireVm(draft, vmId);
+      current.networkMode = nextNetworkMode;
+      applyProviderMutation(current, mutation);
+    });
+
+    this.publish();
   }
 
   updateVmForwardedPorts(vmId: string, input: UpdateVmForwardedPortsInput): void {
@@ -1425,6 +1462,42 @@ export class DesktopManager {
       listener(summary);
     }
   }
+
+  private async createVmWithTemplateRecovery(
+    vm: VmInstance,
+    template: EnvironmentTemplate,
+    report?: JobProgressReporter,
+  ): Promise<ProviderMutation> {
+    try {
+      return await this.provider.createVm(vm, template, report);
+    } catch (error) {
+      const fallbackSnapshot = resolveTemplateCreateFallbackSnapshot(
+        this.store.load(),
+        template,
+        vm,
+        error,
+      );
+
+      if (!fallbackSnapshot) {
+        throw error;
+      }
+
+      report?.(`Recovering from template snapshot ${fallbackSnapshot.label}`, 28);
+      const mutation = await this.provider.launchVmFromSnapshot(
+        fallbackSnapshot,
+        vm,
+        template,
+      );
+
+      return {
+        ...mutation,
+        activity: [
+          `template image missing: recovered from snapshot ${fallbackSnapshot.label}`,
+          ...mutation.activity,
+        ],
+      };
+    }
+  }
 }
 
 function buildVmRecord(
@@ -1433,6 +1506,7 @@ function buildVmRecord(
   name: string,
   resources: CreateVmInput["resources"],
   forwardedPorts: TemplatePortForward[],
+  networkMode: VmNetworkMode,
   provider: ProviderState["kind"],
   status: VmInstance["status"],
 ): VmInstance {
@@ -1456,6 +1530,7 @@ function buildVmRecord(
     screenSeed: state.sequence * 47,
     activeWindow: "editor",
     workspacePath: provider === "mock" ? `/srv/workspaces/${slugify(name)}` : "/root",
+    networkMode,
     session:
       provider === "mock"
         ? buildSyntheticSession()
@@ -1463,6 +1538,7 @@ function buildVmRecord(
     forwardedPorts: buildVmForwardedPorts(id, forwardedPorts),
     activityLog: [
       `template: ${template.name}`,
+      `network: ${describeVmNetworkMode(networkMode)}`,
       `status: ${status}`,
     ],
     commandHistory: [],
@@ -1757,6 +1833,46 @@ function resolveTemplateForSnapshot(
   );
 }
 
+function resolveTemplateCreateFallbackSnapshot(
+  state: AppState,
+  template: EnvironmentTemplate,
+  vm: VmInstance,
+  error: unknown,
+): Snapshot | null {
+  if (!isMissingCapturedTemplateLaunchSourceError(template, error)) {
+    return null;
+  }
+
+  const candidates = state.snapshots
+    .filter(
+      (snapshot) =>
+        snapshot.templateId === template.id || template.snapshotIds.includes(snapshot.id),
+    )
+    .sort((left, right) => {
+      const rightMs = Date.parse(right.createdAt);
+      const leftMs = Date.parse(left.createdAt);
+      return (Number.isFinite(rightMs) ? rightMs : 0) - (Number.isFinite(leftMs) ? leftMs : 0);
+    });
+
+  return candidates.find((snapshot) => snapshot.resources.diskGb <= vm.resources.diskGb) ?? null;
+}
+
+function isMissingCapturedTemplateLaunchSourceError(
+  template: EnvironmentTemplate,
+  error: unknown,
+): boolean {
+  if (!template.launchSource.startsWith("parallaize-template-")) {
+    return false;
+  }
+
+  const message = errorMessage(error);
+
+  return (
+    message.includes(`Image "${template.launchSource}" not found`) ||
+    message.includes(`Image '${template.launchSource}' not found`)
+  );
+}
+
 function buildOrphanedSnapshotTemplate(snapshot: Snapshot): EnvironmentTemplate {
   const now = nowIso();
 
@@ -1836,6 +1952,14 @@ function validateTemplateCreateResources(
       `Template ${template.name} requires at least ${minimumDiskGb} GB disk because it was captured from a ${minimumDiskGb} GB workspace.`,
     );
   }
+}
+
+function normalizeVmNetworkMode(mode: VmNetworkMode | undefined): VmNetworkMode {
+  return mode === "dmz" ? "dmz" : "default";
+}
+
+function describeVmNetworkMode(mode: VmNetworkMode | undefined): string {
+  return normalizeVmNetworkMode(mode) === "dmz" ? "dmz" : "default bridge";
 }
 
 function buildProviderRef(vmId: string, name: string): string {

@@ -285,6 +285,9 @@ function buildConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     guestInotifyMaxUserInstances: 2_048,
     adminUsername: "admin",
     adminPassword: null,
+    sessionMaxAgeSeconds: 60 * 60 * 24 * 7,
+    sessionIdleTimeoutSeconds: 60 * 60 * 24,
+    sessionRotationSeconds: 60 * 60 * 6,
     ...overrides,
   };
 }

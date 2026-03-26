@@ -45,9 +45,11 @@ import type {
   TemplatePortForward,
   UpdateTemplateInput,
   UpdateVmInput,
+  UpdateVmNetworkInput,
   VmDetail,
   VmInstance,
   VmLogsSnapshot,
+  VmNetworkMode,
   VmPowerAction,
   VmPortForward,
   VmResolutionControlSnapshot,
@@ -81,6 +83,7 @@ interface CreateDraft {
   cpu: string;
   ramGb: string;
   diskGb: string;
+  networkMode: VmNetworkMode;
   initCommands: string;
 }
 
@@ -212,6 +215,7 @@ const emptyCreateDraft: CreateDraft = {
   cpu: "",
   ramGb: "",
   diskGb: "",
+  networkMode: "default",
   initCommands: "",
 };
 
@@ -1609,6 +1613,7 @@ export function DashboardApp(): JSX.Element {
         ramMb: parseRamDraftValue(createDraft.ramGb),
         diskGb: Number(createDraft.diskGb),
       },
+      networkMode: createDraft.networkMode,
       initCommands: parseInitCommandsDraft(createDraft.initCommands),
     };
 
@@ -1633,10 +1638,45 @@ export function DashboardApp(): JSX.Element {
 
   function handleCreateField(field: keyof CreateDraft, value: string): void {
     setCreateDirty(true);
-    setCreateDraft((current) => ({
-      ...current,
-      [field]: value,
-    }));
+    setCreateDraft((current) => {
+      switch (field) {
+        case "templateId":
+          return {
+            ...current,
+            templateId: value,
+          };
+        case "name":
+          return {
+            ...current,
+            name: value,
+          };
+        case "cpu":
+          return {
+            ...current,
+            cpu: value,
+          };
+        case "ramGb":
+          return {
+            ...current,
+            ramGb: value,
+          };
+        case "diskGb":
+          return {
+            ...current,
+            diskGb: value,
+          };
+        case "networkMode":
+          return {
+            ...current,
+            networkMode: normalizeVmNetworkMode(value),
+          };
+        case "initCommands":
+          return {
+            ...current,
+            initCommands: value,
+          };
+      }
+    });
   }
 
   function handleTemplateChange(event: ChangeEvent<HTMLSelectElement>): void {
@@ -2962,6 +3002,34 @@ export function DashboardApp(): JSX.Element {
     );
   }
 
+  async function handleSetNetworkMode(networkMode: VmNetworkMode): Promise<void> {
+    if (!detail) {
+      return;
+    }
+
+    const currentNetworkMode = detail.vm.networkMode ?? "default";
+
+    if (currentNetworkMode === networkMode) {
+      return;
+    }
+
+    const payload = {
+      networkMode,
+    } satisfies UpdateVmNetworkInput;
+
+    await runMutation(
+      `${networkMode === "dmz" ? "Enabling DMZ on" : "Restoring default networking for"} ${detail.vm.name}`,
+      async () => {
+        await postJson(`/api/vms/${detail.vm.id}/network`, payload);
+        await refreshSummary();
+        await refreshDetail(detail.vm.id);
+      },
+      networkMode === "dmz"
+        ? `${detail.vm.name} is now using the DMZ profile.`
+        : `${detail.vm.name} is back on the default bridge.`,
+    );
+  }
+
   async function handleAddForward(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
@@ -3506,6 +3574,7 @@ export function DashboardApp(): JSX.Element {
                 onRemoveForward={handleRemoveForward}
                 onResourceDraftChange={setResourceDraft}
                 onRename={handleRenameVm}
+                onSetNetworkMode={handleSetNetworkMode}
                 onApplyResolution={handleApplyResolution}
                 onResize={handleResize}
                 onSaveForward={handleAddForward}
@@ -3736,12 +3805,6 @@ function RenameDialog({
         </div>
 
         <form className="dialog-panel__form" onSubmit={onSubmit}>
-          <InlineWarningNote title="Shut down first">
-            Clone from a stopped workspace when possible. Cloning a running VM can capture
-            inconsistent app state, and apps like Chrome may come across with open lockfiles or
-            partially written session data.
-          </InlineWarningNote>
-
           <label className="field-shell">
             <span>Name</span>
             <input
@@ -3753,11 +3816,6 @@ function RenameDialog({
               autoFocus
             />
           </label>
-
-          <p className="empty-copy">
-            VM clones copy the current disk state as-is, so template first-boot init commands do
-            not rerun here. Use a template launch when you need to change that script.
-          </p>
 
           <button
             className="button button--primary button--full"
@@ -3939,6 +3997,25 @@ function CreateVmDialog({
               onChange={(value) => onFieldChange("diskGb", value)}
             />
           </div>
+
+          <label className="field-shell">
+            <span>Network</span>
+            <select
+              className="field-input"
+              value={createDraft.networkMode}
+              onChange={(event) => onFieldChange("networkMode", event.target.value)}
+              disabled={busy}
+            >
+              <option value="default">Default bridge</option>
+              <option value="dmz">DMZ</option>
+            </select>
+          </label>
+
+          <p className="empty-copy">
+            Default bridge keeps the workspace on the normal network. DMZ keeps guest internet and
+            public DNS access while restricting host and private-range access unless explicitly
+            allowed.
+          </p>
 
           <label className="field-shell">
             <span>Init commands</span>
@@ -4862,6 +4939,19 @@ interface PortalPopoverProps {
   onClose: () => void;
 }
 
+const PORTAL_POPOVER_VIEWPORT_PADDING = 12;
+const PORTAL_POPOVER_GAP = 8;
+
+function clampPopoverCoordinate(value: number, size: number, viewportSize: number): number {
+  const minimum = PORTAL_POPOVER_VIEWPORT_PADDING;
+  const maximum = Math.max(
+    minimum,
+    viewportSize - PORTAL_POPOVER_VIEWPORT_PADDING - Math.min(size, viewportSize),
+  );
+
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
 function PortalPopover({
   anchorPlacement = "bottom-end",
   anchorRef,
@@ -4881,29 +4971,71 @@ function PortalPopover({
 
     function updatePosition(): void {
       const anchor = anchorRef.current;
+      const popover = popoverRef.current;
 
-      if (!anchor) {
+      if (!anchor || !popover) {
         setStyle(null);
         return;
       }
 
-      const bounds = anchor.getBoundingClientRect();
+      const anchorBounds = anchor.getBoundingClientRect();
+      const popoverBounds = popover.getBoundingClientRect();
       const nextStyle: CSSProperties = {
         position: "fixed",
         zIndex: 80,
+        maxHeight: window.innerHeight - PORTAL_POPOVER_VIEWPORT_PADDING * 2,
       };
 
       if (anchorPlacement === "right-start") {
-        nextStyle.top = Math.max(12, bounds.top);
-        nextStyle.left = Math.max(12, bounds.right + 6);
-      } else {
-        nextStyle.top = bounds.bottom + 8;
+        const spaceToRight =
+          window.innerWidth -
+          anchorBounds.right -
+          PORTAL_POPOVER_GAP -
+          PORTAL_POPOVER_VIEWPORT_PADDING;
+        const spaceToLeft =
+          anchorBounds.left - PORTAL_POPOVER_GAP - PORTAL_POPOVER_VIEWPORT_PADDING;
+        const openToLeft = spaceToRight < popoverBounds.width && spaceToLeft > spaceToRight;
+        const desiredLeft = openToLeft
+          ? anchorBounds.left - PORTAL_POPOVER_GAP - popoverBounds.width
+          : anchorBounds.right + PORTAL_POPOVER_GAP;
 
-        if (anchorPlacement === "bottom-start") {
-          nextStyle.left = Math.max(12, bounds.left);
-        } else {
-          nextStyle.right = Math.max(12, window.innerWidth - bounds.right);
-        }
+        nextStyle.top = clampPopoverCoordinate(
+          anchorBounds.top,
+          popoverBounds.height,
+          window.innerHeight,
+        );
+        nextStyle.left = clampPopoverCoordinate(
+          desiredLeft,
+          popoverBounds.width,
+          window.innerWidth,
+        );
+      } else {
+        const spaceBelow =
+          window.innerHeight -
+          anchorBounds.bottom -
+          PORTAL_POPOVER_GAP -
+          PORTAL_POPOVER_VIEWPORT_PADDING;
+        const spaceAbove =
+          anchorBounds.top - PORTAL_POPOVER_GAP - PORTAL_POPOVER_VIEWPORT_PADDING;
+        const openAbove = spaceBelow < popoverBounds.height && spaceAbove > spaceBelow;
+        const desiredTop = openAbove
+          ? anchorBounds.top - PORTAL_POPOVER_GAP - popoverBounds.height
+          : anchorBounds.bottom + PORTAL_POPOVER_GAP;
+        const desiredLeft =
+          anchorPlacement === "bottom-start"
+            ? anchorBounds.left
+            : anchorBounds.right - popoverBounds.width;
+
+        nextStyle.top = clampPopoverCoordinate(
+          desiredTop,
+          popoverBounds.height,
+          window.innerHeight,
+        );
+        nextStyle.left = clampPopoverCoordinate(
+          desiredLeft,
+          popoverBounds.width,
+          window.innerWidth,
+        );
       }
 
       setStyle(nextStyle);
@@ -4953,7 +5085,7 @@ function PortalPopover({
     };
   }, [anchorRef, onClose, open]);
 
-  if (!open || !style || typeof document === "undefined") {
+  if (!open || typeof document === "undefined") {
     return null;
   }
 
@@ -4961,7 +5093,16 @@ function PortalPopover({
     <div
       ref={popoverRef}
       className={joinClassNames("portal-popover", className)}
-      style={style}
+      style={
+        style ?? {
+          position: "fixed",
+          top: PORTAL_POPOVER_VIEWPORT_PADDING,
+          left: PORTAL_POPOVER_VIEWPORT_PADDING,
+          visibility: "hidden",
+          pointerEvents: "none",
+          zIndex: 80,
+        }
+      }
       onClick={(event) => event.stopPropagation()}
     >
       {children}
@@ -4999,6 +5140,7 @@ interface WorkspaceSidepanelProps {
   onViewportScaleChange: (scale: number) => void;
   onRemoveForward: (forwardId: string) => Promise<void>;
   onResourceDraftChange: (draft: ResourceDraft) => void;
+  onSetNetworkMode: (networkMode: VmNetworkMode) => Promise<void>;
   onResize: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSaveForward: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSnapshot: (vm: VmInstance) => Promise<void>;
@@ -5248,6 +5390,7 @@ function WorkspaceSidepanel({
   onViewportScaleChange,
   onRemoveForward,
   onResourceDraftChange,
+  onSetNetworkMode,
   onResize,
   onSaveForward,
   onLaunchFromSnapshot,
@@ -5267,6 +5410,8 @@ function WorkspaceSidepanel({
   onResizeKeyDown,
   onResizePointerDown,
 }: WorkspaceSidepanelProps): JSX.Element {
+  const currentNetworkMode = detail?.vm.networkMode ?? "default";
+
   return (
     <aside
       ref={panelRef}
@@ -5525,6 +5670,56 @@ function WorkspaceSidepanel({
                   </div>
                 ) : null}
               </form>
+            </SidepanelSection>
+
+            <SidepanelSection title="Network" defaultOpen>
+              <div className="stack">
+                <div className="compact-grid compact-grid--double">
+                  <FieldPair
+                    compact
+                    label="Mode"
+                    value={formatVmNetworkModeLabel(currentNetworkMode)}
+                  />
+                  <FieldPair
+                    compact
+                    label="Reachability"
+                    value={
+                      currentNetworkMode === "dmz"
+                        ? "Internet and public DNS"
+                        : "Default bridge"
+                    }
+                  />
+                </div>
+
+                <p className="empty-copy">{describeVmNetworkMode(currentNetworkMode)}</p>
+
+                <div className="action-grid">
+                  <button
+                    className={
+                      currentNetworkMode === "default"
+                        ? "button button--secondary"
+                        : "button button--ghost"
+                    }
+                    type="button"
+                    onClick={() => void onSetNetworkMode("default")}
+                    disabled={busy || currentNetworkMode === "default"}
+                  >
+                    Default bridge
+                  </button>
+                  <button
+                    className={
+                      currentNetworkMode === "dmz"
+                        ? "button button--secondary"
+                        : "button button--ghost"
+                    }
+                    type="button"
+                    onClick={() => void onSetNetworkMode("dmz")}
+                    disabled={busy || currentNetworkMode === "dmz"}
+                  >
+                    DMZ
+                  </button>
+                </div>
+              </div>
             </SidepanelSection>
 
               <SidepanelSection title="Resize">
@@ -6671,6 +6866,7 @@ function buildCreateDraft(
     cpu: String(template.defaultResources.cpu),
     ramGb: formatRamDraftValue(template.defaultResources.ramMb),
     diskGb: String(template.defaultResources.diskGb),
+    networkMode: template.defaultNetworkMode ?? "default",
     initCommands: formatInitCommandsDraft(template.initCommands),
   };
 }
@@ -6702,6 +6898,22 @@ function parseInitCommandsDraft(value: string): string[] {
     .split("\n")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function normalizeVmNetworkMode(value: string | null | undefined): VmNetworkMode {
+  return value === "dmz" ? "dmz" : "default";
+}
+
+function formatVmNetworkModeLabel(networkMode: VmNetworkMode): string {
+  return networkMode === "dmz" ? "DMZ" : "Default bridge";
+}
+
+function describeVmNetworkMode(networkMode: VmNetworkMode): string {
+  if (networkMode === "dmz") {
+    return "DMZ keeps guest internet and public DNS working, but blocks access into the host and private ranges except for the managed allowances the workspace stack needs.";
+  }
+
+  return "Default bridge keeps the VM on the normal network profile, including the usual host and LAN reachability.";
 }
 
 function buildCreateDiskValidationError(
