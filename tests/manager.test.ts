@@ -1277,22 +1277,41 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   const snapshotCreateCall = calls.find(
     (args) => args[0] === "snapshot" && args[1] === "create" && args[2] === instanceName,
   );
+  const publishCopyCall = calls.find(
+    (args) =>
+      args[0] === "copy" &&
+      args[1] === `${instanceName}/${snapshotCreateCall?.[3] ?? ""}` &&
+      (args[2] ?? "").startsWith("parallaize-template-publish-tpl-0099-"),
+  );
   const publishCall = calls.find(
-    (args) => args[0] === "publish" && args[1]?.startsWith(`${instanceName}/`),
+    (args) => args[0] === "publish" && args[1] === publishCopyCall?.[2],
+  );
+  const publishCleanupCall = calls.find(
+    (args) => args[0] === "delete" && args[1] === publishCopyCall?.[2] && args[2] === "--force",
   );
 
   assert.equal(snapshot.launchSource, "parallaize-template-tpl-0099");
   assert.equal(snapshotCreateCall?.[0], "snapshot");
   assert.equal(snapshotCreateCall?.[1], "create");
   assert.match(snapshotCreateCall?.[3] ?? "", /^parallaize-template-tpl-0099-/);
+  assert.deepEqual(publishCopyCall, [
+    "copy",
+    `${instanceName}/${snapshotCreateCall?.[3] ?? ""}`,
+    publishCopyCall?.[2] ?? "",
+  ]);
   assert.deepEqual(publishCall, [
     "publish",
-    `${instanceName}/${snapshotCreateCall?.[3] ?? ""}`,
+    publishCopyCall?.[2] ?? "",
     "--alias",
     "parallaize-template-tpl-0099",
     "--reuse",
     "--compression",
     "zstd",
+  ]);
+  assert.deepEqual(publishCleanupCall, [
+    "delete",
+    publishCopyCall?.[2] ?? "",
+    "--force",
   ]);
 });
 
@@ -1601,17 +1620,36 @@ test("incus provider reads staged publish progress from the operations API", asy
   assert.equal(reports.at(-1)?.message, "Template image published");
   assert.equal(reports.at(-1)?.progressPercent, 92);
   const publishCall = calls.find(
-    (args) => args[0] === "publish" && args[1]?.startsWith(`${instanceName}/`),
+    (args) => args[0] === "publish" && (args[1] ?? "").startsWith("parallaize-template-publish-tpl-0100-"),
   );
   const snapshotCreateCall = calls.find(
     (args) => args[0] === "snapshot" && args[1] === "create" && args[2] === instanceName,
   );
+  const publishCopyCall = calls.find(
+    (args) =>
+      args[0] === "copy" &&
+      args[1] === `${instanceName}/${snapshotCreateCall?.[3] ?? ""}` &&
+      args[2] === publishCall?.[1],
+  );
+  const publishCleanupCall = calls.find(
+    (args) => args[0] === "delete" && args[1] === publishCall?.[1] && args[2] === "--force",
+  );
   assert.deepEqual(publishCall, [
     "publish",
-    `${instanceName}/${snapshotCreateCall?.[3] ?? ""}`,
+    publishCall?.[1] ?? "",
     "--alias",
     "parallaize-template-tpl-0100",
     "--reuse",
+  ]);
+  assert.deepEqual(publishCopyCall, [
+    "copy",
+    `${instanceName}/${snapshotCreateCall?.[3] ?? ""}`,
+    publishCall?.[1] ?? "",
+  ]);
+  assert.deepEqual(publishCleanupCall, [
+    "delete",
+    publishCall?.[1] ?? "",
+    "--force",
   ]);
 });
 

@@ -926,16 +926,7 @@ class IncusProvider implements DesktopProvider {
 
   async deleteVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
-    const deleteArgs = ["delete", vm.providerRef, "--force"];
-    const deleteResult = await this.executeAsync(deleteArgs);
-
-    if (deleteResult.status !== 0) {
-      const failure = formatCommandFailure(deleteArgs, deleteResult);
-
-      if (!isMissingInstanceFailure(failure)) {
-        throw new Error(failure);
-      }
-    }
+    await this.deleteInstanceIgnoringMissingAsync(vm.providerRef);
 
     return {
       lastAction: `Workspace ${vm.name} deleted`,
@@ -1121,9 +1112,23 @@ class IncusProvider implements DesktopProvider {
     this.assertAvailable();
     const snapshotName = buildTemplateSnapshotName(target.templateId);
     const alias = buildTemplateAlias(target.templateId);
+    const publisherInstanceName = buildTemplatePublisherInstanceName(target.templateId);
 
     report?.("Creating source snapshot", 34);
     await this.runAsync(["snapshot", "create", vm.providerRef, snapshotName]);
+    report?.("Preparing publish workspace", 46);
+
+    const copyArgs = [
+      "copy",
+      `${vm.providerRef}/${snapshotName}`,
+      publisherInstanceName,
+    ];
+
+    if (this.storagePool) {
+      copyArgs.push("-s", this.storagePool);
+    }
+
+    await this.runAsync(copyArgs);
     report?.("Publishing template image", TEMPLATE_PUBLISH_START_PERCENT);
 
     const publishStartedAt = Date.now();
@@ -1180,10 +1185,12 @@ class IncusProvider implements DesktopProvider {
       reportPublishProgress(lastReportedPercent, lastPublishDetail);
     }, this.templatePublishHeartbeatMs);
 
+    let captureFailure: unknown = null;
+
     try {
       const publishArgs = [
         "publish",
-        `${vm.providerRef}/${snapshotName}`,
+        publisherInstanceName,
         "--alias",
         alias,
         "--reuse",
@@ -1206,8 +1213,26 @@ class IncusProvider implements DesktopProvider {
           },
         },
       );
+    } catch (error) {
+      captureFailure = error;
     } finally {
       clearInterval(heartbeat);
+
+      try {
+        await this.deleteInstanceIgnoringMissingAsync(publisherInstanceName);
+      } catch (cleanupError) {
+        if (captureFailure) {
+          captureFailure = new Error(
+            `${errorMessage(captureFailure)}\nCleanup failed after template publish: ${errorMessage(cleanupError)}`,
+          );
+        } else {
+          throw cleanupError;
+        }
+      }
+    }
+
+    if (captureFailure) {
+      throw captureFailure;
     }
 
     report?.("Template image published", TEMPLATE_PUBLISH_COMPLETE_PERCENT);
@@ -1818,6 +1843,19 @@ class IncusProvider implements DesktopProvider {
     }
 
     throw new Error(formatCommandFailure(args, result));
+  }
+
+  private async deleteInstanceIgnoringMissingAsync(instanceName: string): Promise<void> {
+    const deleteArgs = ["delete", instanceName, "--force"];
+    const deleteResult = await this.executeAsync(deleteArgs);
+
+    if (deleteResult.status !== 0) {
+      const failure = formatCommandFailure(deleteArgs, deleteResult);
+
+      if (!isMissingInstanceFailure(failure)) {
+        throw new Error(failure);
+      }
+    }
   }
 }
 
@@ -2861,6 +2899,10 @@ function buildTemplateAlias(templateId: string): string {
   return `parallaize-template-${slugify(templateId)}`;
 }
 
+function buildTemplatePublisherInstanceName(templateId: string): string {
+  return `parallaize-template-publish-${slugify(templateId)}-${Date.now().toString(36)}`;
+}
+
 function describeTemplatePublishActivity(
   compression: IncusImageCompression | null,
 ): string {
@@ -3325,6 +3367,10 @@ function isMissingInstanceFailure(message: string): boolean {
 
 function isAlreadyRunningFailure(message: string): boolean {
   return message.includes("already running");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Unknown error";
 }
 
 function sleep(ms: number): Promise<void> {
