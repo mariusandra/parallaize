@@ -31,6 +31,21 @@ Current focus: close the remaining deployment-validation gaps, harden security a
 - [ ] Validate the packaged PostgreSQL deployment path end to end, including install, upgrade, export, restore, and service restart ordering.
 - [ ] Add hostname-based forwarded-service routing while keeping the current path-based routing as the low-ops fallback.
 
+## Untrusted AI Workloads
+
+Target slice: run agents against Git-backed codebases inside untrusted worker VMs without giving those guests GitHub logins or push-capable credentials. Start with a trusted collection VM or service that can pull work out of workers, queue it for verification, and only sync approved changes back upstream.
+
+- [ ] Write down the threat model and trust boundaries for this flow: worker VMs are untrusted, they should only get read-only repo access, the collection layer is trusted, and no guest should be able to push directly to the canonical remote.
+- [ ] Add repo-source configuration in the UI and API: worker clone URL, optional separate collection push URL, branch or ref to start from, workspace path, and whether collection is enabled for that workspace.
+- [ ] Define the first supported collection architecture around a control VM that can SSH into worker VMs and pull Git state or diffs from them while holding the only read-write upstream repo credentials.
+- [ ] Automate SSH key and Git identity provisioning for this model: per-worker read-only clone credentials, control-VM access into workers for collection, rotation and revocation, and clear visibility in the UI into which keys and users exist for each workspace.
+- [ ] Add a guest-side `Collect` action that only appears when a collection target exists. Pressing it should package the current repo state for handoff instead of attempting an in-guest push.
+- [ ] Choose the first collection transport and keep it simple: start with control-VM pull over SSH or `git bundle`, treat each handoff as a reviewable set of Git diffs, and store session metadata so the provenance is obvious.
+- [ ] Build a verification queue on the collection side where submitted diffs can be inspected, tested in a clean environment, approved, rejected, or sent back for another agent run.
+- [ ] Implement the sync-back step after verification: import approved changes into a trusted clone on the collection side, then push to the configured upstream branch or a staging branch without ever handing write credentials to the worker VM.
+- [ ] Support generic Git providers instead of baking this around GitHub login state. Entering the relevant read-only and read-write Git URLs in the UI should be enough to wire up the first version.
+- [ ] Document fallback and recovery paths: manual patch or bundle export, abandoned-worker collection, conflict handling when the upstream branch moves, and how to recover if the collection VM is unavailable.
+
 ## Later
 
 - [ ] Validate the generated `arm64` `.deb` on a real `arm64` Incus and QEMU host before promoting it beyond experimental.
