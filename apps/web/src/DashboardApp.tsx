@@ -469,7 +469,7 @@ export function DashboardApp(): JSX.Element {
   const resolutionControlMessage = blocksLiveResolutionControl
     ? resolutionControlStatus.source === "remote"
       ? "This VM is being controlled by another machine. Take over to move live control here."
-      : "Another window on this machine is currently controlling this VM. Take over here to move live control into this window."
+      : "Another window is currently controlling this VM. Take over here to move live control into this window."
     : null;
   const resolutionControlTakeoverLabel =
     resolutionControlStatus.source === "remote"
