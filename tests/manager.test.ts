@@ -94,6 +94,47 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.ok((job?.progressPercent ?? 100) < 100);
 });
 
+test("create can override template init commands for a single VM launch", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-create-init-override-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "init-override-lab",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    initCommands: [
+      "sudo apt-get update",
+      "sudo apt-get install -y ripgrep",
+    ],
+  });
+
+  await wait(700);
+
+  const detail = manager.getVmDetail(vm.id);
+  assert.equal(detail.vm.status, "running");
+  assert.ok(
+    detail.vm.activityLog.some((line) =>
+      /init: 2 first-boot commands completed/.test(line),
+    ),
+  );
+  assert.deepEqual(
+    manager.getSummary().templates.find((entry) => entry.id === "tpl-0001")?.initCommands,
+    [],
+  );
+});
+
 test("manager marks a running VM stopped after the provider reports an external shutdown", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-external-stop-"));
   context.after(() => {
@@ -512,6 +553,7 @@ test("templates can be updated and deleted when no VM still uses them", (context
         diskGb: 40,
       },
       defaultForwardedPorts: [],
+      initCommands: [],
       tags: [],
       notes: [],
       snapshotIds: [],
@@ -523,10 +565,15 @@ test("templates can be updated and deleted when no VM still uses them", (context
   const updated = manager.updateTemplate("tpl-unused", {
     name: "Operator Base",
     description: "Renamed from the inspector menu.",
+    initCommands: ["sudo apt-get update", "sudo apt-get install -y ripgrep"],
   });
 
   assert.equal(updated.name, "Operator Base");
   assert.equal(updated.description, "Renamed from the inspector menu.");
+  assert.deepEqual(updated.initCommands, [
+    "sudo apt-get update",
+    "sudo apt-get install -y ripgrep",
+  ]);
   assert.equal(
     manager.getSummary().templates.find((entry) => entry.id === "tpl-unused")?.name,
     "Operator Base",
@@ -542,6 +589,45 @@ test("templates can be updated and deleted when no VM still uses them", (context
     () => manager.deleteTemplate("tpl-0001"),
     /Template Ubuntu Agent Forge is still attached to VM alpha-workbench\./,
   );
+});
+
+test("templates can be cloned into new defaults with first-boot init commands", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-clone-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const cloned = manager.createTemplate({
+    sourceTemplateId: "tpl-0001",
+    name: "Ubuntu Agent Forge Node",
+    description: "Seeded Ubuntu desktop with Node and pnpm on first boot.",
+    initCommands: [
+      "sudo apt-get update",
+      "sudo apt-get install -y nodejs npm",
+      "sudo npm install -g pnpm",
+    ],
+  });
+
+  const source = manager.getSummary().templates.find((entry) => entry.id === "tpl-0001");
+  assert.ok(source);
+  assert.equal(cloned.name, "Ubuntu Agent Forge Node");
+  assert.equal(cloned.launchSource, source?.launchSource);
+  assert.deepEqual(cloned.defaultResources, source?.defaultResources);
+  assert.deepEqual(cloned.defaultForwardedPorts, source?.defaultForwardedPorts);
+  assert.deepEqual(cloned.initCommands, [
+    "sudo apt-get update",
+    "sudo apt-get install -y nodejs npm",
+    "sudo npm install -g pnpm",
+  ]);
+  assert.equal(cloned.snapshotIds.length, 0);
+  assert.match(cloned.notes[0] ?? "", /Cloned from template Ubuntu Agent Forge/);
+  assert.match(cloned.notes[1] ?? "", /First-boot init script runs 3 commands/);
 });
 
 test("captured templates reject create requests that undersize the source disk", (context) => {
@@ -569,6 +655,7 @@ test("captured templates reject create requests that undersize the source disk",
         diskGb: 100,
       },
       defaultForwardedPorts: [],
+      initCommands: [],
       tags: ["captured"],
       notes: [],
       snapshotIds: [],
@@ -886,6 +973,7 @@ test("manager recovers interrupted create jobs when the VM is already running af
           diskGb: 60,
         },
         defaultForwardedPorts: [],
+        initCommands: [],
         tags: [],
         notes: [],
         snapshotIds: [],
@@ -1137,6 +1225,11 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
       diskGb: 60,
     },
     defaultForwardedPorts: [],
+    initCommands: [
+      "sudo apt-get update",
+      "sudo apt-get install -y ripgrep fd-find",
+      "echo \"bootstrap complete\" > /tmp/parallaize-init.txt",
+    ],
     tags: [],
     notes: [],
     snapshotIds: [],
@@ -1202,6 +1295,17 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   const startCall = calls.find(
     (args) => args[0] === "start" && args[1] === instanceName,
   );
+  const initExecCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      args[2] === "--cwd" &&
+      args[3] === "/root" &&
+      args[4] === "--" &&
+      args[5] === "sh" &&
+      args[6] === "-lc" &&
+      (args[7] ?? "").includes("/var/log/parallaize-template-init.log"),
+  );
 
   assert.equal(createMutation.session?.display, "10.55.0.12:5990");
   assert.deepEqual(initCall, [
@@ -1254,6 +1358,20 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     "source=agent:config",
   ]);
   assert.deepEqual(startCall, ["start", instanceName]);
+  assert.ok(initExecCall);
+  assert.equal(
+    spawnSync("sh", ["-n"], {
+      input: initExecCall?.[7] ?? "",
+      encoding: "utf8",
+    }).status,
+    0,
+  );
+  assert.match(initExecCall?.[7] ?? "", /sudo apt-get update/);
+  assert.match(initExecCall?.[7] ?? "", /sudo apt-get install -y ripgrep fd-find/);
+  assert.match(
+    initExecCall?.[7] ?? "",
+    /echo "bootstrap complete" > \/tmp\/parallaize-init\.txt/,
+  );
   assert.ok(
     reports.some(
       (entry) =>
@@ -1433,6 +1551,7 @@ test("incus provider repairs captured-template desktops before trusting guest VN
       diskGb: 60,
     },
     defaultForwardedPorts: [],
+    initCommands: [],
     tags: ["captured"],
     notes: [],
     snapshotIds: [],
@@ -2176,6 +2295,7 @@ test("incus provider targets the configured storage pool for creates and copies"
       diskGb: 60,
     },
     defaultForwardedPorts: [],
+    initCommands: [],
     tags: [],
     notes: [],
     snapshotIds: [],
@@ -2413,6 +2533,7 @@ test("incus provider launches and restores snapshots with VM commands", async ()
       diskGb: 60,
     },
     defaultForwardedPorts: [],
+    initCommands: [],
     tags: [],
     notes: [],
     snapshotIds: [],
@@ -2590,6 +2711,7 @@ test("incus provider falls back to IPv6 guest metadata when IPv4 is absent", asy
       diskGb: 40,
     },
     defaultForwardedPorts: [],
+    initCommands: [],
     tags: [],
     notes: [],
     snapshotIds: [],
@@ -2709,6 +2831,7 @@ test("incus provider only marks a guest VNC session ready after an RFB handshake
       diskGb: 40,
     },
     defaultForwardedPorts: [],
+    initCommands: [],
     tags: [],
     notes: [],
     snapshotIds: [],
@@ -3104,6 +3227,7 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
       diskGb: 60,
     },
     defaultForwardedPorts: [],
+    initCommands: [],
     tags: [],
     notes: [],
     snapshotIds: [],

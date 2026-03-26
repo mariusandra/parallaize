@@ -20,6 +20,7 @@ const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 const DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 30_000;
 const DEFAULT_GUEST_WORKSPACE = "/root";
+const DEFAULT_GUEST_INIT_LOG_PATH = "/var/log/parallaize-template-init.log";
 const DEFAULT_VM_CREATE_HEARTBEAT_MS = 4000;
 const VM_CREATE_ALLOCATION_START_PERCENT = 18;
 const VM_CREATE_ALLOCATION_COMPLETE_PERCENT = 58;
@@ -337,6 +338,12 @@ class MockProvider implements DesktopProvider {
         `boot: ubuntu desktop launched from ${template.launchSource}`,
         `provider ref: ${vm.providerRef}`,
         `resources: ${vm.resources.cpu} CPU / ${vm.resources.ramMb} MB / ${vm.resources.diskGb} GB`,
+        ...(template.initCommands.length > 0
+          ? [
+              `init: ${template.initCommands.length} first-boot command${template.initCommands.length === 1 ? "" : "s"} completed`,
+              `init-log: ${DEFAULT_GUEST_INIT_LOG_PATH}`,
+            ]
+          : []),
         `workspace: /srv/workspaces/${slugify(vm.name)}`,
       ],
       activeWindow: "editor",
@@ -823,11 +830,22 @@ class IncusProvider implements DesktopProvider {
       requireBootstrapRepairBeforeReady: shouldRequireGuestBootstrapRepairBeforeReady(template),
     });
 
+    if (template.initCommands.length > 0) {
+      emitCreateProgress("Running init commands", 98);
+      await this.runGuestInitCommandsAsync(vm.providerRef, template.initCommands);
+    }
+
     return {
       lastAction: `Provisioned from ${template.name}`,
       activity: [
         `incus: launched ${vm.providerRef} from ${template.launchSource}`,
         `resources: ${vm.resources.cpu} CPU / ${formatMemoryLimit(vm.resources.ramMb)} / ${formatDiskSize(vm.resources.diskGb)}`,
+        ...(template.initCommands.length > 0
+          ? [
+              `init: ${template.initCommands.length} first-boot command${template.initCommands.length === 1 ? "" : "s"} completed`,
+              `init-log: ${DEFAULT_GUEST_INIT_LOG_PATH}`,
+            ]
+          : []),
         session ? `vnc: ${session.display}` : "vnc: guest network pending",
       ],
       activeWindow: "terminal",
@@ -1597,6 +1615,26 @@ class IncusProvider implements DesktopProvider {
     const result = await this.executeAsync(args);
 
     return result.status === 0;
+  }
+
+  private async runGuestInitCommandsAsync(
+    instanceName: string,
+    initCommands: string[],
+  ): Promise<void> {
+    if (initCommands.length === 0) {
+      return;
+    }
+
+    await this.runAsync([
+      "exec",
+      instanceName,
+      "--cwd",
+      DEFAULT_GUEST_WORKSPACE,
+      "--",
+      "sh",
+      "-lc",
+      buildGuestInitCommandsScript(initCommands),
+    ]);
   }
 
   private async probeReachableSession(instance: IncusListInstance): Promise<VmSession | null> {
@@ -2794,6 +2832,33 @@ runcmd:
   - systemctl restart gdm3 || true
   - systemctl start parallaize-desktop-bootstrap.service || true
 `;
+}
+
+function buildGuestInitCommandsScript(initCommands: string[]): string {
+  return `set -eu
+LOG_FILE="${DEFAULT_GUEST_INIT_LOG_PATH}"
+mkdir -p "$(dirname "$LOG_FILE")"
+touch "$LOG_FILE"
+TMP_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT INT TERM
+run_init_command() {
+  command_index="$1"
+  script_path="$2"
+  printf '%s\\n' "==> init command $command_index started" >> "$LOG_FILE"
+  sh "$script_path" >> "$LOG_FILE" 2>&1
+  printf '%s\\n' "==> init command $command_index finished" >> "$LOG_FILE"
+}
+${initCommands.map((command, index) => {
+  const scriptName = `"$TMP_DIR/${String(index + 1).padStart(2, "0")}.sh"`;
+  const marker = `PARALLAIZE_INIT_${String(index + 1).padStart(2, "0")}`;
+  return `cat > ${scriptName} <<'${marker}'
+${command}
+${marker}
+run_init_command ${index + 1} ${scriptName}`;
+}).join("\n")}`;
 }
 
 function indentBlock(value: string, prefix: string): string {

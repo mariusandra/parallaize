@@ -97,6 +97,7 @@ export interface EnvironmentTemplate {
   launchSource: string;
   defaultResources: ResourceSpec;
   defaultForwardedPorts: TemplatePortForward[];
+  initCommands: string[];
   tags: string[];
   notes: string[];
   snapshotIds: string[];
@@ -246,6 +247,7 @@ export interface CreateVmInput {
   name: string;
   resources: ResourceSpec;
   forwardedPorts?: TemplatePortForward[];
+  initCommands?: string[];
 }
 
 export interface CloneVmInput {
@@ -262,6 +264,22 @@ export interface SetVmResolutionInput {
   height: number;
 }
 
+export interface SyncVmResolutionControlInput {
+  clientId: string;
+  force?: boolean;
+}
+
+export interface VmResolutionController {
+  clientId: string;
+  claimedAt: string;
+  heartbeatAt: string;
+}
+
+export interface VmResolutionControlSnapshot {
+  vmId: string;
+  controller: VmResolutionController | null;
+}
+
 export interface SnapshotInput {
   label?: string;
 }
@@ -276,9 +294,17 @@ export interface CaptureTemplateInput {
   description: string;
 }
 
+export interface CreateTemplateInput {
+  sourceTemplateId: string;
+  name: string;
+  description: string;
+  initCommands?: string[];
+}
+
 export interface UpdateTemplateInput {
   name: string;
   description?: string;
+  initCommands?: string[];
 }
 
 export interface UpdateVmInput {
@@ -306,7 +332,7 @@ export interface AuthStatus {
   authEnabled: boolean;
   authenticated: boolean;
   username: string | null;
-  mode: "none" | "session" | "basic" | "unauthenticated";
+  mode: "none" | "session" | "unauthenticated";
 }
 
 export interface ApiEnvelope<T> {

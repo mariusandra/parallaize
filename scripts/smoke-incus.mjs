@@ -21,6 +21,7 @@ const AUTH_PASSWORD =
   process.env.PARALLAIZE_SMOKE_ADMIN_PASSWORD ??
   process.env.PARALLAIZE_ADMIN_PASSWORD ??
   null;
+let authSessionCookie = null;
 const VNC_TIMEOUT_MS = 180_000;
 const VM_TIMEOUT_MS = 360_000;
 const HTTP_TIMEOUT_MS = 180_000;
@@ -98,7 +99,7 @@ async function main() {
 
 async function assertApiHealthy() {
   const response = await fetch(new URL("/api/health", CONTROL_URL), {
-    headers: buildAuthHeaders(),
+    headers: await buildAuthHeaders(),
   });
 
   if (!response.ok) {
@@ -192,7 +193,9 @@ async function waitForVmDeletion(vmId) {
     120_000,
     3_000,
     async () => {
-      const response = await fetch(new URL(`/api/vms/${vmId}`, CONTROL_URL));
+      const response = await fetch(new URL(`/api/vms/${vmId}`, CONTROL_URL), {
+        headers: await buildAuthHeaders(),
+      });
       return response.status === 500 ? true : null;
     },
   );
@@ -242,7 +245,7 @@ async function waitForPublicForward(publicPath) {
     async () => {
       try {
         const response = await fetch(new URL(publicPath, PUBLIC_URL), {
-          headers: buildAuthHeaders(),
+          headers: await buildAuthHeaders(),
         });
         if (!response.ok) {
           return null;
@@ -259,10 +262,11 @@ async function waitForPublicForward(publicPath) {
 
 async function attemptVncHandshake(vmId) {
   const wsUrl = buildWebSocketUrl(`/api/vms/${vmId}/vnc`);
+  const headers = await buildAuthHeaders();
 
   return await new Promise((resolve, reject) => {
     const socket = new WebSocket(wsUrl, {
-      headers: buildAuthHeaders(),
+      headers,
     });
     const timer = setTimeout(() => {
       socket.terminate();
@@ -433,9 +437,10 @@ async function waitFor(label, timeoutMs, intervalMs, resolver) {
 }
 
 async function fetchJson(path, init = {}) {
+  const authHeaders = await buildAuthHeaders();
   const response = await fetch(new URL(path, CONTROL_URL), {
     headers: {
-      ...buildAuthHeaders(),
+      ...authHeaders,
       ...(init.body ? { "content-type": "application/json" } : {}),
       ...(init.headers ?? {}),
     },
@@ -458,14 +463,64 @@ function buildGuestHttpUrl(host, port) {
   return new URL(`http://${host.includes(":") ? `[${host}]` : host}:${port}/`);
 }
 
-function buildAuthHeaders() {
-  if (!AUTH_PASSWORD) {
+async function buildAuthHeaders() {
+  const sessionCookie = await ensureAuthSessionCookie();
+
+  if (!sessionCookie) {
     return {};
   }
 
   return {
-    authorization: `Basic ${Buffer.from(`${AUTH_USERNAME}:${AUTH_PASSWORD}`).toString("base64")}`,
+    cookie: sessionCookie,
   };
+}
+
+async function ensureAuthSessionCookie() {
+  if (!AUTH_PASSWORD) {
+    return null;
+  }
+
+  if (authSessionCookie) {
+    return authSessionCookie;
+  }
+
+  const response = await fetch(new URL("/api/auth/login", CONTROL_URL), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      username: AUTH_USERNAME,
+      password: AUTH_PASSWORD,
+    }),
+  });
+  const payload = await response.json();
+
+  if (!response.ok || payload.ok === false) {
+    throw new Error(
+      payload?.error
+        ? `${response.status} ${payload.error}`
+        : `${response.status} login request failed`,
+    );
+  }
+
+  authSessionCookie = extractSessionCookie(response);
+  return authSessionCookie;
+}
+
+function extractSessionCookie(response) {
+  const setCookieHeaders =
+    typeof response.headers.getSetCookie === "function"
+      ? response.headers.getSetCookie()
+      : [];
+  const header = setCookieHeaders[0] ?? response.headers.get("set-cookie");
+
+  if (!header) {
+    throw new Error("Login succeeded but did not return a session cookie.");
+  }
+
+  return header.split(";", 1)[0];
 }
 
 function buildWebSocketUrl(path) {

@@ -48,7 +48,7 @@ If admin auth is enabled, the smoke command will reuse `PARALLAIZE_ADMIN_USERNAM
 
 ## Authentication
 
-The control plane now supports a shared single-admin browser session with cookie login, while still accepting Basic Auth headers for CLI and automation clients.
+The control plane now uses a shared single-admin cookie session. The app shell can load unauthenticated so it can render the in-app sign-in screen, while protected routes require a valid session cookie.
 
 Set these env vars before starting the server:
 
@@ -59,14 +59,9 @@ PARALLAIZE_ADMIN_PASSWORD=change-me
 
 When `PARALLAIZE_ADMIN_PASSWORD` is set:
 
-- The browser loads the app shell and then signs in through an in-app login form that sets an HttpOnly session cookie.
-- API clients, smoke tests, and scripts can continue sending Basic Auth headers directly.
-- The same authenticated session protects:
-
-- API routes
-- Server-sent events
-- Browser VNC websocket upgrades
-- Forwarded guest-service routes
+- The browser loads the app shell and signs in through `/api/auth/login`, which issues an HttpOnly session cookie.
+- API routes, server-sent events, browser VNC websocket upgrades, and forwarded guest-service routes require that session cookie.
+- The smoke path will sign in with the shared admin credentials and reuse the session cookie for its HTTP and websocket checks.
 
 If the password is unset, auth is disabled.
 
@@ -303,7 +298,7 @@ Version bumps are not part of normal development changes in this repo. Leave `pa
 - `PARALLAIZE_GUEST_VNC_PORT`: guest VNC port to bridge through noVNC, default `5900`
 - `PARALLAIZE_GUEST_INOTIFY_MAX_USER_WATCHES`: inotify watch limit written into new guest VMs via cloud-init, default `1048576`
 - `PARALLAIZE_GUEST_INOTIFY_MAX_USER_INSTANCES`: inotify instance limit written into new guest VMs via cloud-init, default `2048`
-- `PARALLAIZE_ADMIN_USERNAME`: shared admin username for browser-session login or Basic Auth fallback, default `admin`
+- `PARALLAIZE_ADMIN_USERNAME`: shared admin username for the browser-session login, default `admin`
 - `PARALLAIZE_ADMIN_PASSWORD`: shared admin password; when unset, auth is disabled
 
 An example source-install env file is included at `infra/parallaize.env.example`. The package build ships its own install-time defaults at `packaging/config/parallaize.env`.

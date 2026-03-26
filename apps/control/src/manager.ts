@@ -10,6 +10,7 @@ import type {
   AppState,
   CaptureTemplateInput,
   CloneVmInput,
+  CreateTemplateInput,
   CreateVmInput,
   DashboardSummary,
   EnvironmentTemplate,
@@ -248,6 +249,7 @@ export class DesktopManager {
   createVm(input: CreateVmInput): VmInstance {
     let createdVm: VmInstance | null = null;
     let createdJob: ActionJob | null = null;
+    let launchTemplate: EnvironmentTemplate | null = null;
 
     const { state } = this.store.update((draft) => {
       const template = requireTemplate(draft, input.templateId);
@@ -269,6 +271,13 @@ export class DesktopManager {
         draft.provider.kind,
         "creating",
       );
+      launchTemplate =
+        input.initCommands !== undefined
+          ? {
+              ...template,
+              initCommands: normalizeTemplateInitCommands(input.initCommands),
+            }
+          : template;
       const job = buildJob(draft, "create", vm.id, template.id, `Queued create for ${name}`);
 
       draft.vms.unshift(vm);
@@ -290,7 +299,7 @@ export class DesktopManager {
 
     void this.runJob(jobRecord.id, async (report) => {
       try {
-        const template = requireTemplate(state, vmRecord.templateId);
+        const template = launchTemplate ?? requireTemplate(state, vmRecord.templateId);
         const mutation = await this.provider.createVm(vmRecord, template, report);
 
         this.store.update((draft) => {
@@ -764,6 +773,7 @@ export class DesktopManager {
             launchSource,
             defaultResources: { ...current.resources },
             defaultForwardedPorts: current.forwardedPorts.map(copyForwardAsTemplatePort),
+            initCommands: [...(detail.template?.initCommands ?? [])],
             tags: ["captured", slugify(current.name)],
             notes: captureNotes,
             snapshotIds: [snapshot.id],
@@ -789,6 +799,61 @@ export class DesktopManager {
     });
   }
 
+  createTemplate(input: CreateTemplateInput): EnvironmentTemplate {
+    const nextName = input.name.trim();
+
+    if (!nextName) {
+      throw new Error("Template name is required.");
+    }
+
+    const nextDescription = input.description.trim();
+    const nextInitCommands = normalizeTemplateInitCommands(input.initCommands);
+    let createdTemplate: EnvironmentTemplate | null = null;
+
+    this.store.update((draft) => {
+      const sourceTemplate = requireTemplate(draft, input.sourceTemplateId);
+      const now = nowIso();
+
+      createdTemplate = {
+        id: nextId(draft, "tpl"),
+        name: nextName,
+        description: nextDescription || sourceTemplate.description,
+        launchSource: sourceTemplate.launchSource,
+        defaultResources: { ...sourceTemplate.defaultResources },
+        defaultForwardedPorts: sourceTemplate.defaultForwardedPorts.map(
+          copyTemplatePortForward,
+        ),
+        initCommands: nextInitCommands,
+        tags: Array.from(
+          new Set([
+            ...sourceTemplate.tags,
+            "cloned",
+            ...(nextInitCommands.length > 0 ? ["init-script"] : []),
+          ]),
+        ),
+        notes: buildClonedTemplateNotes(
+          sourceTemplate,
+          sourceTemplate.notes,
+          nextInitCommands,
+        ),
+        snapshotIds: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      draft.templates.unshift(createdTemplate);
+      return true;
+    });
+
+    this.publish();
+
+    if (!createdTemplate) {
+      throw new Error("Failed to create template.");
+    }
+
+    return createdTemplate;
+  }
+
   updateTemplate(templateId: string, input: UpdateTemplateInput): EnvironmentTemplate {
     const nextName = input.name.trim();
 
@@ -802,14 +867,23 @@ export class DesktopManager {
       const template = requireTemplate(draft, templateId);
       const nextDescription =
         input.description !== undefined ? input.description.trim() : template.description;
+      const nextInitCommands =
+        input.initCommands !== undefined
+          ? normalizeTemplateInitCommands(input.initCommands)
+          : template.initCommands;
 
-      if (template.name === nextName && template.description === nextDescription) {
+      if (
+        template.name === nextName &&
+        template.description === nextDescription &&
+        sameStringArray(template.initCommands, nextInitCommands)
+      ) {
         updatedTemplate = template;
         return false;
       }
 
       template.name = nextName;
       template.description = nextDescription;
+      template.initCommands = nextInitCommands;
       template.updatedAt = nowIso();
       updatedTemplate = template;
       return true;
@@ -1622,6 +1696,44 @@ function buildCaptureNotes(
   return refreshedNotes.slice(0, 6);
 }
 
+function buildClonedTemplateNotes(
+  sourceTemplate: EnvironmentTemplate,
+  previousNotes: string[],
+  initCommands: string[],
+): string[] {
+  const refreshedNotes = [
+    `Cloned from template ${sourceTemplate.name}.`,
+    initCommands.length > 0
+      ? `First-boot init script runs ${initCommands.length} command${initCommands.length === 1 ? "" : "s"}.`
+      : "No first-boot init commands configured.",
+    ...previousNotes.filter(
+      (note) =>
+        note !== `Cloned from template ${sourceTemplate.name}.` &&
+        note !== "No first-boot init commands configured." &&
+        !note.startsWith("First-boot init script runs "),
+    ),
+  ];
+
+  return refreshedNotes.slice(0, 6);
+}
+
+function normalizeTemplateInitCommands(
+  initCommands: EnvironmentTemplate["initCommands"] | undefined,
+): string[] {
+  if (!Array.isArray(initCommands)) {
+    return [];
+  }
+
+  return initCommands
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0)
+    .slice(0, 64);
+}
+
+function sameStringArray(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
 function requireTemplate(
   state: AppState,
   templateId: string,
@@ -1655,6 +1767,7 @@ function buildOrphanedSnapshotTemplate(snapshot: Snapshot): EnvironmentTemplate 
     launchSource: DEFAULT_TEMPLATE_LAUNCH_SOURCE,
     defaultResources: { ...snapshot.resources },
     defaultForwardedPorts: [],
+    initCommands: [],
     tags: ["orphaned"],
     notes: ["Recovered from snapshot metadata after template deletion."],
     snapshotIds: [snapshot.id],
@@ -1782,6 +1895,15 @@ function buildVmForwardedPorts(
 }
 
 function copyForwardAsTemplatePort(forwardedPort: VmPortForward): TemplatePortForward {
+  return {
+    name: forwardedPort.name,
+    guestPort: forwardedPort.guestPort,
+    protocol: forwardedPort.protocol,
+    description: forwardedPort.description,
+  };
+}
+
+function copyTemplatePortForward(forwardedPort: TemplatePortForward): TemplatePortForward {
   return {
     name: forwardedPort.name,
     guestPort: forwardedPort.guestPort,

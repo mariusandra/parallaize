@@ -6,7 +6,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `ar
 ## Current State
 
 - The web POC is runnable end to end with the React dashboard, Node control plane, Caddy front door, noVNC browser sessions, forwarded guest-service routes, and Incus-backed VM lifecycle operations.
-- Real-host validation already covers template capture, browser VNC through Caddy, forwarded guest HTTP services, cookie-backed login, and the `pnpm smoke:incus` path.
+- Real-host validation already covers template capture, browser VNC through Caddy, forwarded guest HTTP services, admin-authenticated browser access, and the `pnpm smoke:incus` path.
 - State persistence now has a proper backend boundary: JSON remains available for tests and fallback, and PostgreSQL is wired in as a deployable backend.
 - The main unfinished work is no longer core product plumbing. It is now persistence rollout polish, template/bootstrap repeatability, auth/session hardening, and ops cleanup.
 
@@ -23,7 +23,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `ar
 - [x] Real Incus lifecycle, snapshot, clone, and template-publish flows
 - [x] Embedded noVNC browser sessions through the built-in VNC bridge
 - [x] Caddy-backed guest HTTP/WebSocket forwarding
-- [x] Shared single-admin cookie login with Basic Auth fallback
+- [x] Shared single-admin cookie login
 - [x] Host-backed `pnpm smoke:incus` automation
 - [x] Pluggable persistence backend with PostgreSQL support and JSON fallback
 - [x] Browser-to-guest and guest-to-browser clipboard flow for the main noVNC session, with browser-API fallback handling
@@ -34,6 +34,8 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `ar
 - [x] Repeated guest desktop bootstrap retries during running-session refresh so cloud-init-disabled Ubuntu desktop images can still recover VNC once the guest agent comes up
 - [x] On-demand VM log modal that reads Incus console/info logs from the VM action menu and keeps polling while the modal stays open
 - [x] Homepage persistence/storage diagnostics that distinguish JSON/PostgreSQL state from the Incus VM disk pool and offer clear operator advice
+- [x] Cookie-only admin session flow with regression coverage for unauthenticated app load plus login/logout behavior
+- [x] Template first-boot init commands plus a template-clone flow for saving new reusable defaults from the dashboard
 
 ## Priority Backlog
 
@@ -55,7 +57,7 @@ Current focus: package Parallaize cleanly for Ubuntu 24.04 `amd64`, keep the `ar
 
 - [ ] Add server-side session expiry/rotation instead of relying on an in-memory token set with manual replacement.
 - [ ] Decide whether admin sessions should survive a restart or be intentionally invalidated on boot, then document that behavior.
-- [ ] Add targeted tests around login/logout/session expiry behavior.
+- [ ] Add targeted tests around session expiry and replacement behavior.
 
 ### P2: Operations And Verification
 
@@ -96,6 +98,9 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-26: Added template-level first-boot init commands, surfaced them in the template picker, and added a template-clone flow so operators can save new reusable defaults that reuse the same launch source with custom cloud-init-style commands.
+- 2026-03-26: Added server-backed live viewport control leases so only one browser client can drive a VM at a time, blocked secondary viewers behind a view-only takeover screen, and pushed takeover changes back through SSE so the previous controller is locked immediately.
+- 2026-03-26: Removed the HTTP Basic fallback, restored a public app shell so the in-app login screen can render cleanly, and covered unauthenticated load plus login/logout session behavior in the server tests.
 - 2026-03-26: Fixed real-host Incus template-capture cleanup on `dir` pools by publishing from a disposable copy of the source snapshot, so deleting the source VM no longer trips over a stale read-only snapshot mount left behind by `incus publish`.
 - 2026-03-26: Fixed a clone/snapshot guest-bootstrap deadlock where `parallaize-desktop-bootstrap.service` synchronously restarted `parallaize-x11vnc.service` even though the VNC unit was ordered `After=parallaize-desktop-bootstrap.service`, which could leave `incus exec` clone waits hung for tens of minutes.
 - 2026-03-25: Made guest display-resolution changes non-disruptive by only restarting `parallaize-x11vnc.service` when the launcher/unit actually changed or the bridge is inactive, which avoids noVNC reconnect churn during the first viewport-sync resize.

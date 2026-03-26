@@ -28,6 +28,7 @@ import type {
   AuthStatus,
   ApiResponse,
   CaptureTemplateInput,
+  CreateTemplateInput,
   CreateVmInput,
   DashboardSummary,
   EnvironmentTemplate,
@@ -40,6 +41,7 @@ import type {
   Snapshot,
   SnapshotLaunchInput,
   SnapshotInput,
+  SyncVmResolutionControlInput,
   TemplatePortForward,
   UpdateTemplateInput,
   UpdateVmInput,
@@ -48,6 +50,7 @@ import type {
   VmLogsSnapshot,
   VmPowerAction,
   VmPortForward,
+  VmResolutionControlSnapshot,
   VmStatus,
 } from "../../../packages/shared/src/types.js";
 import {
@@ -78,6 +81,7 @@ interface CreateDraft {
   cpu: string;
   ramGb: string;
   diskGb: string;
+  initCommands: string;
 }
 
 interface ResourceDraft {
@@ -113,6 +117,20 @@ interface CaptureDraft {
   description: string;
 }
 
+interface TemplateCloneDraft {
+  sourceTemplateId: string;
+  name: string;
+  description: string;
+  initCommands: string;
+}
+
+interface TemplateEditDraft {
+  templateId: string;
+  name: string;
+  description: string;
+  initCommands: string;
+}
+
 interface Notice {
   tone: "error" | "info" | "success";
   message: string;
@@ -126,6 +144,7 @@ interface LoginDraft {
 type ThemeMode = "light" | "dark";
 type DesktopResolutionMode = "viewport" | "fixed";
 type ResolutionControlOwner = "none" | "self" | "other";
+type ResolutionControlSource = "none" | "local" | "remote";
 
 interface DesktopResolutionState {
   clientHeight: number | null;
@@ -140,7 +159,9 @@ interface PendingManualResolutionSync {
 }
 
 interface ResolutionControlStatus {
+  controllerClientId: string | null;
   owner: ResolutionControlOwner;
+  source: ResolutionControlSource;
   vmId: string | null;
 }
 
@@ -180,12 +201,18 @@ interface VmLogsDialogState {
   vmName: string;
 }
 
+interface CloneVmDialogState {
+  sourceVmId: string;
+  sourceVmName: string;
+}
+
 const emptyCreateDraft: CreateDraft = {
   templateId: "",
   name: "",
   cpu: "",
   ramGb: "",
   diskGb: "",
+  initCommands: "",
 };
 
 const emptyResourceDraft: ResourceDraft = {
@@ -250,6 +277,7 @@ const guestDisplayHeightMax = 8192;
 const desktopResolutionRetryDelayMs = 900;
 const desktopResolutionRetryMaxAttempts = 4;
 const desktopResolutionByVmStorageKey = "parallaize.desktop-resolution-by-vm";
+const resolutionControlClientIdStorageKey = "parallaize.resolution-control-client-id";
 const resolutionControlHeartbeatMs = 1_500;
 const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
@@ -284,7 +312,11 @@ export function DashboardApp(): JSX.Element {
   const [commandDraft, setCommandDraft] = useState("");
   const [forwardDraft, setForwardDraft] = useState<ForwardDraft>(emptyForwardDraft);
   const [captureDraft, setCaptureDraft] = useState<CaptureDraft>(emptyCaptureDraft);
+  const [templateEditDraft, setTemplateEditDraft] = useState<TemplateEditDraft | null>(null);
+  const [templateCloneDraft, setTemplateCloneDraft] = useState<TemplateCloneDraft | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [cloneVmDialog, setCloneVmDialog] = useState<CloneVmDialogState | null>(null);
+  const [cloneVmDraft, setCloneVmDraft] = useState("");
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [vmLogsDialog, setVmLogsDialog] = useState<VmLogsDialogState | null>(null);
@@ -339,14 +371,19 @@ export function DashboardApp(): JSX.Element {
   const [documentVisible, setDocumentVisible] = useState(() => readDocumentVisible());
   const [resolutionControlStatus, setResolutionControlStatus] =
     useState<ResolutionControlStatus>({
+      controllerClientId: null,
       owner: "none",
+      source: "none",
       vmId: null,
     });
+  const [resolutionControlTakeoverBusy, setResolutionControlTakeoverBusy] = useState(false);
   const [jobTimingNowMs, setJobTimingNowMs] = useState(() => Date.now());
   const [railResizeActive, setRailResizeActive] = useState(false);
   const [sidepanelResizeActive, setSidepanelResizeActive] = useState(false);
   const selectedVmIdRef = useRef<string | null>(null);
+  const liveResolutionVmIdRef = useRef<string | null>(null);
   const vmDragDropCommittedRef = useRef(false);
+  const clientIdRef = useRef<string>(readOrCreateResolutionControlClientId());
   const tabIdRef = useRef<string>(createTabId());
   const shellMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
@@ -365,7 +402,9 @@ export function DashboardApp(): JSX.Element {
   const currentResolutionTargetRef = useRef<DesktopResolutionTarget | null>(null);
   const currentRemoteResolutionKeyRef = useRef<string | null>(null);
   const resolutionControlStatusRef = useRef<ResolutionControlStatus>({
+    controllerClientId: null,
     owner: "none",
+    source: "none",
     vmId: null,
   });
   const resolutionRetryStateRef = useRef<ResolutionRetryState | null>(null);
@@ -422,9 +461,20 @@ export function DashboardApp(): JSX.Element {
     liveResolutionVmId !== null &&
     resolutionControlStatus.vmId === liveResolutionVmId &&
     resolutionControlStatus.owner === "other";
-  const resolutionControlMessage = blocksLiveResolutionControl
-    ? "Another tab is currently controlling live viewport sync for this VM. Close or switch that tab to take over."
+  const resolutionControlHeading = blocksLiveResolutionControl
+    ? resolutionControlStatus.source === "remote"
+      ? "Controlled on another machine"
+      : "Controlled in another window"
     : null;
+  const resolutionControlMessage = blocksLiveResolutionControl
+    ? resolutionControlStatus.source === "remote"
+      ? "This VM is being controlled by another machine. Take over to move live control here."
+      : "Another window on this machine is currently controlling this VM. Take over here to move live control into this window."
+    : null;
+  const resolutionControlTakeoverLabel =
+    resolutionControlStatus.source === "remote"
+      ? "Take over control"
+      : "Take over here";
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
   const persistence = health?.persistence ?? null;
   const incusStorage = health?.incusStorage ?? null;
@@ -510,6 +560,10 @@ export function DashboardApp(): JSX.Element {
   }, [selectedVmId]);
 
   useEffect(() => {
+    liveResolutionVmIdRef.current = liveResolutionVmId;
+  }, [liveResolutionVmId]);
+
+  useEffect(() => {
     resolutionControlStatusRef.current = resolutionControlStatus;
   }, [resolutionControlStatus]);
 
@@ -557,45 +611,75 @@ export function DashboardApp(): JSX.Element {
   useEffect(() => {
     if (!liveResolutionVmId || !documentVisible) {
       setResolutionControlStatus({
+        controllerClientId: null,
         owner: "none",
+        source: "none",
         vmId: liveResolutionVmId,
       });
-      clearResolutionRetryTimer();
-      resolutionRequestQueueRef.current = emptyResolutionRequestQueue;
+      suspendResolutionControl();
       return;
     }
 
     const vmId = liveResolutionVmId;
+    let cancelled = false;
 
-    function syncResolutionControlLease(): void {
-      const owner = claimResolutionControlLease(vmId, tabIdRef.current);
+    async function syncResolutionControl(force = false): Promise<void> {
+      try {
+        const snapshot = await postJson<
+          VmResolutionControlSnapshot,
+          SyncVmResolutionControlInput
+        >(`/api/vms/${vmId}/resolution-control/claim`, {
+          clientId: clientIdRef.current,
+          force,
+        });
 
-      setResolutionControlStatus((current) =>
-        current.vmId === vmId && current.owner === owner
-          ? current
-          : {
-              owner,
-              vmId,
-            },
-      );
+        if (cancelled) {
+          return;
+        }
 
-      if (owner !== "self") {
-        clearResolutionRetryTimer();
-        resolutionRequestQueueRef.current = emptyResolutionRequestQueue;
+        applyResolutionControlSnapshot(snapshot, force);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+
+        setNotice({
+          tone: "error",
+          message: errorMessage(error),
+        });
       }
     }
 
-    syncResolutionControlLease();
-    const heartbeat = window.setInterval(syncResolutionControlLease, resolutionControlHeartbeatMs);
+    void syncResolutionControl();
+    const heartbeat = window.setInterval(() => {
+      void syncResolutionControl();
+    }, resolutionControlHeartbeatMs);
     const leaseKey = buildResolutionControlLeaseStorageKey(vmId);
+
     const releaseLease = () => {
       releaseResolutionControlLease(vmId, tabIdRef.current);
     };
 
     function handleStorage(event: StorageEvent): void {
-      if (event.key === null || event.key === leaseKey) {
-        syncResolutionControlLease();
+      if (event.key !== null && event.key !== leaseKey) {
+        return;
       }
+
+      const currentStatus = resolutionControlStatusRef.current;
+
+      if (
+        currentStatus.vmId !== vmId ||
+        currentStatus.controllerClientId !== clientIdRef.current
+      ) {
+        return;
+      }
+
+      applyLocalResolutionControl(vmId);
     }
 
     window.addEventListener("storage", handleStorage);
@@ -603,6 +687,7 @@ export function DashboardApp(): JSX.Element {
     window.addEventListener("pagehide", releaseLease);
 
     return () => {
+      cancelled = true;
       window.clearInterval(heartbeat);
       window.removeEventListener("storage", handleStorage);
       window.removeEventListener("beforeunload", releaseLease);
@@ -664,6 +749,22 @@ export function DashboardApp(): JSX.Element {
         setSelectedVmId(null);
         setDetail(null);
       }
+    });
+
+    eventSource.addEventListener("resolution-control", (event) => {
+      const snapshot = JSON.parse(
+        (event as MessageEvent<string>).data,
+      ) as VmResolutionControlSnapshot;
+
+      if (
+        !readDocumentVisible() ||
+        !liveResolutionVmIdRef.current ||
+        snapshot.vmId !== liveResolutionVmIdRef.current
+      ) {
+        return;
+      }
+
+      applyResolutionControlSnapshot(snapshot);
     });
 
     eventSource.addEventListener("error", () => {
@@ -1508,6 +1609,7 @@ export function DashboardApp(): JSX.Element {
         ramMb: parseRamDraftValue(createDraft.ramGb),
         diskGb: Number(createDraft.diskGb),
       },
+      initCommands: parseInitCommandsDraft(createDraft.initCommands),
     };
 
     await runMutation(
@@ -1568,6 +1670,56 @@ export function DashboardApp(): JSX.Element {
     setShowCreateDialog(true);
   }
 
+  function openTemplateCloneDialog(template: EnvironmentTemplate): void {
+    setOpenTemplateMenuId(null);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+    setTemplateCloneDraft(buildTemplateCloneDraft(template));
+  }
+
+  function openTemplateEditDialog(template: EnvironmentTemplate): void {
+    setOpenTemplateMenuId(null);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+    setTemplateEditDraft(buildTemplateEditDraft(template));
+  }
+
+  function closeTemplateEditDialog(): void {
+    setTemplateEditDraft(null);
+  }
+
+  function handleTemplateEditField(
+    field: keyof TemplateEditDraft,
+    value: string,
+  ): void {
+    setTemplateEditDraft((current) =>
+      current
+        ? {
+            ...current,
+            [field]: value,
+          }
+        : current,
+    );
+  }
+
+  function closeTemplateCloneDialog(): void {
+    setTemplateCloneDraft(null);
+  }
+
+  function handleTemplateCloneField(
+    field: keyof TemplateCloneDraft,
+    value: string,
+  ): void {
+    setTemplateCloneDraft((current) =>
+      current
+        ? {
+            ...current,
+            [field]: value,
+          }
+        : current,
+    );
+  }
+
   function openVmLogsDialog(vm: VmInstance): void {
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
@@ -1589,6 +1741,11 @@ export function DashboardApp(): JSX.Element {
     setVmLogsRefreshTick((current) => current + 1);
   }
 
+  function closeCloneVmDialog(): void {
+    setCloneVmDialog(null);
+    setCloneVmDraft("");
+  }
+
   function closeRenameDialog(): void {
     setRenameDialog(null);
     setRenameDraft("");
@@ -1606,15 +1763,7 @@ export function DashboardApp(): JSX.Element {
   }
 
   async function handleRenameTemplate(template: EnvironmentTemplate): Promise<void> {
-    setOpenTemplateMenuId(null);
-    setShellMenuOpen(false);
-    setRenameDialog({
-      kind: "template",
-      id: template.id,
-      currentName: template.name,
-      description: template.description,
-    });
-    setRenameDraft(template.name);
+    openTemplateEditDialog(template);
   }
 
   async function handleRenameSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1717,27 +1866,65 @@ export function DashboardApp(): JSX.Element {
     });
   }
 
-  async function handleEditTemplateDescription(template: EnvironmentTemplate): Promise<void> {
-    setOpenTemplateMenuId(null);
-    const description = window.prompt("Template description", template.description);
+  async function handleEditTemplateSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> {
+    event.preventDefault();
 
-    if (description === null || description === template.description) {
+    if (!templateEditDraft) {
+      return;
+    }
+
+    const name = templateEditDraft.name.trim();
+
+    if (!name) {
       return;
     }
 
     await runMutation(
-      `Updating ${template.name}`,
+      `Updating ${templateEditDraft.name.trim() || "template"}`,
       async () => {
         await postJson<EnvironmentTemplate>(
-          `/api/templates/${template.id}/update`,
+          `/api/templates/${templateEditDraft.templateId}/update`,
           {
-            name: template.name,
-            description,
+            name,
+            description: templateEditDraft.description.trim(),
+            initCommands: parseInitCommandsDraft(templateEditDraft.initCommands),
           } satisfies UpdateTemplateInput,
         );
+        closeTemplateEditDialog();
         await refreshSummary();
       },
-      `Updated description for ${template.name}.`,
+      `Updated template ${name}.`,
+    );
+  }
+
+  async function handleTemplateCloneSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> {
+    event.preventDefault();
+
+    if (!templateCloneDraft) {
+      return;
+    }
+
+    const payload: CreateTemplateInput = {
+      sourceTemplateId: templateCloneDraft.sourceTemplateId,
+      name: templateCloneDraft.name.trim(),
+      description: templateCloneDraft.description.trim(),
+      initCommands: parseInitCommandsDraft(templateCloneDraft.initCommands),
+    };
+
+    await runMutation(
+      `Saving template ${payload.name || "template"}`,
+      async () => {
+        const createdTemplate = await postJson<EnvironmentTemplate>("/api/templates", payload);
+        closeTemplateCloneDialog();
+        await refreshSummary();
+        setCreateDirty(false);
+        setCreateDraft(buildCreateDraft(createdTemplate));
+      },
+      `Saved template ${payload.name}.`,
     );
   }
 
@@ -2203,25 +2390,43 @@ export function DashboardApp(): JSX.Element {
   }
 
   async function handleClone(vm: VmInstance): Promise<void> {
-    const name = window.prompt("Clone name", `${vm.name}-clone`)?.trim();
+    setOpenVmMenuId(null);
+    setOpenTemplateMenuId(null);
+    setShellMenuOpen(false);
+    setCloneVmDialog({
+      sourceVmId: vm.id,
+      sourceVmName: vm.name,
+    });
+    setCloneVmDraft(`${vm.name}-clone`);
+  }
+
+  async function handleCloneVmSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (!cloneVmDialog) {
+      return;
+    }
+
+    const name = cloneVmDraft.trim();
 
     if (!name) {
       return;
     }
 
     await runMutation(
-      `Cloning ${vm.name}`,
+      `Cloning ${cloneVmDialog.sourceVmName}`,
       async () => {
-        const clone = await postJson<VmInstance>(`/api/vms/${vm.id}/clone`, {
-          sourceVmId: vm.id,
+        const clone = await postJson<VmInstance>(`/api/vms/${cloneVmDialog.sourceVmId}/clone`, {
+          sourceVmId: cloneVmDialog.sourceVmId,
           name,
         });
+        closeCloneVmDialog();
         setVmSidepanelCollapsed(clone.id, false);
         setSelectedVmId(clone.id);
         await refreshSummary();
         await refreshDetail(clone.id);
       },
-      `Queued clone for ${vm.name}.`,
+      `Queued clone for ${cloneVmDialog.sourceVmName}.`,
     );
   }
 
@@ -2276,6 +2481,61 @@ export function DashboardApp(): JSX.Element {
       resolutionControlStatusRef.current.owner === "self" &&
       resolutionControlStatusRef.current.vmId === vmId
     );
+  }
+
+  function setResolutionControlState(next: ResolutionControlStatus): void {
+    setResolutionControlStatus((current) =>
+      current.vmId === next.vmId &&
+      current.owner === next.owner &&
+      current.source === next.source &&
+      current.controllerClientId === next.controllerClientId
+        ? current
+        : next,
+    );
+  }
+
+  function suspendResolutionControl(): void {
+    clearResolutionRetryTimer();
+    lastResolutionRequestKeyRef.current = null;
+    resolutionRequestQueueRef.current = emptyResolutionRequestQueue;
+    resolutionRetryStateRef.current = null;
+    setPendingManualResolutionSync(null);
+  }
+
+  function applyLocalResolutionControl(vmId: string, force = false): void {
+    const localOwner = claimResolutionControlLease(vmId, tabIdRef.current, force);
+
+    setResolutionControlState({
+      controllerClientId: clientIdRef.current,
+      owner: localOwner,
+      source: localOwner === "other" ? "local" : "none",
+      vmId,
+    });
+
+    if (localOwner !== "self") {
+      suspendResolutionControl();
+    }
+  }
+
+  function applyResolutionControlSnapshot(
+    snapshot: VmResolutionControlSnapshot,
+    forceLocal = false,
+  ): void {
+    const controllerClientId = snapshot.controller?.clientId ?? null;
+
+    if (controllerClientId !== clientIdRef.current) {
+      releaseResolutionControlLease(snapshot.vmId, tabIdRef.current);
+      setResolutionControlState({
+        controllerClientId,
+        owner: controllerClientId ? "other" : "none",
+        source: controllerClientId ? "remote" : "none",
+        vmId: snapshot.vmId,
+      });
+      suspendResolutionControl();
+      return;
+    }
+
+    applyLocalResolutionControl(snapshot.vmId, forceLocal);
   }
 
   function clearResolutionRetryTimer(): void {
@@ -2441,6 +2701,35 @@ export function DashboardApp(): JSX.Element {
       token: (current?.token ?? 0) + 1,
       vmId,
     }));
+  }
+
+  async function handleTakeOverResolutionControl(vm: VmInstance): Promise<void> {
+    setResolutionControlTakeoverBusy(true);
+
+    try {
+      const snapshot = await postJson<
+        VmResolutionControlSnapshot,
+        SyncVmResolutionControlInput
+      >(`/api/vms/${vm.id}/resolution-control/claim`, {
+        clientId: clientIdRef.current,
+        force: true,
+      });
+
+      applyResolutionControlSnapshot(snapshot, true);
+      queueManualResolutionSync(vm.id);
+    } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        requireLogin();
+        return;
+      }
+
+      setNotice({
+        tone: "error",
+        message: errorMessage(error),
+      });
+    } finally {
+      setResolutionControlTakeoverBusy(false);
+    }
   }
 
   async function handleResize(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -3153,6 +3442,7 @@ export function DashboardApp(): JSX.Element {
                         hideConnectedOverlayStatus
                         onResolutionChange={setDesktopResolution}
                         surfaceClassName="workspace-stage__canvas"
+                        viewOnly={blocksLiveResolutionControl}
                         viewportMode={
                           desktopResolutionMode === "viewport" ? "scale" : "fit"
                         }
@@ -3160,6 +3450,16 @@ export function DashboardApp(): JSX.Element {
                         showHeader={false}
                         statusMode="overlay"
                       />
+                      {blocksLiveResolutionControl && resolutionControlHeading && resolutionControlMessage ? (
+                        <WorkspaceControlLockOverlay
+                          disabled={isBusy || resolutionControlTakeoverBusy}
+                          message={resolutionControlMessage}
+                          takeOverLabel={resolutionControlTakeoverLabel}
+                          takeoverBusy={resolutionControlTakeoverBusy}
+                          title={resolutionControlHeading}
+                          onTakeOver={() => void handleTakeOverResolutionControl(currentDetail.vm)}
+                        />
+                      ) : null}
                     </div>
                   </div>
                 ) : (
@@ -3185,6 +3485,8 @@ export function DashboardApp(): JSX.Element {
                 detail={currentDetail}
                 forwardDraft={forwardDraft}
                 resolutionControlBlocked={blocksLiveResolutionControl}
+                resolutionControlTakeoverBusy={resolutionControlTakeoverBusy}
+                resolutionControlTakeoverLabel={resolutionControlTakeoverLabel}
                 resolutionControlMessage={resolutionControlMessage}
                 resolutionDraft={resolutionDraft}
                 resolutionState={effectiveDesktopResolution}
@@ -3198,6 +3500,7 @@ export function DashboardApp(): JSX.Element {
                 onForwardDraftChange={setForwardDraft}
                 onResolutionModeChange={(mode) => applyResolutionMode(selectedVm.id, mode)}
                 onResolutionDraftChange={setResolutionDraft}
+                onTakeOverResolutionControl={handleTakeOverResolutionControl}
                 onViewportScaleChange={(scale) =>
                   applyViewportScalePreference(selectedVm.id, scale)}
                 onRemoveForward={handleRemoveForward}
@@ -3234,10 +3537,10 @@ export function DashboardApp(): JSX.Element {
                 persistence={persistence}
                 summary={summary}
                 onCreate={openCreateDialog}
+                onCloneTemplate={openTemplateCloneDialog}
                 onCreateFromTemplate={openCreateDialogForTemplate}
                 onClosedResizeStart={handleSidepanelClosedResizeStart}
                 onDeleteTemplate={handleDeleteTemplate}
-                onEditTemplateDescription={handleEditTemplateDescription}
                 onOpenCollapsed={() => setOverviewSidepanelCollapsed(false)}
                 onRenameTemplate={handleRenameTemplate}
                 onToggleTemplateMenu={(templateId) => {
@@ -3276,6 +3579,39 @@ export function DashboardApp(): JSX.Element {
           onTemplateChange={handleTemplateChange}
         />
       ) : null}
+      {templateCloneDraft ? (
+        <TemplateCloneDialog
+          busy={isBusy}
+          draft={templateCloneDraft}
+          sourceTemplate={
+            displayedTemplates.find(
+              (entry) => entry.id === templateCloneDraft.sourceTemplateId,
+            ) ?? null
+          }
+          onClose={closeTemplateCloneDialog}
+          onFieldChange={handleTemplateCloneField}
+          onSubmit={handleTemplateCloneSubmit}
+        />
+      ) : null}
+      {templateEditDraft ? (
+        <TemplateEditDialog
+          busy={isBusy}
+          draft={templateEditDraft}
+          onClose={closeTemplateEditDialog}
+          onFieldChange={handleTemplateEditField}
+          onSubmit={handleEditTemplateSubmit}
+        />
+      ) : null}
+      {cloneVmDialog ? (
+        <CloneVmDialog
+          busy={isBusy}
+          draft={cloneVmDraft}
+          sourceVmName={cloneVmDialog.sourceVmName}
+          onClose={closeCloneVmDialog}
+          onDraftChange={setCloneVmDraft}
+          onSubmit={handleCloneVmSubmit}
+        />
+      ) : null}
       {renameDialog ? (
         <RenameDialog
           busy={isBusy}
@@ -3311,6 +3647,32 @@ interface CreateVmDialogProps {
   onFieldChange: (field: keyof CreateDraft, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onTemplateChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+}
+
+interface TemplateCloneDialogProps {
+  busy: boolean;
+  draft: TemplateCloneDraft;
+  sourceTemplate: EnvironmentTemplate | null;
+  onClose: () => void;
+  onFieldChange: (field: keyof TemplateCloneDraft, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+}
+
+interface TemplateEditDialogProps {
+  busy: boolean;
+  draft: TemplateEditDraft;
+  onClose: () => void;
+  onFieldChange: (field: keyof TemplateEditDraft, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+}
+
+interface CloneVmDialogProps {
+  busy: boolean;
+  draft: string;
+  sourceVmName: string;
+  onClose: () => void;
+  onDraftChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
 }
 
 interface RenameDialogProps {
@@ -3374,6 +3736,12 @@ function RenameDialog({
         </div>
 
         <form className="dialog-panel__form" onSubmit={onSubmit}>
+          <InlineWarningNote title="Shut down first">
+            Clone from a stopped workspace when possible. Cloning a running VM can capture
+            inconsistent app state, and apps like Chrome may come across with open lockfiles or
+            partially written session data.
+          </InlineWarningNote>
+
           <label className="field-shell">
             <span>Name</span>
             <input
@@ -3385,6 +3753,11 @@ function RenameDialog({
               autoFocus
             />
           </label>
+
+          <p className="empty-copy">
+            VM clones copy the current disk state as-is, so template first-boot init commands do
+            not rerun here. Use a template launch when you need to change that script.
+          </p>
 
           <button
             className="button button--primary button--full"
@@ -3567,6 +3940,23 @@ function CreateVmDialog({
             />
           </div>
 
+          <label className="field-shell">
+            <span>Init commands</span>
+            <textarea
+              className="field-input field-input--tall field-input--mono"
+              value={createDraft.initCommands}
+              onChange={(event) => onFieldChange("initCommands", event.target.value)}
+              placeholder={"sudo apt-get update\nsudo apt-get install -y ripgrep"}
+              disabled={busy}
+              spellCheck={false}
+            />
+          </label>
+
+          <p className="empty-copy">
+            These run once on first boot for this VM only. Use template edit or clone when you
+            want to save them as the default for future launches.
+          </p>
+
           {validationError ? (
             <div className="inline-note">
               <strong>Launch blocked</strong>
@@ -3602,6 +3992,281 @@ function CreateVmDialog({
           </button>
         </form>
       </section>
+    </div>
+  );
+}
+
+function TemplateCloneDialog({
+  busy,
+  draft,
+  sourceTemplate,
+  onClose,
+  onFieldChange,
+  onSubmit,
+}: TemplateCloneDialogProps): JSX.Element {
+  const normalizedName = draft.name.trim();
+
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <section className="dialog-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="dialog-panel__header">
+          <div>
+            <p className="workspace-shell__eyebrow">Template clone</p>
+            <h2 className="dialog-panel__title">Save a reusable template</h2>
+            <p className="dialog-panel__copy">
+              Clone the selected base template, then add one command per line for the
+              first boot script.
+            </p>
+          </div>
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Close
+          </button>
+        </div>
+
+        <form className="dialog-panel__form" onSubmit={onSubmit}>
+          {sourceTemplate ? (
+            <div className="dialog-panel__template">
+              <div className="dialog-panel__template-head">
+                <strong>{sourceTemplate.name}</strong>
+                <span className="surface-pill">
+                  {formatResources(sourceTemplate.defaultResources)}
+                </span>
+              </div>
+              <p>{sourceTemplate.description}</p>
+            </div>
+          ) : null}
+
+          <label className="field-shell">
+            <span>Name</span>
+            <input
+              className="field-input"
+              value={draft.name}
+              onChange={(event) => onFieldChange("name", event.target.value)}
+              placeholder="Ubuntu Agent Forge Custom"
+              disabled={busy}
+              autoFocus
+            />
+          </label>
+
+          <label className="field-shell">
+            <span>Description</span>
+            <textarea
+              className="field-input field-input--tall"
+              value={draft.description}
+              onChange={(event) => onFieldChange("description", event.target.value)}
+              disabled={busy}
+            />
+          </label>
+
+          <label className="field-shell">
+            <span>Init commands</span>
+            <textarea
+              className="field-input field-input--tall field-input--mono"
+              value={draft.initCommands}
+              onChange={(event) => onFieldChange("initCommands", event.target.value)}
+              placeholder={"sudo apt-get update\nsudo apt-get install -y nodejs npm"}
+              disabled={busy}
+              spellCheck={false}
+            />
+          </label>
+
+          <p className="empty-copy">
+            First-boot commands run once on fresh launches from this template. Leave the list
+            empty if you only want a renamed clone of the base template.
+          </p>
+
+          <button
+            className="button button--primary button--full"
+            type="submit"
+            disabled={busy || normalizedName.length === 0}
+          >
+            Save template
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function TemplateEditDialog({
+  busy,
+  draft,
+  onClose,
+  onFieldChange,
+  onSubmit,
+}: TemplateEditDialogProps): JSX.Element {
+  const normalizedName = draft.name.trim();
+
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <section className="dialog-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="dialog-panel__header">
+          <div>
+            <p className="workspace-shell__eyebrow">Template</p>
+            <h2 className="dialog-panel__title">Edit template</h2>
+            <p className="dialog-panel__copy">
+              Update the saved name, description, and first-boot init commands in one place.
+            </p>
+          </div>
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Close
+          </button>
+        </div>
+
+        <form className="dialog-panel__form" onSubmit={onSubmit}>
+          <label className="field-shell">
+            <span>Name</span>
+            <input
+              className="field-input"
+              value={draft.name}
+              onChange={(event) => onFieldChange("name", event.target.value)}
+              disabled={busy}
+              autoFocus
+            />
+          </label>
+
+          <label className="field-shell">
+            <span>Description</span>
+            <textarea
+              className="field-input field-input--tall"
+              value={draft.description}
+              onChange={(event) => onFieldChange("description", event.target.value)}
+              disabled={busy}
+            />
+          </label>
+
+          <label className="field-shell">
+            <span>Init commands</span>
+            <textarea
+              className="field-input field-input--tall field-input--mono"
+              value={draft.initCommands}
+              onChange={(event) => onFieldChange("initCommands", event.target.value)}
+              placeholder={"sudo apt-get update\nsudo apt-get install -y nodejs npm"}
+              disabled={busy}
+              spellCheck={false}
+            />
+          </label>
+
+          <button
+            className="button button--primary button--full"
+            type="submit"
+            disabled={busy || normalizedName.length === 0}
+          >
+            Save template
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function CloneVmDialog({
+  busy,
+  draft,
+  sourceVmName,
+  onClose,
+  onDraftChange,
+  onSubmit,
+}: CloneVmDialogProps): JSX.Element {
+  const normalizedDraft = draft.trim();
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onClick={() => {
+        if (!busy) {
+          onClose();
+        }
+      }}
+    >
+      <section className="dialog-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="dialog-panel__header">
+          <div>
+            <p className="workspace-shell__eyebrow">Clone workspace</p>
+            <h2 className="dialog-panel__title">Clone {sourceVmName}</h2>
+            <p className="dialog-panel__copy">
+              Create a new workspace from the current VM without leaving the dashboard UI.
+            </p>
+          </div>
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Close
+          </button>
+        </div>
+
+        <form className="dialog-panel__form" onSubmit={onSubmit}>
+          <label className="field-shell">
+            <span>Name</span>
+            <input
+              className="field-input"
+              value={draft}
+              onChange={(event) => onDraftChange(event.target.value)}
+              placeholder={`${sourceVmName}-clone`}
+              disabled={busy}
+              autoFocus
+            />
+          </label>
+
+          <button
+            className="button button--primary button--full"
+            type="submit"
+            disabled={busy || normalizedDraft.length === 0}
+          >
+            Queue clone
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function TemplateInitCommandsPreview({
+  commands,
+  truncateAfter,
+}: {
+  commands: string[];
+  truncateAfter?: number;
+}): JSX.Element {
+  const visibleCommands =
+    truncateAfter && truncateAfter > 0 ? commands.slice(0, truncateAfter) : commands;
+  const hiddenCount = Math.max(0, commands.length - visibleCommands.length);
+
+  return (
+    <div className="template-init-preview">
+      <div className="template-init-preview__head">
+        <strong>First boot</strong>
+        <span className="surface-pill">
+          {commands.length} init command{commands.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      {commands.length > 0 ? (
+        <>
+          <pre className="template-init-preview__output mono-font">
+            {visibleCommands.join("\n")}
+          </pre>
+          {hiddenCount > 0 ? (
+            <p className="empty-copy">
+              +{hiddenCount} more command{hiddenCount === 1 ? "" : "s"}
+            </p>
+          ) : null}
+        </>
+      ) : (
+        <p className="empty-copy">No first-boot init commands.</p>
+      )}
     </div>
   );
 }
@@ -4314,6 +4979,8 @@ interface WorkspaceSidepanelProps {
   forwardDraft: ForwardDraft;
   resolutionControlBlocked: boolean;
   resolutionControlMessage: string | null;
+  resolutionControlTakeoverBusy: boolean;
+  resolutionControlTakeoverLabel: string;
   resolutionDraft: ResolutionDraft;
   resolutionState: DesktopResolutionState;
   resourceDraft: ResourceDraft;
@@ -4328,6 +4995,7 @@ interface WorkspaceSidepanelProps {
   onRename: (vm: VmInstance) => Promise<void>;
   onResolutionModeChange: (mode: DesktopResolutionMode) => void;
   onResolutionDraftChange: (draft: ResolutionDraft) => void;
+  onTakeOverResolutionControl: (vm: VmInstance) => Promise<void>;
   onViewportScaleChange: (scale: number) => void;
   onRemoveForward: (forwardId: string) => Promise<void>;
   onResourceDraftChange: (draft: ResourceDraft) => void;
@@ -4351,6 +5019,15 @@ interface WorkspaceSidepanelProps {
   onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }
 
+interface WorkspaceControlLockOverlayProps {
+  disabled: boolean;
+  message: string;
+  takeOverLabel: string;
+  takeoverBusy: boolean;
+  title: string;
+  onTakeOver: () => void;
+}
+
 interface SidepanelResizeHandleProps {
   collapsed: boolean;
   onClosedResizeStart: (pointerClientX: number, handleCenterX: number) => void;
@@ -4368,6 +5045,33 @@ interface RailResizeHandleProps {
   width: number;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+}
+
+function WorkspaceControlLockOverlay({
+  disabled,
+  message,
+  takeOverLabel,
+  takeoverBusy,
+  title,
+  onTakeOver,
+}: WorkspaceControlLockOverlayProps): JSX.Element {
+  return (
+    <div className="workspace-stage__control-lock">
+      <div className="workspace-stage__control-lock-panel">
+        <p className="workspace-stage__control-lock-eyebrow">Viewport locked</p>
+        <h3 className="workspace-stage__control-lock-title">{title}</h3>
+        <p className="workspace-stage__control-lock-copy">{message}</p>
+        <button
+          className="button button--secondary"
+          disabled={disabled}
+          type="button"
+          onClick={onTakeOver}
+        >
+          {takeoverBusy ? "Taking over..." : takeOverLabel}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function RailResizeHandle({
@@ -4524,6 +5228,8 @@ function WorkspaceSidepanel({
   forwardDraft,
   resolutionControlBlocked,
   resolutionControlMessage,
+  resolutionControlTakeoverBusy,
+  resolutionControlTakeoverLabel,
   resolutionDraft,
   resolutionState,
   resourceDraft,
@@ -4538,6 +5244,7 @@ function WorkspaceSidepanel({
   onRename,
   onResolutionModeChange,
   onResolutionDraftChange,
+  onTakeOverResolutionControl,
   onViewportScaleChange,
   onRemoveForward,
   onResourceDraftChange,
@@ -4805,7 +5512,17 @@ function WorkspaceSidepanel({
                 ) : null}
 
                 {resolutionControlMessage ? (
-                  <p className="empty-copy">{resolutionControlMessage}</p>
+                  <div className="stack">
+                    <p className="empty-copy">{resolutionControlMessage}</p>
+                    <button
+                      className="button button--secondary button--full"
+                      disabled={busy || resolutionControlTakeoverBusy}
+                      type="button"
+                      onClick={() => void onTakeOverResolutionControl(vm)}
+                    >
+                      {resolutionControlTakeoverBusy ? "Taking over..." : resolutionControlTakeoverLabel}
+                    </button>
+                  </div>
                 ) : null}
               </form>
             </SidepanelSection>
@@ -5287,9 +6004,9 @@ interface TemplateCardProps {
   busy: boolean;
   linkedVmCount: number;
   menuOpen: boolean;
+  onCloneTemplate: (template: EnvironmentTemplate) => void;
   onCreateVm: (template: EnvironmentTemplate) => void;
   onDelete: (template: EnvironmentTemplate) => Promise<void>;
-  onEditDescription: (template: EnvironmentTemplate) => Promise<void>;
   onRename: (template: EnvironmentTemplate) => Promise<void>;
   onToggleMenu: (templateId: string) => void;
   template: EnvironmentTemplate;
@@ -5299,9 +6016,9 @@ function TemplateCard({
   busy,
   linkedVmCount,
   menuOpen,
+  onCloneTemplate,
   onCreateVm,
   onDelete,
-  onEditDescription,
   onRename,
   onToggleMenu,
   template,
@@ -5354,6 +6071,17 @@ function TemplateCard({
                 type="button"
                 onClick={() => {
                   onToggleMenu(template.id);
+                  onCloneTemplate(template);
+                }}
+                disabled={busy}
+              >
+                Clone with init...
+              </button>
+              <button
+                className="menu-action"
+                type="button"
+                onClick={() => {
+                  onToggleMenu(template.id);
                   onCreateVm(template);
                 }}
                 disabled={busy}
@@ -5369,18 +6097,7 @@ function TemplateCard({
                 }}
                 disabled={busy}
               >
-                Rename
-              </button>
-              <button
-                className="menu-action"
-                type="button"
-                onClick={() => {
-                  onToggleMenu(template.id);
-                  void onEditDescription(template);
-                }}
-                disabled={busy}
-              >
-                Edit description
+                Edit template...
               </button>
               <button
                 className="menu-action menu-action--danger"
@@ -5400,6 +6117,7 @@ function TemplateCard({
       </div>
 
       <p>{template.description || "No description yet."}</p>
+      <TemplateInitCommandsPreview commands={template.initCommands} truncateAfter={3} />
     </div>
   );
 }
@@ -5410,10 +6128,10 @@ function OverviewSidepanel({
   incusStorage,
   openTemplateMenuId,
   onCreate,
+  onCloneTemplate,
   onCreateFromTemplate,
   onClosedResizeStart,
   onDeleteTemplate,
-  onEditTemplateDescription,
   onOpenCollapsed,
   onRenameTemplate,
   onToggleTemplateMenu,
@@ -5433,10 +6151,10 @@ function OverviewSidepanel({
   incusStorage: HealthStatus["incusStorage"];
   openTemplateMenuId: string | null;
   onCreate: () => void;
+  onCloneTemplate: (template: EnvironmentTemplate) => void;
   onCreateFromTemplate: (template: EnvironmentTemplate) => void;
   onClosedResizeStart: (pointerClientX: number, handleCenterX: number) => void;
   onDeleteTemplate: (template: EnvironmentTemplate) => Promise<void>;
-  onEditTemplateDescription: (template: EnvironmentTemplate) => Promise<void>;
   onOpenCollapsed: () => void;
   onRenameTemplate: (template: EnvironmentTemplate) => Promise<void>;
   onToggleTemplateMenu: (templateId: string) => void;
@@ -5672,9 +6390,9 @@ function OverviewSidepanel({
                         summary.vms.filter((entry) => entry.templateId === template.id).length
                       }
                       menuOpen={openTemplateMenuId === template.id}
+                      onCloneTemplate={onCloneTemplate}
                       onCreateVm={onCreateFromTemplate}
                       onDelete={onDeleteTemplate}
-                      onEditDescription={onEditTemplateDescription}
                       onRename={onRenameTemplate}
                       onToggleMenu={onToggleTemplateMenu}
                       template={template}
@@ -5745,8 +6463,7 @@ function LoginShell({
           <p className="workspace-shell__eyebrow">Parallaize Admin</p>
           <h1 className="loading-shell__title">Sign in</h1>
           <p className="loading-shell__copy">
-            The dashboard now uses an in-app single-admin session instead of the browser’s
-            native Basic Auth prompt.
+            Sign in with the shared admin credentials to unlock the dashboard session.
           </p>
         </div>
 
@@ -5910,10 +6627,16 @@ function FieldPair({
   );
 }
 
-function InlineWarningNote({ children }: { children: ReactNode }): JSX.Element {
+function InlineWarningNote({
+  children,
+  title = "Running VM",
+}: {
+  children: ReactNode;
+  title?: string;
+}): JSX.Element {
   return (
     <div className="inline-note inline-note--warning">
-      <strong>Running VM</strong>
+      <strong>{title}</strong>
       <p>{children}</p>
     </div>
   );
@@ -5948,7 +6671,37 @@ function buildCreateDraft(
     cpu: String(template.defaultResources.cpu),
     ramGb: formatRamDraftValue(template.defaultResources.ramMb),
     diskGb: String(template.defaultResources.diskGb),
+    initCommands: formatInitCommandsDraft(template.initCommands),
   };
+}
+
+function buildTemplateCloneDraft(template: EnvironmentTemplate): TemplateCloneDraft {
+  return {
+    sourceTemplateId: template.id,
+    name: `${template.name} Custom`,
+    description: template.description,
+    initCommands: formatInitCommandsDraft(template.initCommands),
+  };
+}
+
+function buildTemplateEditDraft(template: EnvironmentTemplate): TemplateEditDraft {
+  return {
+    templateId: template.id,
+    name: template.name,
+    description: template.description,
+    initCommands: formatInitCommandsDraft(template.initCommands),
+  };
+}
+
+function formatInitCommandsDraft(commands: string[]): string {
+  return commands.join("\n");
+}
+
+function parseInitCommandsDraft(value: string): string[] {
+  return value
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 function buildCreateDiskValidationError(
@@ -6553,6 +7306,18 @@ function readDocumentVisible(): boolean {
   return typeof document === "undefined" ? true : document.visibilityState === "visible";
 }
 
+function readOrCreateResolutionControlClientId(): string {
+  const existing = readStoredString(resolutionControlClientIdStorageKey)?.trim();
+
+  if (existing) {
+    return existing;
+  }
+
+  const clientId = `client-${createTabId()}`;
+  writeStoredString(resolutionControlClientIdStorageKey, clientId);
+  return clientId;
+}
+
 function createTabId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -6564,6 +7329,7 @@ function createTabId(): string {
 function claimResolutionControlLease(
   vmId: string,
   tabId: string,
+  force = false,
 ): ResolutionControlOwner {
   if (typeof window === "undefined") {
     return "self";
@@ -6574,6 +7340,7 @@ function claimResolutionControlLease(
   const existingLease = parseResolutionControlLease(readStoredString(key));
 
   if (
+    !force &&
     !canClaimResolutionControlLease({
       lease: existingLease,
       now,

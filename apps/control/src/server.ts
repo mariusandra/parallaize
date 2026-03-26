@@ -11,6 +11,7 @@ import type {
   ApiResponse,
   CaptureTemplateInput,
   CloneVmInput,
+  CreateTemplateInput,
   CreateVmInput,
   DashboardSummary,
   HealthStatus,
@@ -23,11 +24,13 @@ import type {
   SetVmResolutionInput,
   SnapshotLaunchInput,
   SnapshotInput,
+  SyncVmResolutionControlInput,
   UpdateTemplateInput,
   UpdateVmInput,
   UpdateVmForwardedPortsInput,
   VmDetail,
   VmLogsSnapshot,
+  VmResolutionControlSnapshot,
 } from "../../../packages/shared/src/types.js";
 import { loadConfig } from "./config.js";
 import { collectIncusStorageDiagnostics, runIncusStorageAction } from "./incus-storage.js";
@@ -63,14 +66,27 @@ const htmlPath = join(staticRoot, "index.html");
 const faviconPath = join(staticRoot, "favicon.svg");
 const sessionCookieName = "parallaize_session";
 const sessionMaxAgeSeconds = 60 * 60 * 24 * 7;
+const resolutionControlLeaseTtlMs = 5_000;
 const activeSessionTokens = new Set<string>();
 const activeSockets = new Set<Socket>();
 const activeEventStreams = new Set<ServerResponse>();
+const resolutionControlLeases = new Map<string, ResolutionControlLeaseRecord>();
+
+interface ResolutionControlLeaseRecord {
+  clientId: string;
+  claimedAtMs: number;
+  heartbeatAtMs: number;
+  vmId: string;
+}
 
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
     const method = request.method ?? "GET";
+
+    if (method === "POST" && url.pathname === "/api/auth/login") {
+      return handleLogin(request, response);
+    }
 
     if (method === "GET" && url.pathname === "/api/auth/status") {
       return writeJson<AuthStatus>(response, 200, {
@@ -79,15 +95,39 @@ const server = createServer(async (request, response) => {
       });
     }
 
-    if (method === "POST" && url.pathname === "/api/auth/login") {
-      return handleLogin(request, response);
-    }
-
     if (method === "POST" && url.pathname === "/api/auth/logout") {
       return handleLogout(request, response);
     }
 
-    if (!isAuthorized(request) && !isPublicRoute(method, url.pathname)) {
+    if ((method === "GET" || method === "HEAD") && url.pathname === "/") {
+      return serveFile(response, htmlPath, "text/html; charset=utf-8", method === "HEAD");
+    }
+
+    if (
+      (method === "GET" || method === "HEAD") &&
+      (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")
+    ) {
+      return serveFile(
+        response,
+        faviconPath,
+        "image/svg+xml; charset=utf-8",
+        method === "HEAD",
+      );
+    }
+
+    if ((method === "GET" || method === "HEAD") && url.pathname.startsWith("/assets/")) {
+      const resolved = resolveAsset(url.pathname);
+      if (resolved) {
+        return serveFile(
+          response,
+          resolved.path,
+          resolved.contentType,
+          method === "HEAD",
+        );
+      }
+    }
+
+    if (!isAuthorized(request)) {
       writeAuthRequired(response);
       return;
     }
@@ -231,6 +271,19 @@ const server = createServer(async (request, response) => {
       return writeAccepted(response);
     }
 
+    const resolutionControlMatch = url.pathname.match(
+      /^\/api\/vms\/([^/]+)\/resolution-control\/claim$/,
+    );
+    if (method === "POST" && resolutionControlMatch) {
+      const vmId = resolutionControlMatch[1];
+      manager.getVmDetail(vmId);
+      const payload = await readJsonBody<SyncVmResolutionControlInput>(request);
+      return writeJson<VmResolutionControlSnapshot>(response, 200, {
+        ok: true,
+        data: syncVmResolutionControl(vmId, payload),
+      });
+    }
+
     const actionMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/(clone|start|stop|restart|delete|snapshot|resize|template|input)$/);
     if (method === "POST" && actionMatch) {
       const vmId = actionMatch[1];
@@ -285,6 +338,15 @@ const server = createServer(async (request, response) => {
       }
     }
 
+    if (method === "POST" && url.pathname === "/api/templates") {
+      const payload = await readJsonBody<CreateTemplateInput>(request);
+      const template = manager.createTemplate(payload);
+      return writeJson(response, 201, {
+        ok: true,
+        data: template,
+      });
+    }
+
     const templateActionMatch = url.pathname.match(/^\/api\/templates\/([^/]+)\/(update|delete)$/);
     if (method === "POST" && templateActionMatch) {
       const templateId = templateActionMatch[1];
@@ -304,34 +366,6 @@ const server = createServer(async (request, response) => {
           return writeAccepted(response);
         default:
           break;
-      }
-    }
-
-    if ((method === "GET" || method === "HEAD") && url.pathname === "/") {
-      return serveFile(response, htmlPath, "text/html; charset=utf-8", method === "HEAD");
-    }
-
-    if (
-      (method === "GET" || method === "HEAD") &&
-      (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")
-    ) {
-      return serveFile(
-        response,
-        faviconPath,
-        "image/svg+xml; charset=utf-8",
-        method === "HEAD",
-      );
-    }
-
-    if ((method === "GET" || method === "HEAD") && url.pathname.startsWith("/assets/")) {
-      const resolved = resolveAsset(url.pathname);
-      if (resolved) {
-        return serveFile(
-          response,
-          resolved.path,
-          resolved.contentType,
-          method === "HEAD",
-        );
       }
     }
 
@@ -387,7 +421,7 @@ server.listen(config.port, config.host, () => {
   );
   if (config.adminPassword) {
     process.stdout.write(
-      `single-admin auth enabled for ${config.adminUsername} (cookie login + basic auth fallback)\n`,
+      `single-admin auth enabled for ${config.adminUsername} (cookie session login)\n`,
     );
   }
 });
@@ -415,6 +449,82 @@ function handleEvents(response: ServerResponse): void {
     clearInterval(heartbeat);
     unsubscribe();
   });
+}
+
+function syncVmResolutionControl(
+  vmId: string,
+  input: SyncVmResolutionControlInput,
+): VmResolutionControlSnapshot {
+  const clientId = input.clientId?.trim();
+
+  if (!clientId) {
+    throw new Error("Resolution control client ID is required.");
+  }
+
+  const now = Date.now();
+  const existingLease = getActiveResolutionControlLease(vmId, now);
+
+  if (
+    !existingLease ||
+    existingLease.clientId === clientId ||
+    input.force === true
+  ) {
+    const nextLease: ResolutionControlLeaseRecord = {
+      clientId,
+      claimedAtMs:
+        existingLease && existingLease.clientId === clientId
+          ? existingLease.claimedAtMs
+          : now,
+      heartbeatAtMs: now,
+      vmId,
+    };
+    const previousClientId = existingLease?.clientId ?? null;
+
+    resolutionControlLeases.set(vmId, nextLease);
+
+    if (previousClientId !== nextLease.clientId) {
+      broadcastResolutionControlSnapshot(buildResolutionControlSnapshot(vmId, nextLease));
+    }
+
+    return buildResolutionControlSnapshot(vmId, nextLease);
+  }
+
+  return buildResolutionControlSnapshot(vmId, existingLease);
+}
+
+function getActiveResolutionControlLease(
+  vmId: string,
+  now = Date.now(),
+): ResolutionControlLeaseRecord | null {
+  const lease = resolutionControlLeases.get(vmId);
+
+  if (!lease) {
+    return null;
+  }
+
+  if (now - lease.heartbeatAtMs > resolutionControlLeaseTtlMs) {
+    resolutionControlLeases.delete(vmId);
+    return null;
+  }
+
+  return lease;
+}
+
+function buildResolutionControlSnapshot(
+  vmId: string,
+  lease: ResolutionControlLeaseRecord | null,
+): VmResolutionControlSnapshot {
+  return {
+    vmId,
+    controller:
+      lease === null
+        ? null
+        : {
+            clientId: lease.clientId,
+            claimedAt: new Date(lease.claimedAtMs).toISOString(),
+            heartbeatAt: new Date(lease.heartbeatAtMs).toISOString(),
+          },
+  };
 }
 
 async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
@@ -473,31 +583,7 @@ function resolveAuthMode(request: IncomingMessage): AuthStatus["mode"] {
     return "session";
   }
 
-  const authorization = request.headers.authorization;
-  if (!authorization?.startsWith("Basic ")) {
-    return "unauthenticated";
-  }
-
-  let decoded: string;
-
-  try {
-    decoded = Buffer.from(authorization.slice("Basic ".length), "base64").toString("utf8");
-  } catch {
-    return "unauthenticated";
-  }
-
-  const separatorIndex = decoded.indexOf(":");
-
-  if (separatorIndex === -1) {
-    return "unauthenticated";
-  }
-
-  const username = decoded.slice(0, separatorIndex);
-  const password = decoded.slice(separatorIndex + 1);
-
-  return safeEqual(username, config.adminUsername) && safeEqual(password, config.adminPassword)
-    ? "basic"
-    : "unauthenticated";
+  return "unauthenticated";
 }
 
 function buildAuthStatus(request: IncomingMessage): AuthStatus {
@@ -506,7 +592,7 @@ function buildAuthStatus(request: IncomingMessage): AuthStatus {
   return {
     authEnabled: Boolean(config.adminPassword),
     authenticated: mode !== "unauthenticated",
-    username: mode === "session" || mode === "basic" ? config.adminUsername : null,
+    username: mode === "session" ? config.adminUsername : null,
     mode,
   };
 }
@@ -611,20 +697,6 @@ function writeSocketAuthRequired(socket: Socket): void {
       "Content-Length: 0\r\n\r\n",
   );
   socket.destroy();
-}
-
-function isPublicRoute(method: string, pathname: string): boolean {
-  if (method === "GET" || method === "HEAD") {
-    if (pathname === "/" || pathname === "/favicon.svg" || pathname === "/favicon.ico") {
-      return true;
-    }
-
-    if (pathname.startsWith("/assets/")) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 function createSessionToken(): string {
@@ -811,6 +883,16 @@ function writeSseEvent(
   }
 
   response.write(`event: ${event}\ndata: ${data}\n\n`);
+}
+
+function broadcastResolutionControlSnapshot(
+  snapshot: VmResolutionControlSnapshot,
+): void {
+  const payload = JSON.stringify(snapshot);
+
+  for (const response of activeEventStreams) {
+    writeSseEvent(response, "resolution-control", payload);
+  }
 }
 
 function closeActiveEventStreams(): void {

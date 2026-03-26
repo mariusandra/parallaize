@@ -25,6 +25,7 @@ export function createSeedState(provider: ProviderState): AppState {
         diskGb: 80,
       },
       defaultForwardedPorts: [],
+      initCommands: [],
       tags: ["coding", "agents", "ubuntu"],
       notes: [
         "GNOME desktop with terminal and editor workspace layout.",

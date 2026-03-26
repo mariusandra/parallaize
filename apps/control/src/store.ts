@@ -393,6 +393,7 @@ function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
     defaultForwardedPorts: normalizeTemplateForwardedPorts(
       template.defaultForwardedPorts,
     ),
+    initCommands: normalizeTemplateInitCommands(template.initCommands),
     tags: Array.isArray(template.tags) ? template.tags : [],
     notes: Array.isArray(template.notes) ? template.notes : [],
     snapshotIds: Array.isArray(template.snapshotIds) ? template.snapshotIds : [],
@@ -626,6 +627,19 @@ function normalizeTemplateForwardedPort(
     protocol: forwardedPort?.protocol === "http" ? "http" : "http",
     description: forwardedPort?.description?.trim() ?? "",
   };
+}
+
+function normalizeTemplateInitCommands(
+  initCommands: EnvironmentTemplate["initCommands"] | undefined,
+): string[] {
+  if (!Array.isArray(initCommands)) {
+    return [];
+  }
+
+  return initCommands
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0)
+    .slice(0, 64);
 }
 
 function normalizeVmForwardedPorts(
