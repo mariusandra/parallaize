@@ -96,6 +96,7 @@ After each completed todo step, create a commit. Use a brief commit message that
 
 ## Decision Log
 
+- 2026-03-26: Fixed real-host Incus template-capture cleanup on `dir` pools by publishing from a disposable copy of the source snapshot, so deleting the source VM no longer trips over a stale read-only snapshot mount left behind by `incus publish`.
 - 2026-03-26: Fixed a clone/snapshot guest-bootstrap deadlock where `parallaize-desktop-bootstrap.service` synchronously restarted `parallaize-x11vnc.service` even though the VNC unit was ordered `After=parallaize-desktop-bootstrap.service`, which could leave `incus exec` clone waits hung for tens of minutes.
 - 2026-03-25: Made guest display-resolution changes non-disruptive by only restarting `parallaize-x11vnc.service` when the launcher/unit actually changed or the bridge is inactive, which avoids noVNC reconnect churn during the first viewport-sync resize.
 - 2026-03-26: Fixed the packaged blank-host Incus bootstrap to prefer a `btrfs` pool and fall back to `dir`, and surfaced right-rail diagnostics that explain the difference between control-plane persistence and the Incus VM storage pool.
