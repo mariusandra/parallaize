@@ -29,6 +29,9 @@ jobs:
     env:
       VERSION_INPUT: ${{ github.event.inputs.version }}
       PACKAGE_RELEASE: ${{ github.event.inputs.package_release }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_RELEASE_NOTES_MODEL: ${{ vars.OPENAI_RELEASE_NOTES_MODEL }}
+      OPENAI_RELEASE_NOTES_BASE_URL: ${{ vars.OPENAI_RELEASE_NOTES_BASE_URL }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
       R2_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
@@ -74,6 +77,16 @@ jobs:
           echo "RELEASE_VERSION=${release_version}" >> "${GITHUB_ENV}"
           echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
 
+      - name: Resolve release tag
+        run: |
+          set -euo pipefail
+          if [ "${PACKAGE_RELEASE}" = "1" ]; then
+            release_tag="v${RELEASE_VERSION}"
+          else
+            release_tag="v${RELEASE_VERSION}-${PACKAGE_RELEASE}"
+          fi
+          echo "RELEASE_TAG=${release_tag}" >> "${GITHUB_ENV}"
+
       - name: Run test suite
         run: pnpm test
 
@@ -85,6 +98,17 @@ jobs:
           : "${AWS_ACCESS_KEY_ID:?Missing R2_ACCESS_KEY_ID secret}"
           : "${AWS_SECRET_ACCESS_KEY:?Missing R2_SECRET_ACCESS_KEY secret}"
           aws --version
+
+      - name: Generate release notes body
+        run: |
+          set -euo pipefail
+          node scripts/generate-release-notes.mjs \
+            --release-version "${RELEASE_VERSION}" \
+            --package-release "${PACKAGE_RELEASE}" \
+            --release-tag "${RELEASE_TAG}" \
+            --github-repository "${GITHUB_REPOSITORY}" \
+            --github-server-url "${GITHUB_SERVER_URL}" \
+            --output artifacts/release-notes.md
 
       - name: Update versioned release files
         run: pnpm release:version -- --version "${RELEASE_VERSION}" --package-release "${PACKAGE_RELEASE}"
@@ -110,18 +134,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: parallaize-release-${{ steps.resolve_version.outputs.release_version }}-${{ env.PACKAGE_RELEASE }}
-          path: artifacts/packages/
+          path: |
+            artifacts/packages/
+            artifacts/release-notes.md
           if-no-files-found: error
-
-      - name: Resolve release tag
-        run: |
-          set -euo pipefail
-          if [ "${PACKAGE_RELEASE}" = "1" ]; then
-            release_tag="v${RELEASE_VERSION}"
-          else
-            release_tag="v${RELEASE_VERSION}-${PACKAGE_RELEASE}"
-          fi
-          echo "RELEASE_TAG=${release_tag}" >> "${GITHUB_ENV}"
 
       - name: Commit release version updates
         run: |
@@ -148,7 +164,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Parallaize ${{ env.RELEASE_TAG }}
-          generate_release_notes: true
+          body_path: artifacts/release-notes.md
           fail_on_unmatched_files: true
           files: |
             artifacts/packages/parallaize_${{ steps.resolve_version.outputs.release_version }}-${{ env.PACKAGE_RELEASE }}_amd64.deb

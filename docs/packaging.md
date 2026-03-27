@@ -91,14 +91,21 @@ Required GitHub repository secrets:
 - `R2_SECRET_ACCESS_KEY`
 - `R2_BUCKET`
 
+Optional release-note configuration:
+
+- `OPENAI_API_KEY`: when set, the workflow asks the OpenAI Responses API to turn the git range since the previous release tag into a concise release description.
+- `OPENAI_RELEASE_NOTES_MODEL`: optional GitHub Actions variable that overrides the default model name used for those summaries.
+- `OPENAI_RELEASE_NOTES_BASE_URL`: optional GitHub Actions variable for a compatible proxy or gateway; defaults to `https://api.openai.com/v1`.
+
 The workflow does this:
 
 1. Installs dependencies.
-2. Updates `package.json`, `docs/index.html`, and this packaging note to the requested release version.
-3. Builds `.deb` packages for `amd64` and `arm64`.
-4. Uploads everything from `artifacts/packages/` to `s3://$R2_BUCKET/packages/` through the Cloudflare R2 endpoint so the public files stay available at `https://archive.parallaize.com/packages/`.
-5. Commits the versioned-file changes back to `main`.
-6. Creates a GitHub release tag and uploads the `amd64` plus `arm64` `.deb` files as release assets.
+2. Generates `artifacts/release-notes.md` from the git range since the previous release tag. When `OPENAI_API_KEY` exists, the script batches large commit ranges and uses the OpenAI Responses API to synthesize a concise summary; otherwise it falls back to deterministic notes built from commit metadata.
+3. Updates `package.json`, `docs/index.html`, and this packaging note to the requested release version.
+4. Builds `.deb` packages for `amd64` and `arm64`.
+5. Uploads everything from `artifacts/packages/` to `s3://$R2_BUCKET/packages/` through the Cloudflare R2 endpoint so the public files stay available at `https://archive.parallaize.com/packages/`.
+6. Commits the versioned-file changes back to `main`.
+7. Creates a GitHub release tag and uploads the `amd64` plus `arm64` `.deb` files as release assets, using the generated markdown body instead of GitHub auto-generated notes.
 
 If branch protection blocks `github-actions[bot]` from pushing to `main`, allow workflow pushes or change the final step to open a pull request instead.
 
