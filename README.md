@@ -137,6 +137,8 @@ flox activate -d . -- pnpm package:release
 
 See [docs/packaging.md](docs/packaging.md) for package contents and host-install layout, and [docs/apt-repository.md](docs/apt-repository.md) for the signed Ubuntu 24.04 APT source and key flow.
 
+On Hetzner dedicated hosts, prefer creating the Incus-backed LVM disk or volume group from the Hetzner rescue system before installing Ubuntu. That lets Parallaize target a real `lvm` pool instead of relying on the packaged blank-host storage fallback.
+
 ## Further Reading
 
 - [docs/live-incus-setup.md](docs/live-incus-setup.md)

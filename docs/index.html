@@ -191,6 +191,12 @@ sudo systemctl start parallaize.service</code></pre>
                 through the firewall, and use SSH port forwarding for secure local access
                 instead of exposing the app directly.
               </p>
+              <p>
+                On a fresh Hetzner dedicated host, do the disk prep in the Hetzner rescue
+                system first: create a real LVM-backed disk or volume group for Incus
+                before you install Ubuntu. That is the cleanest way to avoid the packaged
+                blank-host loop-backed storage fallback later.
+              </p>
 
               <p class="install-card__label">Ubuntu 24.04 via signed APT archive</p>
               <pre><code>sudo apt-get update
@@ -218,6 +224,23 @@ sudo ufw --force enable
 
 sudo systemctl enable --now parallaize.service
 curl http://127.0.0.1:3000/api/health</code></pre>
+
+              <p>
+                Before you create any real workspaces, point Incus and Parallaize at
+                the LVM volume group you prepared in the Hetzner rescue system:
+              </p>
+
+              <p class="install-card__label">Point Parallaize at the prepared Hetzner LVM pool</p>
+              <pre><code>INCUS_POOL_NAME=parallaize-lvm
+INCUS_VG_NAME=parallaize-vg
+sudo incus storage create "$INCUS_POOL_NAME" lvm source="$INCUS_VG_NAME"
+sudo incus profile device set default root pool="$INCUS_POOL_NAME"
+sudo sed -i "s/^PARALLAIZE_INCUS_STORAGE_POOL=.*/PARALLAIZE_INCUS_STORAGE_POOL=$INCUS_POOL_NAME/" \
+  /etc/parallaize/parallaize.env
+sudo systemctl restart parallaize.service
+sudo incus storage show "$INCUS_POOL_NAME"
+sudo incus profile show default
+sudo grep '^PARALLAIZE_INCUS_STORAGE_POOL=' /etc/parallaize/parallaize.env</code></pre>
 
               <p class="install-card__label">Secure local access over SSH</p>
               <pre><code>ssh -N -L 3000:127.0.0.1:3000 root@YOUR_HETZNER_HOST

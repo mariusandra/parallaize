@@ -107,6 +107,7 @@ export PARALLAIZE_GUEST_INOTIFY_MAX_USER_INSTANCES=2048
 Optional Incus tuning:
 
 - Set `PARALLAIZE_INCUS_STORAGE_POOL` if you want new VMs and clones to land on a faster `lvm`, `btrfs`, or `zfs` pool instead of a slow `dir` pool.
+- On Hetzner dedicated hosts, the cleanest way to get that `lvm` pool is to create the LVM-backed disk or volume group from the Hetzner rescue system before installing Ubuntu, then initialize Incus against it afterward.
 - Set `PARALLAIZE_INCUS_PROJECT` if you want Parallaize isolated inside a dedicated Incus project.
 
 ## Hostname-based forwarded services

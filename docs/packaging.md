@@ -145,6 +145,14 @@ The cleanest [Hetzner](https://hetzner.cloud/?ref=qOKe5qXBXByK) setup is:
 - allow inbound SSH only at the firewall
 - reach the UI through SSH port forwarding from your laptop
 
+On a fresh dedicated Hetzner machine, do one more thing before the Ubuntu install:
+
+- boot the Hetzner rescue system
+- create a real LVM-backed disk or volume group for Incus there
+- then install Ubuntu and point Incus at that LVM pool afterward
+
+That rescue-mode LVM prep is the cleanest way to avoid the packaged blank-host loop-backed storage fallback and land on production-shaped Incus storage from day one.
+
 On Ubuntu 24.04 `amd64`, default to the signed APT archive:
 
 ```bash
@@ -194,6 +202,21 @@ What that does:
 - UFW ends up denying all new inbound traffic except SSH, which means you do not need to expose `3000` or `8080` publicly.
 - You can skip Caddy entirely for this workflow because SSH tunneling is the intended front door.
 
+Before you create any real workspaces, point Incus and Parallaize at the LVM volume group you prepared in the Hetzner rescue system:
+
+```bash
+INCUS_POOL_NAME=parallaize-lvm
+INCUS_VG_NAME=parallaize-vg
+sudo incus storage create "$INCUS_POOL_NAME" lvm source="$INCUS_VG_NAME"
+sudo incus profile device set default root pool="$INCUS_POOL_NAME"
+sudo sed -i "s/^PARALLAIZE_INCUS_STORAGE_POOL=.*/PARALLAIZE_INCUS_STORAGE_POOL=$INCUS_POOL_NAME/" \
+  /etc/parallaize/parallaize.env
+sudo systemctl restart parallaize.service
+sudo incus storage show "$INCUS_POOL_NAME"
+sudo incus profile show default
+sudo grep '^PARALLAIZE_INCUS_STORAGE_POOL=' /etc/parallaize/parallaize.env
+```
+
 Then create a local tunnel from your laptop:
 
 ```bash
@@ -226,6 +249,8 @@ On a blank Ubuntu 24.04 host where Incus is installed but not initialized yet, t
 - `default` profile NIC attached to `incusbr0`
 
 That default Btrfs pool is loop-backed on blank hosts, which is still a compromise. It is materially better for snapshots and copy-on-write workflows than `dir`, but a dedicated `zfs`, `lvm`, or native `btrfs` pool remains the better production target.
+
+For Hetzner dedicated hosts, the recommendation is to avoid that blank-host fallback entirely: create the LVM disk in the rescue system, install Ubuntu, create the real `lvm` pool in Incus, switch the default root disk to it, and point `PARALLAIZE_INCUS_STORAGE_POOL` at it.
 
 The packaged env file also defaults `PARALLAIZE_INCUS_STORAGE_POOL=default` so new VM creates and copies keep targeting the bootstrap pool until the operator changes it.
 
