@@ -80,7 +80,7 @@ jobs:
         id: resolve_version
         run: |
           set -euo pipefail
-          release_version="$(pnpm release:version -- --version "${VERSION_INPUT}" --resolve-only)"
+          release_version="$(node scripts/update-release-version.mjs --version "${VERSION_INPUT}" --resolve-only)"
           echo "Resolved release version: ${release_version}"
           echo "RELEASE_VERSION=${release_version}" >> "${GITHUB_ENV}"
           echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
@@ -131,7 +131,7 @@ jobs:
             --output artifacts/release-notes.md
 
       - name: Update versioned release files
-        run: pnpm release:version -- --version "${RELEASE_VERSION}" --package-release "${PACKAGE_RELEASE}"
+        run: node scripts/update-release-version.mjs --version "${RELEASE_VERSION}" --package-release "${PACKAGE_RELEASE}"
 
       - name: Build release packages
         env:
