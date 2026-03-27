@@ -312,6 +312,7 @@ const defaultDesktopResolutionPreference: DesktopResolutionPreference = {
 
 export function DashboardApp(): JSX.Element {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [showInitialLoadingShell, setShowInitialLoadingShell] = useState(false);
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [latestRelease, setLatestRelease] = useState<LatestReleaseMetadata | null>(null);
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
@@ -721,6 +722,16 @@ export function DashboardApp(): JSX.Element {
       releaseLease();
     };
   }, [documentVisible, liveResolutionVmId]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setShowInitialLoadingShell(true);
+    }, 1_000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, []);
 
   useEffect(() => {
     const vmId = new URL(window.location.href).searchParams.get("vm");
@@ -3269,7 +3280,7 @@ export function DashboardApp(): JSX.Element {
       );
     }
 
-    return <LoadingShell />;
+    return <LoadingShell showContent={showInitialLoadingShell} />;
   }
 
   const workspaceFocused = selectedVm !== null;
@@ -7139,16 +7150,18 @@ function OverviewSidepanel({
   );
 }
 
-function LoadingShell(): JSX.Element {
+function LoadingShell({ showContent = true }: { showContent?: boolean }): JSX.Element {
   return (
     <main className="loading-shell">
-      <div className="loading-shell__panel">
-        <p className="workspace-shell__eyebrow">Parallaize Control Plane</p>
-        <h1 className="loading-shell__title">Loading dashboard</h1>
-        <p className="loading-shell__copy">
-          Fetching provider state, templates, workspaces, and recent jobs.
-        </p>
-      </div>
+      {showContent ? (
+        <div className="loading-shell__panel">
+          <p className="workspace-shell__eyebrow">Parallaize Control Plane</p>
+          <h1 className="loading-shell__title">Loading dashboard</h1>
+          <p className="loading-shell__copy">
+            Fetching provider state, templates, workspaces, and recent jobs.
+          </p>
+        </div>
+      ) : null}
     </main>
   );
 }
