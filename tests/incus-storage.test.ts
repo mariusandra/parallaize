@@ -272,6 +272,8 @@ function buildConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     appHome: process.cwd(),
     host: "127.0.0.1",
     port: 3000,
+    releaseMetadataUrl: "https://parallaize.com/latest.json",
+    forwardedServiceHostBase: "localhost",
     persistenceKind: "json",
     dataFile: "data/state.json",
     databaseUrl: null,

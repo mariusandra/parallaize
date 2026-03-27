@@ -13,7 +13,10 @@ import type {
   ProviderState,
   ProviderKind,
   Snapshot,
+  TemplateHistoryEntry,
   TemplatePortForward,
+  TemplateProvenance,
+  TemplateProvenanceKind,
   VmCommandResult,
   VmInstance,
   VmNetworkMode,
@@ -388,6 +391,11 @@ function normalizeProviderState(
 }
 
 function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
+  const notes = Array.isArray(template.notes) ? template.notes : [];
+  const tags = Array.isArray(template.tags) ? template.tags : [];
+  const createdAt = template.createdAt ?? nowIso();
+  const updatedAt = template.updatedAt ?? template.createdAt ?? nowIso();
+
   return {
     id: template.id ?? "tpl-missing",
     name: template.name ?? "Recovered template",
@@ -404,11 +412,13 @@ function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
     ),
     defaultNetworkMode: normalizeVmNetworkMode(template.defaultNetworkMode),
     initCommands: normalizeTemplateInitCommands(template.initCommands),
-    tags: Array.isArray(template.tags) ? template.tags : [],
-    notes: Array.isArray(template.notes) ? template.notes : [],
+    tags,
+    notes,
     snapshotIds: Array.isArray(template.snapshotIds) ? template.snapshotIds : [],
-    createdAt: template.createdAt ?? nowIso(),
-    updatedAt: template.updatedAt ?? template.createdAt ?? nowIso(),
+    provenance: normalizeTemplateProvenance(template, notes, tags),
+    history: normalizeTemplateHistory(template.history, createdAt),
+    createdAt,
+    updatedAt,
   };
 }
 
@@ -472,6 +482,156 @@ function normalizeSnapshot(snapshot: LegacySnapshot): Snapshot | null {
       diskGb: snapshot.resources?.diskGb ?? 60,
     },
     createdAt: snapshot.createdAt ?? nowIso(),
+  };
+}
+
+function normalizeTemplateProvenance(
+  template: LegacyTemplate,
+  notes: string[],
+  tags: string[],
+): TemplateProvenance {
+  const raw = template.provenance;
+
+  if (raw && typeof raw === "object") {
+    return {
+      kind: normalizeTemplateProvenanceKind(raw.kind, tags),
+      summary:
+        typeof raw.summary === "string" && raw.summary.trim().length > 0
+          ? raw.summary.trim()
+          : inferLegacyTemplateProvenanceSummary(template, notes, tags),
+      sourceTemplateId:
+        typeof raw.sourceTemplateId === "string" && raw.sourceTemplateId
+          ? raw.sourceTemplateId
+          : null,
+      sourceTemplateName:
+        typeof raw.sourceTemplateName === "string" && raw.sourceTemplateName
+          ? raw.sourceTemplateName
+          : null,
+      sourceVmId:
+        typeof raw.sourceVmId === "string" && raw.sourceVmId
+          ? raw.sourceVmId
+          : null,
+      sourceVmName:
+        typeof raw.sourceVmName === "string" && raw.sourceVmName
+          ? raw.sourceVmName
+          : null,
+      sourceSnapshotId:
+        typeof raw.sourceSnapshotId === "string" && raw.sourceSnapshotId
+          ? raw.sourceSnapshotId
+          : null,
+      sourceSnapshotLabel:
+        typeof raw.sourceSnapshotLabel === "string" && raw.sourceSnapshotLabel
+          ? raw.sourceSnapshotLabel
+          : null,
+    };
+  }
+
+  return {
+    kind: normalizeTemplateProvenanceKind(undefined, tags),
+    summary: inferLegacyTemplateProvenanceSummary(template, notes, tags),
+    sourceTemplateId: null,
+    sourceTemplateName: null,
+    sourceVmId: null,
+    sourceVmName: null,
+    sourceSnapshotId: null,
+    sourceSnapshotLabel: null,
+  };
+}
+
+function normalizeTemplateProvenanceKind(
+  kind: unknown,
+  tags: string[],
+): TemplateProvenanceKind {
+  if (kind === "seed" || kind === "cloned" || kind === "captured" || kind === "recovered") {
+    return kind;
+  }
+
+  if (tags.includes("orphaned")) {
+    return "recovered";
+  }
+
+  if (tags.includes("captured")) {
+    return "captured";
+  }
+
+  if (tags.includes("cloned")) {
+    return "cloned";
+  }
+
+  return "seed";
+}
+
+function inferLegacyTemplateProvenanceSummary(
+  template: LegacyTemplate,
+  notes: string[],
+  tags: string[],
+): string {
+  if (notes[0]) {
+    return notes[0];
+  }
+
+  if (tags.includes("orphaned")) {
+    return "Recovered from snapshot metadata after template deletion.";
+  }
+
+  if (tags.includes("captured")) {
+    return `Captured template backed by ${template.launchSource ?? template.baseImage ?? DEFAULT_LAUNCH_SOURCE}.`;
+  }
+
+  if (tags.includes("cloned")) {
+    return "Cloned from another Parallaize template.";
+  }
+
+  return `Seed template backed by ${template.launchSource ?? template.baseImage ?? DEFAULT_LAUNCH_SOURCE}.`;
+}
+
+function normalizeTemplateHistory(
+  history: unknown,
+  createdAt: string,
+): TemplateHistoryEntry[] {
+  if (!Array.isArray(history)) {
+    return [];
+  }
+
+  return history
+    .map((entry) => normalizeTemplateHistoryEntry(entry, createdAt))
+    .filter((entry): entry is TemplateHistoryEntry => entry !== null)
+    .slice(0, 12);
+}
+
+function normalizeTemplateHistoryEntry(
+  entry: unknown,
+  fallbackCreatedAt: string,
+): TemplateHistoryEntry | null {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const kind = (entry as { kind?: unknown }).kind;
+  const summary = (entry as { summary?: unknown }).summary;
+  const createdAt = (entry as { createdAt?: unknown }).createdAt;
+
+  if (
+    kind !== "created" &&
+    kind !== "cloned" &&
+    kind !== "captured" &&
+    kind !== "updated" &&
+    kind !== "recovered"
+  ) {
+    return null;
+  }
+
+  if (typeof summary !== "string" || summary.trim().length === 0) {
+    return null;
+  }
+
+  return {
+    kind,
+    summary: summary.trim(),
+    createdAt:
+      typeof createdAt === "string" && createdAt.trim().length > 0
+        ? createdAt
+        : fallbackCreatedAt,
   };
 }
 
@@ -723,6 +883,10 @@ function normalizeVmForwardedPort(
     id,
     publicPath:
       forwardedPort?.publicPath?.trim() || buildVmForwardPath(vmId, id),
+    publicHostname:
+      typeof forwardedPort?.publicHostname === "string" && forwardedPort.publicHostname.trim()
+        ? forwardedPort.publicHostname.trim()
+        : null,
   };
 }
 

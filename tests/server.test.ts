@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
-import { request, type IncomingMessage } from "node:http";
+import { createServer as createHttpServer, request, type IncomingMessage } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -93,6 +93,93 @@ test("control plane serves the shell and unauthenticated auth status while admin
       mode: "unauthenticated",
     },
   });
+});
+
+test("file browser defaults to the ubuntu home and downloads mock guest files", async (context) => {
+  const { port } = await startServer(context, {
+    adminPassword: "",
+    tempDirPrefix: "parallaize-server-files-",
+  });
+
+  const browserResponse = await sendRequest(port, {
+    path: "/api/vms/vm-0001/files",
+    method: "GET",
+    headers: {
+      accept: "application/json",
+    },
+  });
+  assert.equal(browserResponse.statusCode, 200);
+  const browserPayload = JSON.parse(browserResponse.body) as {
+    ok: boolean;
+    data: {
+      currentPath: string;
+      entries: Array<{
+        changedAt: string;
+        kind: string;
+        modifiedAt: string;
+        name: string;
+        path: string;
+        sizeBytes: number | null;
+      }>;
+      generatedAt: string;
+      homePath: string | null;
+      parentPath: string | null;
+      vmId: string;
+      workspacePath: string;
+    };
+  };
+  assert.equal(browserPayload.ok, true);
+  assert.equal(browserPayload.data.vmId, "vm-0001");
+  assert.equal(browserPayload.data.workspacePath, "/srv/workspaces/alpha-workbench");
+  assert.equal(browserPayload.data.homePath, "/home/ubuntu");
+  assert.equal(browserPayload.data.currentPath, "/home/ubuntu");
+  assert.equal(browserPayload.data.parentPath, "/home");
+  assert.deepEqual(
+    browserPayload.data.entries.map((entry) => ({
+      kind: entry.kind,
+      name: entry.name,
+      path: entry.path,
+      sizeBytes: entry.sizeBytes,
+    })),
+    [
+      {
+        name: ".bashrc",
+        path: "/home/ubuntu/.bashrc",
+        kind: "file",
+        sizeBytes: 3771,
+      },
+      {
+        name: "Desktop",
+        path: "/home/ubuntu/Desktop",
+        kind: "directory",
+        sizeBytes: null,
+      },
+      {
+        name: "Downloads",
+        path: "/home/ubuntu/Downloads",
+        kind: "directory",
+        sizeBytes: null,
+      },
+      {
+        name: "notes.txt",
+        path: "/home/ubuntu/notes.txt",
+        kind: "file",
+        sizeBytes: 184,
+      },
+    ],
+  );
+
+  const downloadResponse = await sendRequest(port, {
+    path: "/api/vms/vm-0001/files/download?path=%2Fsrv%2Fworkspaces%2Falpha-workbench%2FREADME.md",
+    method: "GET",
+  });
+  assert.equal(downloadResponse.statusCode, 200);
+  assert.match(String(downloadResponse.headers["content-disposition"] ?? ""), /attachment;/);
+  assert.equal(
+    String(downloadResponse.headers["content-type"] ?? ""),
+    "text/plain; charset=utf-8",
+  );
+  assert.match(downloadResponse.body, /Mock workspace/);
 });
 
 test("protected APIs and event streams require a session cookie when admin auth is enabled", async (context) => {
@@ -440,6 +527,72 @@ test("resolution control claims stay pinned to one client until another client t
   );
   assert.equal(takeoverEvent.vmId, "vm-0001");
   assert.equal(takeoverEvent.controller?.clientId, "client-b");
+});
+
+test("authenticated clients can fetch latest release metadata through the control plane", async (context) => {
+  const releaseMetadataPort = await reservePort();
+  const releaseMetadataServer = createHttpServer((_request, response) => {
+    response.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+    });
+    response.end(
+      `${JSON.stringify({
+        version: "0.1.9",
+        packageRelease: "2",
+        packageLabel: "0.1.9-2",
+      })}\n`,
+    );
+  });
+
+  releaseMetadataServer.listen(releaseMetadataPort, "127.0.0.1");
+  await once(releaseMetadataServer, "listening");
+
+  context.after(async () => {
+    releaseMetadataServer.close();
+    await once(releaseMetadataServer, "close");
+  });
+
+  const { port } = await startServer(context, {
+    adminPassword: "change-me",
+    tempDirPrefix: "parallaize-server-release-metadata-",
+    extraEnv: {
+      PARALLAIZE_RELEASE_METADATA_URL: `http://127.0.0.1:${releaseMetadataPort}/latest.json`,
+    },
+  });
+
+  const loginResponse = await sendRequest(port, {
+    path: "/api/auth/login",
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      username: "admin",
+      password: "change-me",
+    }),
+  });
+  assert.equal(loginResponse.statusCode, 200);
+
+  const sessionCookie = extractCookieHeader(loginResponse);
+  const releaseResponse = await sendRequest(port, {
+    path: "/api/version/latest",
+    method: "GET",
+    headers: {
+      cookie: sessionCookie,
+      accept: "application/json",
+    },
+  });
+
+  assert.equal(releaseResponse.statusCode, 200);
+  assert.deepEqual(JSON.parse(releaseResponse.body), {
+    ok: true,
+    data: {
+      version: "0.1.9",
+      packageRelease: "2",
+      packageLabel: "0.1.9-2",
+    },
+  });
 });
 
 test("logout clears the session so refresh returns to the login flow", async (context) => {

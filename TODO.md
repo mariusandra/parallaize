@@ -1,6 +1,6 @@
 # Parallaize TODO
 
-Last updated: 2026-03-26
+Last updated: 2026-03-27
 
 This file is intentionally future-facing. Shipped work belongs in docs and git history, not in a growing done list here.
 
@@ -10,11 +10,12 @@ Current focus: close the remaining deployment-validation gaps, harden security a
 
 - Incus-backed VM lifecycle, template capture and clone, snapshots, and browser VNC sessions work end to end.
 - Forwarded guest HTTP and WebSocket services, guest command execution, live logs, and single-admin cookie auth are already in place.
-- JSON and PostgreSQL persistence both exist, and packaged Ubuntu `.deb` builds now cover `amd64` plus experimental `arm64`.
+- JSON and PostgreSQL persistence both exist, packaged Ubuntu `.deb` builds now cover `amd64` plus experimental `arm64`, and the signed Ubuntu 24.04 `amd64` APT archive path exists.
 
 ## Now
 
 - [ ] Repeat the Ubuntu 24.04 `amd64` packaged install validation on a clean distro-managed Incus host and close the remaining daemon-conflict ambiguity before calling that path fully supported.
+- [ ] Validate the signed Ubuntu 24.04 `amd64` APT archive path on a clean host, including initial key bootstrap, `apt-get install parallaize`, and `apt-get install --only-upgrade parallaize`.
 - [x] Run live `pnpm smoke:incus` against PostgreSQL-backed state and capture any host-specific fixes or recovery steps.
 - [x] Replace the in-memory admin session token set with server-side sessions that have expiry, rotation, and a documented restart story.
 - [x] Design a DMZ network mode for VMs: guest-initiated traffic should reach the public internet, DNS, DHCP, and package mirrors, but not the host, other guests, or private RFC1918 and ULA networks unless explicitly allowed.
@@ -25,19 +26,23 @@ Current notes:
 - On March 26, 2026, the PostgreSQL-backed live smoke run needed two fixes on this host: `smoke:incus` now sizes the create request from template metadata, and captured-template creates now recover from the newest compatible snapshot when the published `parallaize-template-*` image alias is missing.
 - On March 26, 2026, live DMZ validation on `parallaize-vm-0048-ubuntu-agent-forge-01-clone` confirmed the intended guest-side isolation: DNS to `10.36.140.1:53` still worked, while guest TCP to `10.36.140.1:3000` timed out. It also exposed that the legacy managed `parallaize-airgap` ACL on this host still only allowed host TCP ingress to `5900`, which blocks forwarded guest HTTP until a current DMZ re-apply rewrites that ACL.
 - The clean packaged `amd64` validation item remains open because the March 26, 2026 live host is still mixed between a manually started Flox `incusd` and distro `incus.socket` on `/var/lib/incus/unix.socket`.
+- On March 27, 2026, guest bootstrap grew the missing desktop-prep defaults: default Ubuntu VMs now install and autostart `indicator-multiload`, move the dock to the right with 32px icons, and pick a random wallpaper from the installed wallpaper set on desktop login. The repeatable operator flow now lives in `docs/template-prep.md`.
+- On March 27, 2026, template cards and capture flows gained clearer provenance and history, and the VM inspector gained a compact guest file browser that starts at the Ubuntu home when available, can walk up to `/`, supports direct file downloads, and pairs with a best-effort "touched this session" view backed by filesystem timestamps and command-history hints.
+- On March 27, 2026, forwarded guest services gained hostname-based routing on the configured suffix from `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE` while preserving the existing path-based route as the fallback. The checked-in default is `localhost`, which keeps the low-ops local path on `*.localhost`.
+- The packaged PostgreSQL validation item still needs a real live-host install and upgrade run. The repo now has churn coverage plus a packaged-service recovery and validation checklist in `docs/postgres-operations.md`, but that is not the same thing as a fresh end-to-end host validation.
 
 ## Next
 
-- [ ] Turn guest and template prep into a repeatable scripted flow or tight checklist instead of relying on scattered bootstrap notes.
-- [ ] Tune the default Ubuntu VM desktop defaults during template prep: set the Ubuntu dock on the right, use 32px dock icons, and start each VM with a random wallpaper chosen from the installed Ubuntu wallpaper set.
-- [ ] On first boot of the default Ubuntu VM, install `indicator-multiload` via `sudo apt install indicator-multiload` and make sure it starts automatically as part of the default desktop session.
-- [ ] Improve template lifecycle ergonomics: clearer provenance, better update and capture flow, and more useful snapshot and note history.
-- [ ] Add a UI file browser for the VM, starting at `workspacePath` instead of trying to expose the whole guest filesystem on day one.
-- [ ] Add a best-effort "files touched in this session" view. Start with something explainable such as a launch-time manifest plus `mtime` and `ctime` diffs or command-history-aware scans, and be explicit about the limits.
-- [ ] Stress PostgreSQL persistence under repeated create, clone, delete, and snapshot churn, not just the happy path.
-- [ ] Document PostgreSQL operator recovery more clearly, including backup and export, import and restore, and the singleton-row storage shape.
+- [x] Turn guest and template prep into a repeatable scripted flow or tight checklist instead of relying on scattered bootstrap notes.
+- [x] Tune the default Ubuntu VM desktop defaults during template prep: set the Ubuntu dock on the right, use 32px dock icons, and start each VM with a random wallpaper chosen from the installed Ubuntu wallpaper set.
+- [x] On first boot of the default Ubuntu VM, install `indicator-multiload` via `sudo apt install indicator-multiload` and make sure it starts automatically as part of the default desktop session.
+- [x] Improve template lifecycle ergonomics: clearer provenance, better update and capture flow, and more useful snapshot and note history.
+- [x] Add a UI file browser for the VM, with a compact home-first view, direct file downloads, and the ability to walk up to `/` when needed.
+- [x] Add a best-effort "files touched in this session" view. Start with something explainable such as a launch-time manifest plus `mtime` and `ctime` diffs or command-history-aware scans, and be explicit about the limits.
+- [x] Stress PostgreSQL persistence under repeated create, clone, delete, and snapshot churn, not just the happy path.
+- [x] Document PostgreSQL operator recovery more clearly, including backup and export, import and restore, and the singleton-row storage shape.
 - [ ] Validate the packaged PostgreSQL deployment path end to end, including install, upgrade, export, restore, and service restart ordering.
-- [ ] Add hostname-based forwarded-service routing while keeping the current path-based routing as the low-ops fallback.
+- [x] Add hostname-based forwarded-service routing while keeping the current path-based routing as the low-ops fallback.
 
 ## Untrusted AI Workloads
 
@@ -57,6 +62,5 @@ Target slice: run agents against Git-backed codebases inside untrusted worker VM
 ## Later
 
 - [ ] Validate the generated `arm64` `.deb` on a real `arm64` Incus and QEMU host before promoting it beyond experimental.
-- [ ] Add package signing once the supported package matrix is stable.
 - [ ] Document wildcard DNS and Tailscale expectations for hostname-based forwarded routing.
 - [ ] Add some way to monitor actual guest disk usage and surface low-space warnings before the Ubuntu desktop hits "1 GB left" conditions inside the VM.

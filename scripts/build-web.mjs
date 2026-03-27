@@ -13,6 +13,7 @@ const noVncSourceDir = join(outputDir, ".novnc-src");
 const noVncLibraryDir = join(noVncSourceDir, "lib");
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const appVersion = JSON.stringify(packageJson.version);
+const appPackageRelease = JSON.stringify(normalizePackageRelease(process.env.PARALLAIZE_PACKAGE_RELEASE));
 
 await mkdir(outputDir, { recursive: true });
 
@@ -64,6 +65,7 @@ await writeFile(browserFeaturePath, browserFeaturePatched);
 await build({
   bundle: true,
   define: {
+    __PARALLAIZE_PACKAGE_RELEASE__: appPackageRelease,
     __PARALLAIZE_VERSION__: appVersion,
     "process.env.NODE_ENV": '"production"',
   },
@@ -85,6 +87,7 @@ await rm(noVncSourceDir, {
 await build({
   bundle: true,
   define: {
+    __PARALLAIZE_PACKAGE_RELEASE__: appPackageRelease,
     __PARALLAIZE_VERSION__: appVersion,
     "process.env.NODE_ENV": '"production"',
   },
@@ -97,3 +100,8 @@ await build({
   platform: "browser",
   target: ["es2022"],
 });
+
+function normalizePackageRelease(value) {
+  const trimmed = value?.trim();
+  return /^[1-9]\d*$/.test(trimmed ?? "") ? trimmed : "1";
+}

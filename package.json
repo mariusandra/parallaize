@@ -20,6 +20,7 @@
     "package:prepare": "pnpm build && node scripts/build-package-runtime.mjs",
     "package:deb": "pnpm package:prepare && node scripts/build-packages.mjs --format deb --arch amd64",
     "package:deb:arm64": "pnpm package:prepare && node scripts/build-packages.mjs --format deb --arch arm64",
+    "package:apt-repo": "pnpm package:deb && node scripts/build-apt-repo.mjs --deb-dir artifacts/packages --arch amd64",
     "package:release": "pnpm package:prepare && node scripts/build-packages.mjs --format deb --arch amd64,arm64",
     "release:notes": "node scripts/generate-release-notes.mjs",
     "release:version": "node scripts/update-release-version.mjs"

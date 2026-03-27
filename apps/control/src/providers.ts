@@ -9,6 +9,12 @@ import type {
   ProviderState,
   ResourceSpec,
   Snapshot,
+  VmFileBrowserSnapshot,
+  VmFileEntry,
+  VmFileEntryKind,
+  VmTouchedFile,
+  VmTouchedFileReason,
+  VmTouchedFilesSnapshot,
   VmInstance,
   VmLogsSnapshot,
   VmNetworkMode,
@@ -20,6 +26,7 @@ const DEFAULT_GUEST_VNC_PORT = 5900;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 const DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 30_000;
+const DEFAULT_GUEST_HOME = "/home/ubuntu";
 const DEFAULT_GUEST_WORKSPACE = "/root";
 const DEFAULT_GUEST_INIT_LOG_PATH = "/var/log/parallaize-template-init.log";
 const DEFAULT_VM_CREATE_HEARTBEAT_MS = 4000;
@@ -78,6 +85,12 @@ export type ProviderProgressReporter = (
   progressPercent: number | null,
 ) => void;
 
+export interface VmFileContent {
+  content: Buffer;
+  name: string;
+  path: string;
+}
+
 export type IncusImageCompression =
   | "bzip2"
   | "gzip"
@@ -127,6 +140,9 @@ export interface DesktopProvider {
   ): Promise<ProviderSnapshot>;
   injectCommand(vm: VmInstance, command: string): Promise<ProviderMutation>;
   readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot>;
+  browseVmFiles(vm: VmInstance, path?: string | null): Promise<VmFileBrowserSnapshot>;
+  readVmFile(vm: VmInstance, path: string): Promise<VmFileContent>;
+  readVmTouchedFiles(vm: VmInstance): Promise<VmTouchedFilesSnapshot>;
   tickVm(vm: VmInstance, template: EnvironmentTemplate): ProviderTick | null;
   renderFrame(
     vm: VmInstance,
@@ -582,6 +598,21 @@ class MockProvider implements DesktopProvider {
       content,
       fetchedAt: new Date().toISOString(),
     };
+  }
+
+  async browseVmFiles(
+    vm: VmInstance,
+    path?: string | null,
+  ): Promise<VmFileBrowserSnapshot> {
+    return buildMockVmFileBrowserSnapshot(vm, path);
+  }
+
+  async readVmFile(vm: VmInstance, path: string): Promise<VmFileContent> {
+    return buildMockVmFileContent(vm, path);
+  }
+
+  async readVmTouchedFiles(vm: VmInstance): Promise<VmTouchedFilesSnapshot> {
+    return buildMockVmTouchedFilesSnapshot(vm);
   }
 
   tickVm(vm: VmInstance, template: EnvironmentTemplate): ProviderTick | null {
@@ -1503,6 +1534,109 @@ class IncusProvider implements DesktopProvider {
         formatCommandFailure(infoArgs, infoResult),
       ].filter(Boolean).join("\n"),
     );
+  }
+
+  async browseVmFiles(
+    vm: VmInstance,
+    path?: string | null,
+  ): Promise<VmFileBrowserSnapshot> {
+    this.assertAvailable();
+    const workspacePath = vm.workspacePath || DEFAULT_GUEST_WORKSPACE;
+    const requestedPath = path ? normalizeGuestPath(path) : null;
+    const result = await this.runAsync([
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      "/",
+      "--",
+      "sh",
+      "-lc",
+      buildBrowseVmFilesScript(workspacePath, requestedPath),
+    ]);
+    const payload = parseJson<{
+      homePath: string | null;
+      currentPath: string;
+      entries: VmFileEntry[];
+    }>(result.stdout);
+
+    return {
+      vmId: vm.id,
+      workspacePath,
+      homePath: payload.homePath,
+      currentPath: payload.currentPath,
+      parentPath: resolveGuestParentPath(payload.currentPath),
+      entries: payload.entries,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async readVmFile(vm: VmInstance, path: string): Promise<VmFileContent> {
+    this.assertAvailable();
+    const normalizedPath = normalizeGuestPath(path);
+    const result = await this.runAsync([
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      "/",
+      "--",
+      "sh",
+      "-lc",
+      buildReadVmFileScript(normalizedPath),
+    ]);
+    const payload = parseJson<{
+      contentBase64: string;
+      name: string;
+      path: string;
+    }>(result.stdout);
+
+    return {
+      content: Buffer.from(payload.contentBase64, "base64"),
+      name: payload.name,
+      path: payload.path,
+    };
+  }
+
+  async readVmTouchedFiles(vm: VmInstance): Promise<VmTouchedFilesSnapshot> {
+    this.assertAvailable();
+    const workspacePath = vm.workspacePath || DEFAULT_GUEST_WORKSPACE;
+    const baselineStartedAt = vm.liveSince ?? vm.createdAt ?? null;
+    const result = await this.runAsync([
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      "/",
+      "--",
+      "sh",
+      "-lc",
+      buildReadVmTouchedFilesScript(workspacePath, baselineStartedAt),
+    ]);
+    const payload = parseJson<{
+      entries: VmTouchedFile[];
+      scanPath: string;
+      truncated: boolean;
+    }>(result.stdout);
+    const ignoredTouchedSummarySuffix =
+      payload.scanPath === DEFAULT_GUEST_HOME ? ` ${DEFAULT_GUEST_HOME}/.cache is ignored.` : "";
+
+    return {
+      vmId: vm.id,
+      workspacePath,
+      scanPath: payload.scanPath,
+      baselineStartedAt,
+      baselineLabel:
+        vm.liveSince !== null
+          ? "Best effort since the VM last started."
+          : "Best effort since the workspace was first created.",
+      limitationSummary: payload.truncated
+        ? `Uses mtime/ctime under ${payload.scanPath} plus command-history directories. Large trees are capped at 5,000 scanned paths and 200 returned entries.${ignoredTouchedSummarySuffix}`
+        : `Uses mtime/ctime under ${payload.scanPath} plus command-history directories. Shell commands are not parsed deeply, so edits can be missed or over-reported.${ignoredTouchedSummarySuffix}`,
+      entries: mergeTouchedFilesWithCommandHistory(
+        payload.entries,
+        vm.commandHistory ?? [],
+        payload.scanPath,
+      ),
+      generatedAt: new Date().toISOString(),
+    };
   }
 
   tickVm(): ProviderTick | null {
@@ -3024,12 +3158,66 @@ RestartSec=3
 WantedBy=multi-user.target`;
 }
 
+function buildGuestDesktopSessionSetupScript(): string {
+  return `#!/bin/sh
+set -eu
+DASH_TO_DOCK_SCHEMA="org.gnome.shell.extensions.dash-to-dock"
+BACKGROUND_SCHEMA="org.gnome.desktop.background"
+WALLPAPER_ROOTS="/usr/share/backgrounds /usr/share/gnome-background-properties"
+set_dash_to_dock_defaults() {
+  gsettings set "$DASH_TO_DOCK_SCHEMA" dock-position RIGHT >/dev/null 2>&1 || true
+  gsettings set "$DASH_TO_DOCK_SCHEMA" dash-max-icon-size 32 >/dev/null 2>&1 || true
+}
+select_random_wallpaper() {
+  find $WALLPAPER_ROOTS -type f \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \\) 2>/dev/null \\
+    | grep -Ev '/(thumbnail|cropped|lockscreen)/' \\
+    | sort -u \\
+    | shuf -n 1
+}
+apply_random_wallpaper() {
+  wallpaper="$(select_random_wallpaper || true)"
+  if [ -z "$wallpaper" ]; then
+    return 0
+  fi
+  wallpaper_uri="file://$wallpaper"
+  gsettings set "$BACKGROUND_SCHEMA" picture-uri "$wallpaper_uri" >/dev/null 2>&1 || true
+  gsettings set "$BACKGROUND_SCHEMA" picture-uri-dark "$wallpaper_uri" >/dev/null 2>&1 || true
+  gsettings set "$BACKGROUND_SCHEMA" picture-options zoom >/dev/null 2>&1 || true
+}
+ensure_indicator_multiload() {
+  if ! command -v indicator-multiload >/dev/null 2>&1; then
+    return 0
+  fi
+  if pgrep -u "$(id -u)" -x indicator-multiload >/dev/null 2>&1; then
+    return 0
+  fi
+  nohup indicator-multiload >/dev/null 2>&1 &
+}
+set_dash_to_dock_defaults
+apply_random_wallpaper
+ensure_indicator_multiload`;
+}
+
+function buildGuestDesktopSessionAutostartEntry(): string {
+  return `[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Parallaize Desktop Session Setup
+Comment=Apply Parallaize Ubuntu desktop defaults for dashboard-launched workspaces
+Exec=/usr/local/bin/parallaize-desktop-session-setup
+OnlyShowIn=GNOME;Ubuntu;
+X-GNOME-Autostart-enabled=true
+NoDisplay=true`;
+}
+
 function buildGuestDesktopBootstrapScript(port: number): string {
   return `#!/bin/sh
 set -eu
 GDM_FILE="/etc/gdm3/custom.conf"
 LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
 SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
+SESSION_SETUP_FILE="/usr/local/bin/parallaize-desktop-session-setup"
+SESSION_AUTOSTART_FILE="/etc/xdg/autostart/parallaize-desktop-session-setup.desktop"
 CURRENT_GDM="$(cat "$GDM_FILE" 2>/dev/null || true)"
 DESIRED_GDM="$(cat <<'CONF'
 ${buildGuestGdmCustomConfig()}
@@ -3045,8 +3233,19 @@ DESIRED_SERVICE="$(cat <<'UNIT'
 ${buildGuestVncServiceUnit()}
 UNIT
 )"
+CURRENT_SESSION_SETUP="$(cat "$SESSION_SETUP_FILE" 2>/dev/null || true)"
+DESIRED_SESSION_SETUP="$(cat <<'SCRIPT'
+${buildGuestDesktopSessionSetupScript()}
+SCRIPT
+)"
+CURRENT_SESSION_AUTOSTART="$(cat "$SESSION_AUTOSTART_FILE" 2>/dev/null || true)"
+DESIRED_SESSION_AUTOSTART="$(cat <<'DESKTOP'
+${buildGuestDesktopSessionAutostartEntry()}
+DESKTOP
+)"
 RESTART_GDM=0
 RESTART_VNC=0
+MISSING_PACKAGES=""
 if [ "$CURRENT_GDM" != "$DESIRED_GDM" ]; then
   mkdir -p /etc/gdm3
   cat > "$GDM_FILE" <<'CONF'
@@ -3069,10 +3268,29 @@ ${buildGuestVncServiceUnit()}
 UNIT
   RESTART_VNC=1
 fi
+if [ "$CURRENT_SESSION_SETUP" != "$DESIRED_SESSION_SETUP" ]; then
+  mkdir -p /usr/local/bin
+  cat > "$SESSION_SETUP_FILE" <<'SCRIPT'
+${buildGuestDesktopSessionSetupScript()}
+SCRIPT
+  chmod 0755 "$SESSION_SETUP_FILE"
+fi
+if [ "$CURRENT_SESSION_AUTOSTART" != "$DESIRED_SESSION_AUTOSTART" ]; then
+  mkdir -p /etc/xdg/autostart
+  cat > "$SESSION_AUTOSTART_FILE" <<'DESKTOP'
+${buildGuestDesktopSessionAutostartEntry()}
+DESKTOP
+fi
 if ! command -v x11vnc >/dev/null 2>&1; then
+  MISSING_PACKAGES="$MISSING_PACKAGES x11vnc"
+fi
+if ! dpkg-query -W -f='\${Status}' indicator-multiload 2>/dev/null | grep -q 'install ok installed'; then
+  MISSING_PACKAGES="$MISSING_PACKAGES indicator-multiload"
+fi
+if [ -n "$MISSING_PACKAGES" ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-  apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y x11vnc
+  apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y $MISSING_PACKAGES
   RESTART_VNC=1
 fi
 systemctl daemon-reload
@@ -3675,6 +3893,551 @@ function stripAnsi(value: string): string {
 
 function normalizeStatus(value: string | undefined): string {
   return value?.trim().toLowerCase() ?? "";
+}
+
+function buildMockVmFileBrowserSnapshot(
+  vm: VmInstance,
+  path?: string | null,
+): VmFileBrowserSnapshot {
+  const currentPath = normalizeGuestPath(path ?? resolveMockVmBrowsePath(vm));
+  const generatedAt = new Date().toISOString();
+  const entries = buildMockVmFileEntries(vm, currentPath, generatedAt);
+
+  return {
+    vmId: vm.id,
+    workspacePath: vm.workspacePath,
+    homePath: resolveMockVmHomePath(),
+    currentPath,
+    parentPath: resolveGuestParentPath(currentPath),
+    entries,
+    generatedAt,
+  };
+}
+
+function buildMockVmFileEntries(
+  vm: VmInstance,
+  currentPath: string,
+  generatedAt: string,
+): VmFileEntry[] {
+  const workspacePath = normalizeGuestPath(vm.workspacePath || DEFAULT_GUEST_WORKSPACE);
+  const workspaceLeaf = workspacePath.split("/").pop() ?? "workspace";
+  const buildEntry = (
+    name: string,
+    kind: VmFileEntryKind,
+    sizeBytes: number | null,
+  ): VmFileEntry => ({
+    name,
+    path: currentPath === "/" ? `/${name}` : `${currentPath}/${name}`,
+    kind,
+    sizeBytes,
+    modifiedAt: generatedAt,
+    changedAt: generatedAt,
+  });
+
+  if (currentPath === "/") {
+    return [
+      buildEntry("etc", "directory", null),
+      buildEntry("home", "directory", null),
+      buildEntry("srv", "directory", null),
+      buildEntry("var", "directory", null),
+    ];
+  }
+
+  if (currentPath === "/etc") {
+    return [
+      buildEntry("hosts", "file", 188),
+      buildEntry("ssh", "directory", null),
+    ];
+  }
+
+  if (currentPath === "/home") {
+    return [buildEntry("ubuntu", "directory", null)];
+  }
+
+  if (currentPath === "/home/ubuntu") {
+    return [
+      buildEntry(".bashrc", "file", 3771),
+      buildEntry("Desktop", "directory", null),
+      buildEntry("Downloads", "directory", null),
+      buildEntry("notes.txt", "file", 184),
+    ];
+  }
+
+  if (currentPath === "/home/ubuntu/Desktop") {
+    return [buildEntry("Parralaize.url", "file", 92)];
+  }
+
+  if (currentPath === "/home/ubuntu/Downloads") {
+    return [buildEntry("session.log", "file", 4096)];
+  }
+
+  if (currentPath === "/srv") {
+    return [buildEntry("workspaces", "directory", null)];
+  }
+
+  if (currentPath === "/srv/workspaces") {
+    return [buildEntry(workspaceLeaf, "directory", null)];
+  }
+
+  if (currentPath.endsWith("/src")) {
+    return [
+      buildEntry("main.ts", "file", 1324),
+      buildEntry("DashboardApp.tsx", "file", 8421),
+      buildEntry("styles.css", "file", 2440),
+    ];
+  }
+
+  if (currentPath.endsWith("/.config")) {
+    return [buildEntry("settings.json", "file", 612)];
+  }
+
+  if (currentPath.endsWith("/logs")) {
+    return [buildEntry("session.log", "file", 4096)];
+  }
+
+  if (currentPath === workspacePath) {
+    return [
+      buildEntry("src", "directory", null),
+      buildEntry(".config", "directory", null),
+      buildEntry("logs", "directory", null),
+      buildEntry("README.md", "file", 1902),
+    ];
+  }
+
+  return [
+    buildEntry("src", "directory", null),
+    buildEntry(".config", "directory", null),
+    buildEntry("logs", "directory", null),
+    buildEntry("README.md", "file", 1902),
+  ];
+}
+
+function buildMockVmFileContent(vm: VmInstance, path: string): VmFileContent {
+  const normalizedPath = normalizeGuestPath(path);
+
+  if (isMockDirectoryPath(vm, normalizedPath)) {
+    throw new Error(`${normalizedPath} is a directory.`);
+  }
+
+  const contentByPath = new Map<string, string>([
+    ["/home/ubuntu/.bashrc", "export EDITOR=vim\nalias ll='ls -alF'\n"],
+    ["/home/ubuntu/notes.txt", "Remember to collect logs before deleting this workspace.\n"],
+    ["/home/ubuntu/Desktop/Parralaize.url", "[InternetShortcut]\nURL=https://parallaize.local/\n"],
+    ["/home/ubuntu/Downloads/session.log", "mock session log\n"],
+    ["/etc/hosts", "127.0.0.1 localhost\n127.0.1.1 ubuntu\n"],
+  ]);
+
+  const workspacePath = normalizeGuestPath(vm.workspacePath || DEFAULT_GUEST_WORKSPACE);
+  contentByPath.set(`${workspacePath}/README.md`, "# Mock workspace\n");
+  contentByPath.set(`${workspacePath}/src/main.ts`, "console.log('mock workspace');\n");
+  contentByPath.set(
+    `${workspacePath}/src/DashboardApp.tsx`,
+    "export function DashboardApp() {\n  return null;\n}\n",
+  );
+  contentByPath.set(`${workspacePath}/src/styles.css`, ".workspace {}\n");
+  contentByPath.set(
+    `${workspacePath}/.config/settings.json`,
+    JSON.stringify({ theme: "light", autosave: true }, null, 2),
+  );
+  contentByPath.set(`${workspacePath}/logs/session.log`, "mock workspace log\n");
+
+  return {
+    content: Buffer.from(contentByPath.get(normalizedPath) ?? "mock file\n", "utf8"),
+    name: normalizedPath.split("/").pop() ?? "download",
+    path: normalizedPath,
+  };
+}
+
+function buildMockVmTouchedFilesSnapshot(vm: VmInstance): VmTouchedFilesSnapshot {
+  const generatedAt = new Date().toISOString();
+  const baselineStartedAt = vm.liveSince ?? vm.createdAt ?? null;
+  const workspacePath = vm.workspacePath;
+  const commandPaths = Array.from(
+    new Set((vm.commandHistory ?? []).map((entry) => normalizeGuestPath(entry.workspacePath))),
+  ).filter((path) => !isIgnoredTouchedFilesPath(workspacePath, path));
+  const entries: VmTouchedFile[] =
+    commandPaths.length > 0
+      ? commandPaths.map((path) => ({
+          name: path === workspacePath ? "." : path.split("/").pop() ?? path,
+          path,
+          kind: "directory",
+          sizeBytes: null,
+          modifiedAt: generatedAt,
+          changedAt: generatedAt,
+          reasons: ["command-history"],
+        }))
+      : [
+          {
+            name: "README.md",
+            path: `${workspacePath}/README.md`,
+            kind: "file",
+            sizeBytes: 1902,
+            modifiedAt: generatedAt,
+            changedAt: generatedAt,
+            reasons: ["mtime"],
+          },
+        ];
+
+  return {
+    vmId: vm.id,
+    workspacePath,
+    scanPath: workspacePath,
+    baselineStartedAt,
+    baselineLabel:
+      vm.liveSince !== null
+        ? "Best effort since the VM last started."
+        : "Best effort since the workspace was first created.",
+    limitationSummary:
+      "Mock mode uses command history and synthetic timestamps only. It is a UI stand-in for the real guest scan.",
+    entries,
+    generatedAt,
+  };
+}
+
+function buildBrowseVmFilesScript(
+  workspacePath: string,
+  requestedPath: string | null,
+): string {
+  const requestedPathLiteral = requestedPath === null
+    ? "None"
+    : JSON.stringify(requestedPath);
+
+  return `python3 - <<'PY'
+import datetime
+import json
+import os
+import stat
+
+workspace_path = ${JSON.stringify(workspacePath)}
+requested_path = ${requestedPathLiteral}
+home_path = "/home/ubuntu" if os.path.isdir("/home/ubuntu") else None
+
+def isoformat(timestamp: float) -> str:
+  return datetime.datetime.fromtimestamp(
+    timestamp,
+    datetime.timezone.utc,
+  ).isoformat().replace("+00:00", "Z")
+
+def entry_kind(mode: int) -> str:
+  if stat.S_ISDIR(mode):
+    return "directory"
+  if stat.S_ISREG(mode):
+    return "file"
+  if stat.S_ISLNK(mode):
+    return "symlink"
+  return "other"
+
+if requested_path is not None:
+  browse_path = requested_path
+else:
+  browse_path = next(
+    (
+      candidate
+      for candidate in (home_path, workspace_path, "/")
+      if candidate is not None and os.path.isdir(candidate)
+    ),
+    "/",
+  )
+
+if not os.path.isdir(browse_path):
+  raise NotADirectoryError(f"{browse_path} is not a directory")
+
+os.chdir(browse_path)
+current_path = os.getcwd()
+entries = []
+
+for entry in sorted(
+  os.scandir(current_path),
+  key=lambda item: (not item.is_dir(follow_symlinks=False), item.name.lower(), item.name),
+):
+  stats = entry.stat(follow_symlinks=False)
+  kind = entry_kind(stats.st_mode)
+  entries.append({
+    "name": entry.name,
+    "path": entry.path,
+    "kind": kind,
+    "sizeBytes": None if kind == "directory" else int(stats.st_size),
+    "modifiedAt": isoformat(stats.st_mtime),
+    "changedAt": isoformat(stats.st_ctime),
+  })
+
+print(json.dumps({
+  "homePath": home_path,
+  "currentPath": current_path,
+  "entries": entries,
+}))
+PY`;
+}
+
+function buildReadVmFileScript(path: string): string {
+  return `python3 - <<'PY'
+import base64
+import json
+import os
+
+file_path = ${JSON.stringify(path)}
+
+if not os.path.exists(file_path):
+  raise FileNotFoundError(file_path)
+
+if os.path.isdir(file_path):
+  raise IsADirectoryError(file_path)
+
+with open(file_path, "rb") as handle:
+  content = handle.read()
+
+print(json.dumps({
+  "contentBase64": base64.b64encode(content).decode("ascii"),
+  "name": os.path.basename(file_path) or "download",
+  "path": os.path.abspath(file_path),
+}))
+PY`;
+}
+
+function buildReadVmTouchedFilesScript(
+  workspacePath: string,
+  baselineStartedAt: string | null,
+): string {
+  const parsedBaselineMs = baselineStartedAt ? Date.parse(baselineStartedAt) : Number.NaN;
+  const baselineSeconds = Number.isFinite(parsedBaselineMs)
+    ? Math.max(0, parsedBaselineMs / 1000)
+    : 0;
+
+  return `python3 - <<'PY'
+import datetime
+import json
+import os
+import stat
+
+workspace_path = ${JSON.stringify(workspacePath)}
+scan_path = ${JSON.stringify(DEFAULT_GUEST_HOME)} if os.path.isdir(${JSON.stringify(DEFAULT_GUEST_HOME)}) else workspace_path
+ignored_paths = {
+  os.path.normpath(${JSON.stringify(`${DEFAULT_GUEST_HOME}/.cache`)})
+} if scan_path == ${JSON.stringify(DEFAULT_GUEST_HOME)} else set()
+baseline = ${baselineSeconds}
+max_scanned = 5000
+max_returned = 200
+scanned = 0
+truncated = False
+entries = []
+
+def isoformat(timestamp: float) -> str:
+  return datetime.datetime.fromtimestamp(
+    timestamp,
+    datetime.timezone.utc,
+  ).isoformat().replace("+00:00", "Z")
+
+def entry_kind(mode: int) -> str:
+  if stat.S_ISDIR(mode):
+    return "directory"
+  if stat.S_ISREG(mode):
+    return "file"
+  if stat.S_ISLNK(mode):
+    return "symlink"
+  return "other"
+
+for root, dirnames, filenames in os.walk(scan_path):
+  dirnames.sort()
+  filenames.sort()
+  dirnames[:] = [
+    name
+    for name in dirnames
+    if os.path.normpath(os.path.join(root, name)) not in ignored_paths
+  ]
+  for name in [*dirnames, *filenames]:
+    path = os.path.join(root, name)
+    try:
+      stats = os.lstat(path)
+    except OSError:
+      continue
+    scanned += 1
+    reasons = []
+    if stats.st_mtime >= baseline:
+      reasons.append("mtime")
+    if stats.st_ctime >= baseline:
+      reasons.append("ctime")
+    if reasons:
+      entries.append({
+        "name": name,
+        "path": path,
+        "kind": entry_kind(stats.st_mode),
+        "sizeBytes": None if stat.S_ISDIR(stats.st_mode) else int(stats.st_size),
+        "modifiedAt": isoformat(stats.st_mtime),
+        "changedAt": isoformat(stats.st_ctime),
+        "reasons": reasons,
+        "_sort": max(stats.st_mtime, stats.st_ctime),
+      })
+    if scanned >= max_scanned:
+      truncated = True
+      break
+  if truncated:
+    break
+
+entries.sort(key=lambda item: item["_sort"], reverse=True)
+for entry in entries:
+  del entry["_sort"]
+
+print(json.dumps({
+  "entries": entries[:max_returned],
+  "scanPath": scan_path,
+  "truncated": truncated,
+}))
+PY`;
+}
+
+function mergeTouchedFilesWithCommandHistory(
+  entries: VmTouchedFile[],
+  commandHistory: VmInstance["commandHistory"],
+  workspacePath: string,
+): VmTouchedFile[] {
+  const merged = new Map<string, VmTouchedFile>();
+
+  for (const entry of entries) {
+    merged.set(entry.path, {
+      ...entry,
+      reasons: sortTouchedFileReasons(entry.reasons),
+    });
+  }
+
+  for (const commandEntry of commandHistory ?? []) {
+    const candidatePath = normalizeGuestPath(commandEntry.workspacePath);
+
+    if (!isWithinGuestWorkspacePath(workspacePath, candidatePath)) {
+      continue;
+    }
+
+    if (isIgnoredTouchedFilesPath(workspacePath, candidatePath)) {
+      continue;
+    }
+
+    const existing = merged.get(candidatePath);
+
+    if (existing) {
+      if (!existing.reasons.includes("command-history")) {
+        existing.reasons = sortTouchedFileReasons([
+          ...existing.reasons,
+          "command-history",
+        ]);
+      }
+      continue;
+    }
+
+    merged.set(candidatePath, {
+      name: candidatePath === workspacePath ? "." : candidatePath.split("/").pop() ?? candidatePath,
+      path: candidatePath,
+      kind: "directory",
+      sizeBytes: null,
+      modifiedAt: null,
+      changedAt: null,
+      reasons: ["command-history"],
+    });
+  }
+
+  return [...merged.values()]
+    .sort((left, right) => touchedFileSortValue(right) - touchedFileSortValue(left))
+    .slice(0, 200);
+}
+
+function isIgnoredTouchedFilesPath(scanPath: string, candidatePath: string): boolean {
+  const normalizedScanPath = normalizeGuestPath(scanPath);
+  const normalizedCandidatePath = normalizeGuestPath(candidatePath);
+
+  if (normalizedScanPath !== DEFAULT_GUEST_HOME) {
+    return false;
+  }
+
+  const ignoredPath = `${DEFAULT_GUEST_HOME}/.cache`;
+  return (
+    normalizedCandidatePath === ignoredPath ||
+    normalizedCandidatePath.startsWith(`${ignoredPath}/`)
+  );
+}
+
+function touchedFileSortValue(entry: VmTouchedFile): number {
+  const modifiedAt = entry.modifiedAt ? Date.parse(entry.modifiedAt) : 0;
+  const changedAt = entry.changedAt ? Date.parse(entry.changedAt) : 0;
+  return Math.max(
+    Number.isFinite(modifiedAt) ? modifiedAt : 0,
+    Number.isFinite(changedAt) ? changedAt : 0,
+  );
+}
+
+function sortTouchedFileReasons(
+  reasons: VmTouchedFileReason[],
+): VmTouchedFileReason[] {
+  return [...reasons].sort((left, right) => left.localeCompare(right));
+}
+
+function resolveGuestParentPath(currentPath: string): string | null {
+  const normalizedCurrentPath = normalizeGuestPath(currentPath);
+
+  if (normalizedCurrentPath === "/") {
+    return null;
+  }
+
+  return normalizeGuestPath(
+    normalizedCurrentPath.slice(0, normalizedCurrentPath.lastIndexOf("/")) || "/",
+  );
+}
+
+function resolveMockVmHomePath(): string {
+  return "/home/ubuntu";
+}
+
+function resolveMockVmBrowsePath(vm: VmInstance): string {
+  const workspacePath = normalizeGuestPath(vm.workspacePath || DEFAULT_GUEST_WORKSPACE);
+  const homePath = resolveMockVmHomePath();
+
+  return homePath || workspacePath || "/";
+}
+
+function isMockDirectoryPath(vm: VmInstance, path: string): boolean {
+  const workspacePath = normalizeGuestPath(vm.workspacePath || DEFAULT_GUEST_WORKSPACE);
+  const directoryPaths = new Set([
+    "/",
+    "/etc",
+    "/home",
+    "/home/ubuntu",
+    "/home/ubuntu/Desktop",
+    "/home/ubuntu/Downloads",
+    "/srv",
+    "/srv/workspaces",
+    workspacePath,
+    `${workspacePath}/src`,
+    `${workspacePath}/.config`,
+    `${workspacePath}/logs`,
+  ]);
+
+  return directoryPaths.has(path);
+}
+
+function normalizeGuestPath(path: string): string {
+  const normalized = path.replace(/\/+/g, "/");
+
+  if (!normalized.startsWith("/")) {
+    return `/${normalized}`;
+  }
+
+  return normalized.length > 1 && normalized.endsWith("/")
+    ? normalized.slice(0, -1)
+    : normalized;
+}
+
+function isWithinGuestWorkspacePath(
+  workspacePath: string,
+  candidatePath: string,
+): boolean {
+  const normalizedWorkspacePath = normalizeGuestPath(workspacePath);
+  const normalizedCandidatePath = normalizeGuestPath(candidatePath);
+
+  if (normalizedWorkspacePath === "/") {
+    return normalizedCandidatePath.startsWith("/");
+  }
+
+  return (
+    normalizedCandidatePath === normalizedWorkspacePath ||
+    normalizedCandidatePath.startsWith(`${normalizedWorkspacePath}/`)
+  );
 }
 
 function parseJson<T>(value: string): T {

@@ -82,6 +82,7 @@ export interface TemplatePortForward {
 export interface VmPortForward extends TemplatePortForward {
   id: string;
   publicPath: string;
+  publicHostname?: string | null;
 }
 
 export interface VmCommandResult {
@@ -103,6 +104,32 @@ export interface AdminSessionRecord {
   idleExpiresAt: string;
 }
 
+export type TemplateProvenanceKind = "seed" | "cloned" | "captured" | "recovered";
+
+export interface TemplateProvenance {
+  kind: TemplateProvenanceKind;
+  summary: string;
+  sourceTemplateId?: string | null;
+  sourceTemplateName?: string | null;
+  sourceVmId?: string | null;
+  sourceVmName?: string | null;
+  sourceSnapshotId?: string | null;
+  sourceSnapshotLabel?: string | null;
+}
+
+export type TemplateHistoryKind =
+  | "created"
+  | "cloned"
+  | "captured"
+  | "updated"
+  | "recovered";
+
+export interface TemplateHistoryEntry {
+  kind: TemplateHistoryKind;
+  summary: string;
+  createdAt: string;
+}
+
 export interface EnvironmentTemplate {
   id: string;
   name: string;
@@ -115,6 +142,8 @@ export interface EnvironmentTemplate {
   tags: string[];
   notes: string[];
   snapshotIds: string[];
+  provenance?: TemplateProvenance;
+  history?: TemplateHistoryEntry[];
   createdAt: string;
   updatedAt: string;
 }
@@ -258,6 +287,43 @@ export interface VmLogsSnapshot {
   fetchedAt: string;
 }
 
+export type VmFileEntryKind = "file" | "directory" | "symlink" | "other";
+export type VmTouchedFileReason = "mtime" | "ctime" | "command-history";
+
+export interface VmFileEntry {
+  name: string;
+  path: string;
+  kind: VmFileEntryKind;
+  sizeBytes: number | null;
+  modifiedAt: string | null;
+  changedAt: string | null;
+}
+
+export interface VmFileBrowserSnapshot {
+  vmId: string;
+  workspacePath: string;
+  homePath: string | null;
+  currentPath: string;
+  parentPath: string | null;
+  entries: VmFileEntry[];
+  generatedAt: string;
+}
+
+export interface VmTouchedFile extends VmFileEntry {
+  reasons: VmTouchedFileReason[];
+}
+
+export interface VmTouchedFilesSnapshot {
+  vmId: string;
+  workspacePath: string;
+  scanPath: string;
+  baselineStartedAt: string | null;
+  baselineLabel: string;
+  limitationSummary: string;
+  entries: VmTouchedFile[];
+  generatedAt: string;
+}
+
 export interface CreateVmInput {
   templateId: string;
   name: string;
@@ -354,6 +420,12 @@ export interface AuthStatus {
   authenticated: boolean;
   username: string | null;
   mode: "none" | "session" | "unauthenticated";
+}
+
+export interface LatestReleaseMetadata {
+  version: string;
+  packageRelease: string;
+  packageLabel: string;
 }
 
 export interface ApiEnvelope<T> {

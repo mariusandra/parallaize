@@ -14,6 +14,8 @@ interface ResolvedVncTarget {
 
 interface ResolvedForwardTarget extends ResolvedVncTarget {
   publicPath: string;
+  publicHostname: string | null;
+  routeKind: "host" | "path";
 }
 
 class ProxyRouteError extends Error {
@@ -43,16 +45,10 @@ export class VmNetworkBridge {
     response: ServerResponse,
     url: URL,
   ): Promise<boolean> {
-    const match = matchForwardPath(url.pathname);
-
-    if (!match) {
-      return false;
-    }
-
-    let target: ResolvedForwardTarget;
+    let route: ResolvedForwardRoute | null;
 
     try {
-      target = this.resolveForwardTarget(match.vmId, match.forwardId);
+      route = this.resolveForwardRoute(request, url);
     } catch (error) {
       writePlainError(
         response,
@@ -62,18 +58,22 @@ export class VmNetworkBridge {
       return true;
     }
 
+    if (!route) {
+      return false;
+    }
+
     const proxyRequest = httpRequest(
       {
-        host: target.host,
-        port: target.port,
+        host: route.target.host,
+        port: route.target.port,
         method: request.method,
-        path: buildTargetPath(match.remainder, url.search),
-        headers: buildForwardHeaders(request, target),
+        path: buildTargetPath(route.remainder, url.search),
+        headers: buildForwardHeaders(request, route.target),
       },
       (proxyResponse) => {
         response.writeHead(
           proxyResponse.statusCode ?? 502,
-          rewriteForwardResponseHeaders(proxyResponse.headers, target.publicPath),
+          rewriteForwardResponseHeaders(proxyResponse.headers, route.target.publicPath),
         );
         void pipeline(proxyResponse, response).catch(() => {
           response.destroy();
@@ -112,10 +112,21 @@ export class VmNetworkBridge {
       return true;
     }
 
-    const match = matchForwardPath(url.pathname);
+    let route: ResolvedForwardRoute | null;
 
-    if (match) {
-      this.handleForwardUpgrade(request, socket, head, match, url);
+    try {
+      route = this.resolveForwardRoute(request, url);
+    } catch (error) {
+      writeSocketError(
+        socket,
+        error instanceof ProxyRouteError ? error.statusCode : 502,
+        error instanceof Error ? error.message : "Forward target resolution failed.",
+      );
+      return true;
+    }
+
+    if (route) {
+      this.handleForwardUpgrade(request, socket, head, route, url);
       return true;
     }
 
@@ -173,13 +184,13 @@ export class VmNetworkBridge {
     request: IncomingMessage,
     socket: Socket,
     head: Buffer,
-    match: ForwardPathMatch,
+    route: ResolvedForwardRoute,
     url: URL,
   ): void {
     let target: ResolvedForwardTarget;
 
     try {
-      target = this.resolveForwardTarget(match.vmId, match.forwardId);
+      target = route.target;
     } catch (error) {
       writeSocketError(
         socket,
@@ -198,7 +209,7 @@ export class VmNetworkBridge {
     socket.setNoDelay(true);
 
     upstream.on("connect", () => {
-      const requestLine = `${request.method ?? "GET"} ${buildTargetPath(match.remainder, url.search)} HTTP/${request.httpVersion}`;
+      const requestLine = `${request.method ?? "GET"} ${buildTargetPath(route.remainder, url.search)} HTTP/${request.httpVersion}`;
       const headers = buildForwardHeaders(request, target, true);
       const serializedHeaders = Object.entries(headers)
         .flatMap(([key, value]) => {
@@ -233,6 +244,31 @@ export class VmNetworkBridge {
     });
   }
 
+  private resolveForwardRoute(
+    request: IncomingMessage,
+    url: URL,
+  ): ResolvedForwardRoute | null {
+    const hostTarget = this.resolveForwardTargetFromHost(request.headers.host);
+
+    if (hostTarget) {
+      return {
+        remainder: trimLeadingSlash(url.pathname),
+        target: hostTarget,
+      };
+    }
+
+    const pathMatch = matchForwardPath(url.pathname);
+
+    if (!pathMatch) {
+      return null;
+    }
+
+    return {
+      remainder: pathMatch.remainder,
+      target: this.resolveForwardTarget(pathMatch.vmId, pathMatch.forwardId, "path"),
+    };
+  }
+
   private resolveVncTarget(vmId: string): ResolvedVncTarget {
     const vm = this.manager.getVmDetail(vmId).vm;
     const session = vm.session;
@@ -257,6 +293,7 @@ export class VmNetworkBridge {
   private resolveForwardTarget(
     vmId: string,
     forwardId: string,
+    routeKind: ResolvedForwardTarget["routeKind"] = "path",
   ): ResolvedForwardTarget {
     const vm = this.manager.getVmDetail(vmId).vm;
 
@@ -274,8 +311,34 @@ export class VmNetworkBridge {
     return {
       host: session.host,
       port: forward.guestPort,
-      publicPath: forward.publicPath,
+      publicPath: routeKind === "host" ? "/" : forward.publicPath,
+      publicHostname: forward.publicHostname ?? null,
+      routeKind,
     };
+  }
+
+  private resolveForwardTargetFromHost(
+    hostHeader: IncomingMessage["headers"]["host"],
+  ): ResolvedForwardTarget | null {
+    const normalizedHost = normalizeHostHeader(hostHeader);
+
+    if (!normalizedHost) {
+      return null;
+    }
+
+    const summary = this.manager.getSummary();
+
+    for (const vm of summary.vms) {
+      const forward = vm.forwardedPorts.find(
+        (entry) => normalizeHostHeader(entry.publicHostname ?? undefined) === normalizedHost,
+      );
+
+      if (forward) {
+        return this.resolveForwardTarget(vm.id, forward.id, "host");
+      }
+    }
+
+    return null;
   }
 }
 
@@ -283,6 +346,11 @@ interface ForwardPathMatch {
   vmId: string;
   forwardId: string;
   remainder: string;
+}
+
+interface ResolvedForwardRoute {
+  remainder: string;
+  target: ResolvedForwardTarget;
 }
 
 function safeUrl(request: IncomingMessage): URL | null {
@@ -312,6 +380,23 @@ function matchForwardPath(pathname: string): ForwardPathMatch | null {
   };
 }
 
+function normalizeHostHeader(
+  value: IncomingMessage["headers"]["host"] | string | undefined,
+): string | null {
+  const rawValue = Array.isArray(value) ? value[0] : value;
+  const trimmed = rawValue?.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return new URL(`http://${trimmed}`).hostname.toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
 function requireVncSession(
   vmName: string,
   session: VmSession | null,
@@ -334,6 +419,10 @@ function buildTargetPath(remainder: string, search: string): string {
   return `${path}${search}`;
 }
 
+function trimLeadingSlash(pathname: string): string {
+  return pathname.replace(/^\/+/, "");
+}
+
 function buildForwardHeaders(
   request: IncomingMessage,
   target: ResolvedForwardTarget,
@@ -352,8 +441,15 @@ function buildForwardHeaders(
   headers.host = formatHostHeader(target.host, target.port);
   headers["x-forwarded-host"] = request.headers.host ?? "";
   headers["x-forwarded-proto"] = forwardedProto(request);
-  headers["x-forwarded-prefix"] = target.publicPath.replace(/\/$/, "");
-  headers["x-parallaize-vm-forward"] = target.publicPath;
+  if (target.routeKind === "path") {
+    headers["x-forwarded-prefix"] = target.publicPath.replace(/\/$/, "");
+  } else {
+    delete headers["x-forwarded-prefix"];
+  }
+  headers["x-parallaize-vm-forward"] =
+    target.routeKind === "host"
+      ? (target.publicHostname ?? "")
+      : target.publicPath;
 
   return headers;
 }

@@ -18,6 +18,7 @@ import type {
   IncusStorageActionResult,
   InjectCommandInput,
   LoginInput,
+  LatestReleaseMetadata,
   ReorderVmsInput,
   RunIncusStorageActionInput,
   ResizeVmInput,
@@ -30,8 +31,10 @@ import type {
   UpdateVmForwardedPortsInput,
   UpdateVmNetworkInput,
   VmDetail,
+  VmFileBrowserSnapshot,
   VmLogsSnapshot,
   VmResolutionControlSnapshot,
+  VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
 import { loadConfig } from "./config.js";
 import { collectIncusStorageDiagnostics, runIncusStorageAction } from "./incus-storage.js";
@@ -58,7 +61,9 @@ const store = await createStateStore(
   },
   () => createSeedState(provider.state),
 );
-const manager = new DesktopManager(store, provider);
+const manager = new DesktopManager(store, provider, {
+  forwardedServiceHostBase: config.forwardedServiceHostBase,
+});
 const networkBridge = new VmNetworkBridge(manager);
 manager.start();
 
@@ -71,6 +76,12 @@ const maxAdminSessions = 32;
 const activeSockets = new Set<Socket>();
 const activeEventStreams = new Set<ServerResponse>();
 const resolutionControlLeases = new Map<string, ResolutionControlLeaseRecord>();
+const latestReleaseCacheTtlMs = 10 * 60 * 1000;
+let latestReleaseCache: {
+  expiresAtMs: number;
+  value: LatestReleaseMetadata | null;
+} | null = null;
+let latestReleasePromise: Promise<LatestReleaseMetadata | null> | null = null;
 
 interface ResolutionControlLeaseRecord {
   clientId: string;
@@ -186,6 +197,13 @@ const server = createServer(async (request, response) => {
       });
     }
 
+    if (method === "GET" && url.pathname === "/api/version/latest") {
+      return writeJson<LatestReleaseMetadata | null>(response, 200, {
+        ok: true,
+        data: await getLatestReleaseMetadata(),
+      });
+    }
+
     if (method === "GET" && url.pathname === "/events") {
       return handleEvents(response);
     }
@@ -207,6 +225,34 @@ const server = createServer(async (request, response) => {
       return writeJson<VmLogsSnapshot>(response, 200, {
         ok: true,
         data: await manager.getVmLogs(vmLogsMatch[1]),
+      });
+    }
+
+    const vmTouchedFilesMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/files\/touched$/);
+    if (method === "GET" && vmTouchedFilesMatch) {
+      return writeJson<VmTouchedFilesSnapshot>(response, 200, {
+        ok: true,
+        data: await manager.getVmTouchedFiles(vmTouchedFilesMatch[1]),
+      });
+    }
+
+    const vmFileDownloadMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/files\/download$/);
+    if ((method === "GET" || method === "HEAD") && vmFileDownloadMatch) {
+      return serveVmFileDownload(
+        response,
+        await manager.readVmFile(vmFileDownloadMatch[1], url.searchParams.get("path") ?? ""),
+        method === "HEAD",
+      );
+    }
+
+    const vmFilesMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/files$/);
+    if (method === "GET" && vmFilesMatch) {
+      return writeJson<VmFileBrowserSnapshot>(response, 200, {
+        ok: true,
+        data: await manager.browseVmFiles(
+          vmFilesMatch[1],
+          url.searchParams.get("path"),
+        ),
       });
     }
 
@@ -472,6 +518,103 @@ function handleEvents(response: ServerResponse): void {
     clearInterval(heartbeat);
     unsubscribe();
   });
+}
+
+async function getLatestReleaseMetadata(): Promise<LatestReleaseMetadata | null> {
+  const now = Date.now();
+
+  if (latestReleaseCache && now < latestReleaseCache.expiresAtMs) {
+    return latestReleaseCache.value;
+  }
+
+  if (latestReleasePromise) {
+    return latestReleasePromise;
+  }
+
+  latestReleasePromise = loadLatestReleaseMetadata().finally(() => {
+    latestReleasePromise = null;
+  });
+
+  return latestReleasePromise;
+}
+
+async function loadLatestReleaseMetadata(): Promise<LatestReleaseMetadata | null> {
+  try {
+    const response = await fetch(config.releaseMetadataUrl, {
+      headers: {
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(3000),
+    });
+
+    if (!response.ok) {
+      cacheLatestReleaseMetadata(null);
+      return null;
+    }
+
+    const payload = parseLatestReleaseMetadata(await response.json());
+    cacheLatestReleaseMetadata(payload);
+    return payload;
+  } catch {
+    cacheLatestReleaseMetadata(null);
+    return null;
+  }
+}
+
+function cacheLatestReleaseMetadata(value: LatestReleaseMetadata | null): void {
+  latestReleaseCache = {
+    expiresAtMs: Date.now() + latestReleaseCacheTtlMs,
+    value,
+  };
+}
+
+function parseLatestReleaseMetadata(value: unknown): LatestReleaseMetadata | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const version = normalizeStableSemver(value.version);
+  const packageRelease = normalizePackageRelease(value.packageRelease);
+
+  if (!version || !packageRelease) {
+    return null;
+  }
+
+  const packageLabel =
+    normalizeNonEmptyString(value.packageLabel) ?? `${version}-${packageRelease}`;
+
+  return {
+    version,
+    packageRelease,
+    packageLabel,
+  };
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeStableSemver(value: unknown): string | null {
+  const normalized = normalizeNonEmptyString(value);
+  return normalized && /^\d+\.\d+\.\d+$/u.test(normalized) ? normalized : null;
+}
+
+function normalizePackageRelease(value: unknown): string | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return String(value);
+  }
+
+  const normalized = normalizeNonEmptyString(value);
+  return normalized && /^[1-9]\d*$/u.test(normalized) ? normalized : null;
 }
 
 function syncVmResolutionControl(
@@ -1063,6 +1206,29 @@ async function serveFile(
   }
 }
 
+function serveVmFileDownload(
+  response: ServerResponse,
+  file: {
+    content: Buffer;
+    name: string;
+  },
+  headOnly = false,
+): void {
+  response.writeHead(200, {
+    "content-type": inferDownloadContentType(file.name),
+    "content-disposition": buildDownloadContentDisposition(file.name),
+    "content-length": String(file.content.byteLength),
+    "cache-control": "no-store",
+  });
+
+  if (headOnly) {
+    response.end();
+    return;
+  }
+
+  response.end(file.content);
+}
+
 function resolveAsset(pathname: string): {
   path: string;
   contentType: string;
@@ -1095,6 +1261,35 @@ function inferContentType(filePath: string): string {
     default:
       return "text/plain; charset=utf-8";
   }
+}
+
+function inferDownloadContentType(fileName: string): string {
+  switch (extname(fileName).toLowerCase()) {
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+    case ".mjs":
+    case ".ts":
+    case ".tsx":
+      return "text/plain; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".log":
+    case ".md":
+    case ".txt":
+      return "text/plain; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml; charset=utf-8";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function buildDownloadContentDisposition(fileName: string): string {
+  const safeFileName = fileName.replace(/["\r\n]/g, "_");
+  return `attachment; filename="${safeFileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
 }
 
 function isBenignConnectionError(error: unknown): boolean {

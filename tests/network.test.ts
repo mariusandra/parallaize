@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpServer, request as sendHttpRequest } from "node:http";
 import {
   createServer as createTcpServer,
   type AddressInfo,
@@ -189,6 +189,109 @@ test("VNC bridge flushes upstream bytes before a fast upstream close", async () 
   }
 });
 
+test("forward bridge routes hostname-based forwarded service traffic", async () => {
+  const vmId = "vm-4545";
+  const publicHostname = `app-ui--${vmId}.localhost`;
+  const upstreamServer = createHttpServer((request, response) => {
+    assert.equal(request.url, "/deep/path?ok=1");
+    response.writeHead(200, {
+      "content-type": "application/json",
+    });
+    response.end(
+      JSON.stringify({
+        forwardedHost: request.headers["x-forwarded-host"],
+        routedAs: request.headers["x-parallaize-vm-forward"],
+      }),
+    );
+  });
+  const controlServer = createHttpServer();
+
+  try {
+    upstreamServer.listen(0, "127.0.0.1");
+    await once(upstreamServer, "listening");
+    const upstreamPort = portOf(upstreamServer);
+
+    const bridge = new VmNetworkBridge({
+      getSummary() {
+        return {
+          vms: [
+            {
+              id: vmId,
+              forwardedPorts: [
+                {
+                  id: "port-01",
+                  name: "app-ui",
+                  guestPort: upstreamPort,
+                  protocol: "http",
+                  description: "Forwarded host route",
+                  publicPath: `/vm/${vmId}/forwards/port-01/`,
+                  publicHostname,
+                },
+              ],
+            },
+          ],
+        };
+      },
+      getVmDetail(requestedVmId: string) {
+        assert.equal(requestedVmId, vmId);
+        return {
+          vm: {
+            id: vmId,
+            name: "hostname-forward-test",
+            status: "running",
+            session: {
+              kind: "vnc",
+              host: "127.0.0.1",
+              port: 5900,
+              webSocketPath: `/api/vms/${vmId}/vnc`,
+              browserPath: `/?vm=${vmId}`,
+              display: "127.0.0.1:5900",
+            },
+            forwardedPorts: [
+              {
+                id: "port-01",
+                name: "app-ui",
+                guestPort: upstreamPort,
+                protocol: "http",
+                description: "Forwarded host route",
+                publicPath: `/vm/${vmId}/forwards/port-01/`,
+                publicHostname,
+              },
+            ],
+          },
+        };
+      },
+    } as unknown as DesktopManager);
+
+    controlServer.on("request", (request, response) => {
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
+
+      void bridge.maybeHandleRequest(request, response, url).then((handled) => {
+        if (!handled) {
+          response.writeHead(404);
+          response.end("no route");
+        }
+      });
+    });
+    controlServer.listen(0, "127.0.0.1");
+    await once(controlServer, "listening");
+
+    const { body, statusCode } = await requestText({
+      headers: {
+        host: publicHostname,
+      },
+      path: "/deep/path?ok=1",
+      port: portOf(controlServer),
+    });
+
+    assert.equal(statusCode, 200);
+    assert.match(body, new RegExp(publicHostname));
+  } finally {
+    await closeServer(controlServer);
+    await closeServer(upstreamServer);
+  }
+});
+
 function bufferFromRawData(data: RawData): Buffer {
   if (Buffer.isBuffer(data)) {
     return data;
@@ -211,6 +314,42 @@ async function waitForSocketOpen(socket: WebSocket): Promise<void> {
       resolve();
     });
     socket.once("error", reject);
+  });
+}
+
+async function requestText({
+  headers,
+  path,
+  port,
+}: {
+  headers?: Record<string, string>;
+  path: string;
+  port: number;
+}): Promise<{ body: string; statusCode: number }> {
+  return await new Promise((resolve, reject) => {
+    const request = sendHttpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path,
+        headers,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk) => {
+          chunks.push(Buffer.from(chunk));
+        });
+        response.on("end", () => {
+          resolve({
+            body: Buffer.concat(chunks).toString("utf8"),
+            statusCode: response.statusCode ?? 0,
+          });
+        });
+      },
+    );
+
+    request.once("error", reject);
+    request.end();
   });
 }
 

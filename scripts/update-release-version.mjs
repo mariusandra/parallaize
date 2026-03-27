@@ -4,50 +4,100 @@ import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-const root = resolve(process.cwd());
 const execFileAsync = promisify(execFile);
-const args = parseArgs(process.argv.slice(2));
+const directRunPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
 
-const versionInput = (args.version ?? "").trim();
-const packageRelease = (args["package-release"] ?? args.release ?? "1").trim();
-const dryRun = parseBooleanFlag(args["dry-run"] ?? "false");
-const resolveOnly = parseBooleanFlag(args["resolve-only"] ?? "false");
-const version = await resolveVersion(versionInput);
-
-if (!/^[1-9]\d*$/.test(packageRelease)) {
-  throw new Error(`Unsupported package release "${packageRelease}". Use a positive integer like "1".`);
+if (directRunPath === import.meta.url) {
+  await main();
 }
 
-if (resolveOnly) {
-  console.log(version);
-  process.exit(0);
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  const versionInput = (args.version ?? "").trim();
+  const packageReleaseInput = (args["package-release"] ?? args.release ?? "1").trim();
+  const dryRun = parseBooleanFlag(args["dry-run"] ?? "false");
+  const resolveOnly = parseBooleanFlag(args["resolve-only"] ?? "false");
+
+  const result = await updateManagedReleaseFiles({
+    dryRun,
+    packageReleaseInput,
+    resolveOnly,
+    versionInput,
+  });
+
+  if (resolveOnly) {
+    console.log(result.version);
+    return result;
+  }
+
+  const action = dryRun ? "Would update" : "Updated";
+  console.log(`${action} ${result.changedFiles.length} files for release ${result.packageLabel}:`);
+
+  for (const filePath of result.changedFiles) {
+    console.log(`- ${filePath}`);
+  }
+
+  return result;
 }
 
-const packageLabel = `${version}-${packageRelease}`;
-const changedFiles = [];
+export async function updateManagedReleaseFiles({
+  rootDir = process.cwd(),
+  versionInput,
+  packageReleaseInput = "1",
+  dryRun = false,
+  resolveOnly = false,
+}) {
+  const root = resolve(rootDir);
+  const version = await resolveVersion(versionInput, root);
+  const packageRelease = packageReleaseInput.trim();
 
-await updatePackageJson();
-await updateDebArtifactReferences("docs/index.html");
-await updateDebArtifactReferences("docs/packaging.md");
+  if (!/^[1-9]\d*$/.test(packageRelease)) {
+    throw new Error(`Unsupported package release "${packageRelease}". Use a positive integer like "1".`);
+  }
 
-if (changedFiles.length === 0) {
-  throw new Error(`Managed release files already point at ${packageLabel}.`);
+  if (resolveOnly) {
+    return {
+      changedFiles: [],
+      packageLabel: `${version}-${packageRelease}`,
+      packageRelease,
+      version,
+    };
+  }
+
+  const packageLabel = `${version}-${packageRelease}`;
+  const changedFiles = [];
+
+  await updatePackageJson(root, version, changedFiles, dryRun);
+  await updateDebArtifactReferences(root, "docs/index.html", packageLabel, changedFiles, dryRun);
+  await updateDebArtifactReferences(root, "docs/packaging.md", packageLabel, changedFiles, dryRun);
+  await updateLatestReleaseMetadata(
+    root,
+    "docs/latest.json",
+    buildLatestReleaseMetadata(version, packageRelease),
+    changedFiles,
+    dryRun,
+  );
+
+  if (changedFiles.length === 0) {
+    throw new Error(`Managed release files already point at ${packageLabel}.`);
+  }
+
+  return {
+    changedFiles,
+    packageLabel,
+    packageRelease,
+    version,
+  };
 }
 
-const action = dryRun ? "Would update" : "Updated";
-console.log(`${action} ${changedFiles.length} files for release ${packageLabel}:`);
-
-for (const filePath of changedFiles) {
-  console.log(`- ${filePath}`);
-}
-
-async function resolveVersion(input) {
+export async function resolveVersion(input, rootDir = process.cwd()) {
   const normalizedInput = normalizeVersionInput(input);
 
   if (isReleaseIncrement(normalizedInput)) {
-    const baseVersion = (await findLatestTaggedVersion()) ?? (await readPackageVersion());
+    const baseVersion = (await findLatestTaggedVersion(rootDir)) ?? (await readPackageVersion(rootDir));
     return incrementVersion(baseVersion, normalizedInput);
   }
 
@@ -60,7 +110,7 @@ async function resolveVersion(input) {
   return normalizedInput;
 }
 
-async function updatePackageJson() {
+async function updatePackageJson(root, version, changedFiles, dryRun) {
   const relativePath = "package.json";
   const absolutePath = join(root, relativePath);
   const packageJson = JSON.parse(await readFile(absolutePath, "utf8"));
@@ -77,7 +127,7 @@ async function updatePackageJson() {
   }
 }
 
-async function updateDebArtifactReferences(relativePath) {
+async function updateDebArtifactReferences(root, relativePath, packageLabel, changedFiles, dryRun) {
   const absolutePath = join(root, relativePath);
   const originalContents = await readFile(absolutePath, "utf8");
   let replacements = 0;
@@ -105,7 +155,39 @@ async function updateDebArtifactReferences(relativePath) {
   }
 }
 
-async function findLatestTaggedVersion() {
+async function updateLatestReleaseMetadata(root, relativePath, metadata, changedFiles, dryRun) {
+  const absolutePath = join(root, relativePath);
+  const nextContents = `${JSON.stringify(metadata, null, 2)}\n`;
+  let originalContents = null;
+
+  try {
+    originalContents = await readFile(absolutePath, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  if (originalContents === nextContents) {
+    return;
+  }
+
+  changedFiles.push(relative(root, absolutePath));
+
+  if (!dryRun) {
+    await writeFile(absolutePath, nextContents, "utf8");
+  }
+}
+
+export function buildLatestReleaseMetadata(version, packageRelease) {
+  return {
+    version,
+    packageRelease,
+    packageLabel: `${version}-${packageRelease}`,
+  };
+}
+
+async function findLatestTaggedVersion(root) {
   let stdout;
 
   try {
@@ -135,7 +217,7 @@ function parseTaggedVersion(tag) {
   return match?.[1] ?? null;
 }
 
-async function readPackageVersion() {
+async function readPackageVersion(root) {
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const packageVersion = normalizeVersionInput(packageJson.version ?? "");
 

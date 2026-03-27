@@ -99,6 +99,7 @@ Use admin auth as well:
 export PARALLAIZE_ADMIN_USERNAME=admin
 export PARALLAIZE_ADMIN_PASSWORD=change-me
 export PARALLAIZE_GUEST_VNC_PORT=5900
+export PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=localhost
 export PARALLAIZE_GUEST_INOTIFY_MAX_USER_WATCHES=1048576
 export PARALLAIZE_GUEST_INOTIFY_MAX_USER_INSTANCES=2048
 ```
@@ -144,6 +145,7 @@ Caddy fronts:
 - Server-sent events
 - noVNC websocket upgrades at `/api/vms/:id/vnc`
 - Forwarded guest services at `/vm/:id/forwards/:forwardId/`
+- Hostname-based forwarded guest services on `*.localhost` by default when you keep `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=localhost`
 
 ## Optional PostgreSQL persistence
 
@@ -201,6 +203,16 @@ Notes from the live PostgreSQL-backed run on March 26, 2026:
 - Captured templates can outlive their published `parallaize-template-*` Incus image aliases. The control plane now recovers those creates from the newest compatible template snapshot instead of failing immediately on `Image "..." not found`.
 - Compatibility matters during that recovery. If the newest snapshot was captured from a larger disk than the requested VM size, Parallaize now skips it and uses the newest snapshot that still fits. If none fit, increase the requested disk or recapture the template.
 - On this host, the smoke path exercised the PostgreSQL-backed create, stop, start, and cleanup paths successfully, but host-to-guest HTTP verification remained the step to watch most closely during follow-up debugging.
+
+## Template Prep Checklist
+
+When you want to turn a fresh Ubuntu VM into a reusable image, use the repeatable flow in [docs/template-prep.md](template-prep.md).
+
+That checklist now lines up with what the guest bootstrap already does automatically on first boot:
+
+- `indicator-multiload` is installed and started in the desktop session
+- the Ubuntu dock is pinned to the right with 32px icons
+- each desktop login picks a random wallpaper from the installed wallpaper set
 
 ## DMZ Mode
 

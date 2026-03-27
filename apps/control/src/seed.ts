@@ -33,6 +33,23 @@ export function createSeedState(provider: ProviderState): AppState {
         "Base image is intended for iterative snapshotting during development.",
       ],
       snapshotIds: provider.kind === "mock" ? ["snap-0001"] : [],
+      provenance: {
+        kind: "seed",
+        summary: `Seeded from ${DEFAULT_UBUNTU_DESKTOP_IMAGE}.`,
+        sourceTemplateId: null,
+        sourceTemplateName: null,
+        sourceVmId: null,
+        sourceVmName: null,
+        sourceSnapshotId: null,
+        sourceSnapshotLabel: null,
+      },
+      history: [
+        {
+          kind: "created",
+          summary: `Seeded from ${DEFAULT_UBUNTU_DESKTOP_IMAGE}.`,
+          createdAt: now,
+        },
+      ],
       createdAt: now,
       updatedAt: now,
     },

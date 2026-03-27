@@ -15,8 +15,11 @@ The package builder bundles the Node 24 runtime into the package so deployed hos
 
 - Supported: Ubuntu 24.04 `amd64` `.deb`
 - Experimental build output: Ubuntu 24.04 `arm64` `.deb`
+- Supported signed APT archive: Ubuntu 24.04 `amd64`
 
 The `arm64` package is intentionally emitted from the same build system now, but it should stay marked experimental until it is validated on a live host with real Incus VM workloads.
+
+If you want the distro-managed install path where `apt update` plus `apt upgrade` can pick up new Parallaize releases directly, use the signed archive described in [docs/apt-repository.md](apt-repository.md).
 
 ## Package Contents
 
@@ -60,10 +63,11 @@ Run these from the repo root.
 ```bash
 flox activate -d . -- pnpm package:deb
 flox activate -d . -- pnpm package:deb:arm64
+flox activate -d . -- pnpm package:apt-repo
 flox activate -d . -- pnpm package:release
 ```
 
-Artifacts land in `artifacts/packages/`.
+Artifacts land in `artifacts/packages/`. `pnpm package:apt-repo` also stages an unsigned archive tree in `artifacts/apt/` for local inspection.
 
 The package build flow does this:
 
@@ -77,7 +81,7 @@ The package build flow does this:
 
 Use `.github/workflows/release.yml` when you want GitHub Actions to cut and publish a new packaged release from `main`.
 
-Normal feature work, bug fixes, and docs cleanup should not bump versions in `package.json`, `docs/index.html`, this file, or any other release-version reference. Treat version changes as release-only edits driven by the manual GitHub Actions workflow.
+Normal feature work, bug fixes, and docs cleanup should not bump versions in `package.json`, `docs/index.html`, `docs/latest.json`, this file, or any other release-version reference. Treat version changes as release-only edits driven by the manual GitHub Actions workflow.
 
 Inputs:
 
@@ -86,6 +90,9 @@ Inputs:
 
 Required GitHub repository secrets:
 
+- `APT_GPG_PRIVATE_KEY`
+- `APT_GPG_PASSPHRASE`
+- `APT_GPG_SIGNING_KEY_ID`
 - `R2_ACCOUNT_ID`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
@@ -101,11 +108,13 @@ The workflow does this:
 
 1. Installs dependencies.
 2. Generates `artifacts/release-notes.md` from the git range since the previous release tag. When `OPENAI_API_KEY` exists, the script batches large commit ranges and uses the OpenAI Responses API to synthesize a concise summary; otherwise it falls back to deterministic notes built from commit metadata.
-3. Updates `package.json`, `docs/index.html`, and this packaging note to the requested release version.
+3. Updates `package.json`, `docs/index.html`, `docs/latest.json`, and this packaging note to the requested release version.
 4. Builds `.deb` packages for `amd64` and `arm64`.
-5. Uploads everything from `artifacts/packages/` to `s3://$R2_BUCKET/packages/` through the Cloudflare R2 endpoint so the public files stay available at `https://archive.parallaize.com/packages/`.
-6. Commits the versioned-file changes back to `main`.
-7. Creates a GitHub release tag and uploads the `amd64` plus `arm64` `.deb` files as release assets, using the generated markdown body instead of GitHub auto-generated notes.
+5. Imports the archive signing key into an ephemeral runner keyring and builds a signed Ubuntu 24.04 `amd64` APT archive under `artifacts/apt/`.
+6. Appends the active APT source entry and signing-key fingerprint to the release notes body.
+7. Uploads everything from `artifacts/packages/` to `s3://$R2_BUCKET/packages/` and everything from `artifacts/apt/` to `s3://$R2_BUCKET/apt/` through the Cloudflare R2 endpoint so the public files stay available at `https://archive.parallaize.com/packages/` and `https://archive.parallaize.com/apt/`.
+8. Commits the versioned-file changes back to `main`.
+9. Creates a GitHub release tag and uploads the `amd64` plus `arm64` `.deb` files together with the public archive-key files and source definitions, using the generated markdown body instead of GitHub auto-generated notes.
 
 If branch protection blocks `github-actions[bot]` from pushing to `main`, allow workflow pushes or change the final step to open a pull request instead.
 
@@ -240,4 +249,8 @@ parallaize-persistence export --from json --output /var/backups/parallaize-state
 parallaize-persistence export --from postgres --output /var/backups/parallaize-state.json
 ```
 
+The fuller PostgreSQL backup, restore, import, and packaged validation checklist lives in [postgres-operations.md](postgres-operations.md).
+
 Schema risk is currently low because Parallaize still persists a single normalized app-state blob rather than a long migration chain, but upgrades should still be treated as stateful and reversible.
+
+If you install from the signed Ubuntu 24.04 archive instead of a manually downloaded `.deb`, the service-level upgrade behavior stays the same after APT downloads the newer package. See [docs/apt-repository.md](apt-repository.md) for the source entry and key lifecycle.

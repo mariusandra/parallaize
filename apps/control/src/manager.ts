@@ -5,6 +5,7 @@ import {
 } from "../../../packages/shared/src/helpers.js";
 import { statfsSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
+import { posix as pathPosix } from "node:path";
 import type {
   ActionJob,
   AppState,
@@ -23,22 +24,27 @@ import type {
   Snapshot,
   SnapshotInput,
   TemplatePortForward,
+  TemplateHistoryEntry,
+  TemplateProvenance,
   UpdateTemplateInput,
   UpdateVmInput,
   UpdateVmForwardedPortsInput,
   UpdateVmNetworkInput,
   VmDetail,
+  VmFileBrowserSnapshot,
   VmCommandResult,
   VmInstance,
   VmLogsSnapshot,
   VmNetworkMode,
   VmPortForward,
+  VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
 import type {
   CaptureTemplateTarget,
   DesktopProvider,
   ProviderTelemetrySample,
   ProviderMutation,
+  VmFileContent,
 } from "./providers.js";
 import type { StateStore } from "./store.js";
 
@@ -51,6 +57,10 @@ const QUEUED_PROGRESS_PERCENT = 6;
 const RUNNING_PROGRESS_PERCENT = 14;
 
 type VmSessionRefreshMode = "none" | "missing" | "all";
+
+interface DesktopManagerOptions {
+  forwardedServiceHostBase?: string | null;
+}
 
 export class DesktopManager {
   private readonly listeners = new Set<(summary: DashboardSummary) => void>();
@@ -66,6 +76,7 @@ export class DesktopManager {
   constructor(
     private readonly store: StateStore,
     private readonly provider: DesktopProvider,
+    private readonly options: DesktopManagerOptions = {},
   ) {
     this.syncProviderState();
     this.reconcileInterruptedJobs();
@@ -229,6 +240,39 @@ export class DesktopManager {
     return this.provider.readVmLogs(vm);
   }
 
+  async browseVmFiles(
+    vmId: string,
+    requestedPath?: string | null,
+  ): Promise<VmFileBrowserSnapshot> {
+    this.syncProviderState();
+    const state = this.store.load();
+    const vm = this.requireVm(state, vmId);
+    this.ensureActiveProvider(vm);
+    return this.provider.browseVmFiles(
+      vm,
+      resolveVmGuestPath(vm.workspacePath, requestedPath),
+    );
+  }
+
+  async readVmFile(vmId: string, requestedPath: string): Promise<VmFileContent> {
+    this.syncProviderState();
+    const state = this.store.load();
+    const vm = this.requireVm(state, vmId);
+    this.ensureActiveProvider(vm);
+    return this.provider.readVmFile(
+      vm,
+      requireVmGuestPath(vm.workspacePath, requestedPath),
+    );
+  }
+
+  async getVmTouchedFiles(vmId: string): Promise<VmTouchedFilesSnapshot> {
+    this.syncProviderState();
+    const state = this.store.load();
+    const vm = this.requireVm(state, vmId);
+    this.ensureActiveProvider(vm);
+    return this.provider.readVmTouchedFiles(vm);
+  }
+
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {
     this.syncProviderState();
     const state = this.store.load();
@@ -273,6 +317,7 @@ export class DesktopManager {
         normalizeVmNetworkMode(input.networkMode ?? template.defaultNetworkMode),
         draft.provider.kind,
         "creating",
+        this.options.forwardedServiceHostBase ?? null,
       );
       launchTemplate =
         input.initCommands !== undefined
@@ -353,6 +398,7 @@ export class DesktopManager {
         normalizeVmNetworkMode(source.networkMode ?? template.defaultNetworkMode),
         draft.provider.kind,
         "creating",
+        this.options.forwardedServiceHostBase ?? null,
       );
       vm.activeWindow = source.activeWindow;
       vm.activityLog = [...source.activityLog];
@@ -590,6 +636,7 @@ export class DesktopManager {
         normalizeVmNetworkMode(source.networkMode ?? template.defaultNetworkMode),
         draft.provider.kind,
         "creating",
+        this.options.forwardedServiceHostBase ?? null,
       );
       vm.activeWindow = source.activeWindow;
       appendActivity(vm, `snapshot: ${snapshot.label}`);
@@ -755,6 +802,18 @@ export class DesktopManager {
           current,
           existingTemplate?.notes ?? [],
         );
+        const provenance = buildCapturedTemplateProvenance(
+          current,
+          detail.template,
+          snapshot,
+        );
+        const captureHistoryEntry = buildTemplateHistoryEntry(
+          "captured",
+          existingTemplate
+            ? `Refreshed from VM ${current.name} via snapshot ${snapshot.label}.`
+            : `Captured from VM ${current.name} via snapshot ${snapshot.label}.`,
+          snapshot.createdAt,
+        );
 
         current.snapshotIds.unshift(snapshot.id);
         current.lastAction = `Captured template ${captureName}`;
@@ -778,6 +837,11 @@ export class DesktopManager {
             new Set(["captured", slugify(current.name), ...existingTemplate.tags]),
           );
           existingTemplate.notes = captureNotes;
+          existingTemplate.provenance = provenance;
+          existingTemplate.history = appendTemplateHistory(
+            existingTemplate.history,
+            captureHistoryEntry,
+          );
           existingTemplate.updatedAt = nowIso();
         } else {
           const template: EnvironmentTemplate = {
@@ -792,6 +856,8 @@ export class DesktopManager {
             tags: ["captured", slugify(current.name)],
             notes: captureNotes,
             snapshotIds: [snapshot.id],
+            provenance,
+            history: [captureHistoryEntry],
             createdAt: nowIso(),
             updatedAt: nowIso(),
           };
@@ -853,6 +919,14 @@ export class DesktopManager {
           nextInitCommands,
         ),
         snapshotIds: [],
+        provenance: buildClonedTemplateProvenance(sourceTemplate),
+        history: [
+          buildTemplateHistoryEntry(
+            "cloned",
+            `Cloned from template ${sourceTemplate.name}${nextInitCommands.length > 0 ? ` with ${nextInitCommands.length} first-boot init command${nextInitCommands.length === 1 ? "" : "s"}` : ""}.`,
+            now,
+          ),
+        ],
         createdAt: now,
         updatedAt: now,
       };
@@ -887,6 +961,12 @@ export class DesktopManager {
         input.initCommands !== undefined
           ? normalizeTemplateInitCommands(input.initCommands)
           : template.initCommands;
+      const changedFields = collectTemplateUpdateFieldLabels(
+        template,
+        nextName,
+        nextDescription,
+        nextInitCommands,
+      );
 
       if (
         template.name === nextName &&
@@ -900,6 +980,13 @@ export class DesktopManager {
       template.name = nextName;
       template.description = nextDescription;
       template.initCommands = nextInitCommands;
+      template.history = appendTemplateHistory(
+        template.history,
+        buildTemplateHistoryEntry(
+          "updated",
+          `Updated ${changedFields.join(", ")}.`,
+        ),
+      );
       template.updatedAt = nowIso();
       updatedTemplate = template;
       return true;
@@ -1052,7 +1139,11 @@ export class DesktopManager {
 
     this.store.update((draft) => {
       const vm = this.requireVm(draft, vmId);
-      vm.forwardedPorts = buildVmForwardedPorts(vm.id, input.forwardedPorts);
+      vm.forwardedPorts = buildVmForwardedPorts(
+        vm.id,
+        input.forwardedPorts,
+        this.options.forwardedServiceHostBase ?? null,
+      );
       vm.updatedAt = nowIso();
       vm.frameRevision += 1;
       vm.lastAction =
@@ -1509,6 +1600,7 @@ function buildVmRecord(
   networkMode: VmNetworkMode,
   provider: ProviderState["kind"],
   status: VmInstance["status"],
+  forwardedServiceHostBase: string | null,
 ): VmInstance {
   const now = nowIso();
   const id = nextId(state, "vm");
@@ -1535,7 +1627,7 @@ function buildVmRecord(
       provider === "mock"
         ? buildSyntheticSession()
         : null,
-    forwardedPorts: buildVmForwardedPorts(id, forwardedPorts),
+    forwardedPorts: buildVmForwardedPorts(id, forwardedPorts, forwardedServiceHostBase),
     activityLog: [
       `template: ${template.name}`,
       `network: ${describeVmNetworkMode(networkMode)}`,
@@ -1772,6 +1864,25 @@ function buildCaptureNotes(
   return refreshedNotes.slice(0, 6);
 }
 
+function buildCapturedTemplateProvenance(
+  vm: VmInstance,
+  sourceTemplate: EnvironmentTemplate | null,
+  snapshot: Snapshot,
+): TemplateProvenance {
+  return {
+    kind: "captured",
+    summary: sourceTemplate
+      ? `Captured from VM ${vm.name} using template ${sourceTemplate.name}.`
+      : `Captured from VM ${vm.name}.`,
+    sourceTemplateId: sourceTemplate?.id ?? null,
+    sourceTemplateName: sourceTemplate?.name ?? null,
+    sourceVmId: vm.id,
+    sourceVmName: vm.name,
+    sourceSnapshotId: snapshot.id,
+    sourceSnapshotLabel: snapshot.label,
+  };
+}
+
 function buildClonedTemplateNotes(
   sourceTemplate: EnvironmentTemplate,
   previousNotes: string[],
@@ -1791,6 +1902,73 @@ function buildClonedTemplateNotes(
   ];
 
   return refreshedNotes.slice(0, 6);
+}
+
+function buildClonedTemplateProvenance(
+  sourceTemplate: EnvironmentTemplate,
+): TemplateProvenance {
+  return {
+    kind: "cloned",
+    summary: `Cloned from template ${sourceTemplate.name}.`,
+    sourceTemplateId: sourceTemplate.id,
+    sourceTemplateName: sourceTemplate.name,
+    sourceVmId: null,
+    sourceVmName: null,
+    sourceSnapshotId: null,
+    sourceSnapshotLabel: null,
+  };
+}
+
+function buildTemplateHistoryEntry(
+  kind: TemplateHistoryEntry["kind"],
+  summary: string,
+  createdAt = nowIso(),
+): TemplateHistoryEntry {
+  return {
+    kind,
+    summary,
+    createdAt,
+  };
+}
+
+function appendTemplateHistory(
+  history: TemplateHistoryEntry[] | undefined,
+  entry: TemplateHistoryEntry,
+): TemplateHistoryEntry[] {
+  const nextHistory = [
+    entry,
+    ...(history ?? []).filter(
+      (current) =>
+        current.kind !== entry.kind ||
+        current.summary !== entry.summary ||
+        current.createdAt !== entry.createdAt,
+    ),
+  ];
+
+  return nextHistory.slice(0, 12);
+}
+
+function collectTemplateUpdateFieldLabels(
+  template: EnvironmentTemplate,
+  nextName: string,
+  nextDescription: string,
+  nextInitCommands: string[],
+): string[] {
+  const changedFields: string[] = [];
+
+  if (template.name !== nextName) {
+    changedFields.push("name");
+  }
+
+  if (template.description !== nextDescription) {
+    changedFields.push("description");
+  }
+
+  if (!sameStringArray(template.initCommands, nextInitCommands)) {
+    changedFields.push("init commands");
+  }
+
+  return changedFields.length > 0 ? changedFields : ["template metadata"];
 }
 
 function normalizeTemplateInitCommands(
@@ -1887,6 +2065,23 @@ function buildOrphanedSnapshotTemplate(snapshot: Snapshot): EnvironmentTemplate 
     tags: ["orphaned"],
     notes: ["Recovered from snapshot metadata after template deletion."],
     snapshotIds: [snapshot.id],
+    provenance: {
+      kind: "recovered",
+      summary: `Recovered from snapshot ${snapshot.label} after template deletion.`,
+      sourceTemplateId: snapshot.templateId,
+      sourceTemplateName: null,
+      sourceVmId: snapshot.vmId,
+      sourceVmName: null,
+      sourceSnapshotId: snapshot.id,
+      sourceSnapshotLabel: snapshot.label,
+    },
+    history: [
+      buildTemplateHistoryEntry(
+        "recovered",
+        `Recovered from snapshot ${snapshot.label} after template deletion.`,
+        now,
+      ),
+    ],
     createdAt: now,
     updatedAt: now,
   };
@@ -2003,6 +2198,7 @@ function validateForwardedPorts(forwardedPorts: TemplatePortForward[]): void {
 function buildVmForwardedPorts(
   vmId: string,
   forwardedPorts: TemplatePortForward[],
+  forwardedServiceHostBase: string | null,
 ): VmPortForward[] {
   return forwardedPorts.map((forwardedPort, index) => {
     const id = `port-${String(index + 1).padStart(2, "0")}`;
@@ -2014,8 +2210,54 @@ function buildVmForwardedPorts(
       description: forwardedPort.description.trim(),
       id,
       publicPath: buildVmForwardPath(vmId, id),
+      publicHostname: buildVmForwardHostname(
+        vmId,
+        forwardedPort.name,
+        forwardedServiceHostBase,
+      ),
     };
   });
+}
+
+function resolveVmGuestPath(
+  workspacePath: string,
+  requestedPath?: string | null,
+): string | null {
+  const normalizedWorkspacePath = normalizeWorkspaceGuestPath(workspacePath);
+
+  if (!requestedPath || requestedPath.trim().length === 0) {
+    return null;
+  }
+
+  const candidate = requestedPath.startsWith("/")
+    ? requestedPath
+    : pathPosix.resolve(normalizedWorkspacePath, requestedPath);
+  return normalizeWorkspaceGuestPath(candidate);
+}
+
+function requireVmGuestPath(
+  workspacePath: string,
+  requestedPath?: string | null,
+): string {
+  const resolvedPath = resolveVmGuestPath(workspacePath, requestedPath);
+
+  if (!resolvedPath) {
+    throw new Error("Guest file path is required.");
+  }
+
+  return resolvedPath;
+}
+
+function normalizeWorkspaceGuestPath(path: string): string {
+  const normalized = pathPosix.normalize(path || "/");
+
+  if (normalized === ".") {
+    return "/";
+  }
+
+  return normalized.startsWith("/")
+    ? normalized
+    : pathPosix.resolve("/", normalized);
 }
 
 function copyForwardAsTemplatePort(forwardedPort: VmPortForward): TemplatePortForward {
@@ -2169,6 +2411,23 @@ function buildVmBrowserPath(vmId: string): string {
 
 function buildVmForwardPath(vmId: string, forwardId: string): string {
   return `/vm/${vmId}/forwards/${forwardId}/`;
+}
+
+function buildVmForwardHostname(
+  vmId: string,
+  forwardName: string,
+  forwardedServiceHostBase: string | null,
+): string | null {
+  const normalizedBase = forwardedServiceHostBase
+    ?.trim()
+    .toLowerCase()
+    .replace(/^\.+|\.+$/g, "");
+
+  if (!normalizedBase) {
+    return null;
+  }
+
+  return `${slugify(forwardName) || "forward"}--${vmId}.${normalizedBase}`;
 }
 
 function detectHostDiskGb(): number {

@@ -27,7 +27,9 @@ test("mock provider supports create, snapshot, and template capture flows", asyn
   const store = new JsonStateStore(join(tempDir, "state.json"), () =>
     createSeedState(provider.state),
   );
-  const manager = new DesktopManager(store, provider);
+  const manager = new DesktopManager(store, provider, {
+    forwardedServiceHostBase: "localhost",
+  });
 
   const vm = manager.createVm({
     templateId: "tpl-0001",
@@ -167,7 +169,9 @@ test("manager marks a running VM stopped after the provider reports an external 
   const store = new JsonStateStore(join(tempDir, "state.json"), () =>
     createSeedState(provider.state),
   );
-  const manager = new DesktopManager(store, provider);
+  const manager = new DesktopManager(store, provider, {
+    forwardedServiceHostBase: "localhost",
+  });
   const now = new Date().toISOString();
 
   store.update((draft) => {
@@ -271,7 +275,9 @@ test("manager marks a stopped VM running after the provider reports an external 
   const store = new JsonStateStore(join(tempDir, "state.json"), () =>
     createSeedState(provider.state),
   );
-  const manager = new DesktopManager(store, provider);
+  const manager = new DesktopManager(store, provider, {
+    forwardedServiceHostBase: "localhost",
+  });
   const now = new Date().toISOString();
 
   store.update((draft) => {
@@ -574,6 +580,8 @@ test("templates can be updated and deleted when no VM still uses them", (context
     "sudo apt-get update",
     "sudo apt-get install -y ripgrep",
   ]);
+  assert.equal(updated.history?.[0]?.kind, "updated");
+  assert.match(updated.history?.[0]?.summary ?? "", /Updated name, description, init commands/);
   assert.equal(
     manager.getSummary().templates.find((entry) => entry.id === "tpl-unused")?.name,
     "Operator Base",
@@ -628,6 +636,11 @@ test("templates can be cloned into new defaults with first-boot init commands", 
   assert.equal(cloned.snapshotIds.length, 0);
   assert.match(cloned.notes[0] ?? "", /Cloned from template Ubuntu Agent Forge/);
   assert.match(cloned.notes[1] ?? "", /First-boot init script runs 3 commands/);
+  assert.equal(cloned.provenance?.kind, "cloned");
+  assert.equal(cloned.provenance?.sourceTemplateId, "tpl-0001");
+  assert.match(cloned.provenance?.summary ?? "", /Cloned from template Ubuntu Agent Forge/);
+  assert.equal(cloned.history?.[0]?.kind, "cloned");
+  assert.match(cloned.history?.[0]?.summary ?? "", /with 3 first-boot init commands/);
 });
 
 test("captured templates reject create requests that undersize the source disk", (context) => {
@@ -768,6 +781,15 @@ test("manager falls back to the newest compatible template snapshot when a captu
       throw new Error("not implemented");
     },
     async readVmLogs() {
+      throw new Error("not implemented");
+    },
+    async browseVmFiles() {
+      throw new Error("not implemented");
+    },
+    async readVmFile() {
+      throw new Error("not implemented");
+    },
+    async readVmTouchedFiles() {
       throw new Error("not implemented");
     },
     tickVm() {
@@ -953,6 +975,59 @@ test("command output is retained and snapshots can launch or restore VMs", async
   );
 });
 
+test("workspace file browsing starts at home, can reach root, and touched files include command-history hints", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-workspace-browser-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  manager.injectCommand("vm-0001", "pwd");
+  await wait(300);
+
+  const rootSnapshot = await manager.browseVmFiles("vm-0001");
+  assert.equal(rootSnapshot.workspacePath, "/srv/workspaces/alpha-workbench");
+  assert.equal(rootSnapshot.homePath, "/home/ubuntu");
+  assert.equal(rootSnapshot.currentPath, "/home/ubuntu");
+  assert.equal(rootSnapshot.parentPath, "/home");
+  assert.ok(rootSnapshot.entries.some((entry) => entry.name === "Desktop" && entry.kind === "directory"));
+
+  const childSnapshot = await manager.browseVmFiles(
+    "vm-0001",
+    "/srv/workspaces/alpha-workbench/src",
+  );
+  assert.equal(childSnapshot.parentPath, "/srv/workspaces/alpha-workbench");
+  assert.ok(childSnapshot.entries.some((entry) => entry.name === "DashboardApp.tsx"));
+
+  const systemSnapshot = await manager.browseVmFiles("vm-0001", "/etc");
+  assert.equal(systemSnapshot.currentPath, "/etc");
+  assert.equal(systemSnapshot.parentPath, "/");
+  assert.ok(systemSnapshot.entries.some((entry) => entry.name === "hosts"));
+
+  const fsRootSnapshot = await manager.browseVmFiles("vm-0001", "/");
+  assert.equal(fsRootSnapshot.currentPath, "/");
+  assert.equal(fsRootSnapshot.parentPath, null);
+  assert.ok(fsRootSnapshot.entries.some((entry) => entry.name === "home" && entry.kind === "directory"));
+
+  const downloadedFile = await manager.readVmFile(
+    "vm-0001",
+    "/srv/workspaces/alpha-workbench/README.md",
+  );
+  assert.equal(downloadedFile.name, "README.md");
+  assert.match(downloadedFile.content.toString("utf8"), /Mock workspace/);
+
+  const touchedSnapshot = await manager.getVmTouchedFiles("vm-0001");
+  assert.match(touchedSnapshot.baselineLabel, /Best effort/);
+  assert.ok(
+    touchedSnapshot.entries.some((entry) => entry.reasons.includes("command-history")),
+  );
+});
+
 test("failed snapshot launches leave the placeholder VM in an error state", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-snapshot-launch-error-"));
   context.after(() => {
@@ -1121,6 +1196,15 @@ test("manager recovers interrupted create jobs when the VM is already running af
     async readVmLogs() {
       throw new Error("not implemented");
     },
+    async browseVmFiles() {
+      throw new Error("not implemented");
+    },
+    async readVmFile() {
+      throw new Error("not implemented");
+    },
+    async readVmTouchedFiles() {
+      throw new Error("not implemented");
+    },
     tickVm() {
       return null;
     },
@@ -1245,6 +1329,11 @@ test("captured templates become reusable launch sources for subsequent VMs", asy
     .templates.find((template) => template.name === "Reusable Capture");
 
   assert.ok(capturedTemplate);
+  assert.equal(capturedTemplate?.provenance?.kind, "captured");
+  assert.equal(capturedTemplate?.provenance?.sourceVmId, "vm-0001");
+  assert.match(capturedTemplate?.provenance?.summary ?? "", /Captured from VM alpha-workbench/);
+  assert.equal(capturedTemplate?.history?.[0]?.kind, "captured");
+  assert.match(capturedTemplate?.history?.[0]?.summary ?? "", /Template capture: Reusable Capture/);
 
   const derivedVm = manager.createVm({
     templateId: capturedTemplate!.id,
@@ -1289,6 +1378,11 @@ test("template capture can refresh an existing template while preserving history
   assert.equal(template?.snapshotIds[1], "snap-0001");
   assert.equal(summary.snapshots[0]?.templateId, "tpl-0001");
   assert.match(template?.notes[0] ?? "", /Captured from VM alpha-workbench/);
+  assert.equal(template?.provenance?.kind, "captured");
+  assert.equal(template?.provenance?.sourceVmName, "alpha-workbench");
+  assert.equal(template?.provenance?.sourceSnapshotId, summary.snapshots[0]?.id);
+  assert.equal(template?.history?.[0]?.kind, "captured");
+  assert.match(template?.history?.[0]?.summary ?? "", /Refreshed from VM alpha-workbench/);
   assert.ok(summary.jobs.some((job) => job.kind === "capture-template" && job.status === "succeeded"));
 });
 
@@ -1502,7 +1596,15 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /x11vnc/);
   assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-x11vnc/);
   assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-desktop-bootstrap/);
+  assert.match(
+    configSetCall?.[4] ?? "",
+    /\/usr\/local\/bin\/parallaize-desktop-session-setup/,
+  );
   assert.match(configSetCall?.[4] ?? "", /parallaize-desktop-bootstrap\.service/);
+  assert.match(
+    configSetCall?.[4] ?? "",
+    /parallaize-desktop-session-setup\.desktop/,
+  );
   assert.match(configSetCall?.[4] ?? "", /find_guest_auth_file\(\)/);
   assert.match(configSetCall?.[4] ?? "", /find_guest_display_number\(\)/);
   assert.match(configSetCall?.[4] ?? "", /loginctl list-sessions --no-legend/);
@@ -1511,6 +1613,10 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /\.mutter-Xwaylandauth\.\*/);
   assert.match(configSetCall?.[4] ?? "", /\/var\/run\/gdm3\/auth-for-\*\/database/);
   assert.match(configSetCall?.[4] ?? "", /Acquire::ForceIPv4=true/);
+  assert.match(configSetCall?.[4] ?? "", /indicator-multiload/);
+  assert.match(configSetCall?.[4] ?? "", /dock-position RIGHT/);
+  assert.match(configSetCall?.[4] ?? "", /dash-max-icon-size 32/);
+  assert.match(configSetCall?.[4] ?? "", /picture-uri-dark/);
   assert.match(configSetCall?.[4] ?? "", /-xrandr newfbsize/);
   assert.match(configSetCall?.[4] ?? "", /-noshm/);
   assert.match(configSetCall?.[4] ?? "", /xset r on \|\| true/);
@@ -2283,6 +2389,14 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /BOOTSTRAP_FILE="\/usr\/local\/bin\/parallaize-desktop-bootstrap"/);
   assert.match(execCall?.[5] ?? "", /BOOTSTRAP_SERVICE_FILE="\/etc\/systemd\/system\/parallaize-desktop-bootstrap\.service"/);
   assert.match(execCall?.[5] ?? "", /LAUNCHER_FILE="\/usr\/local\/bin\/parallaize-x11vnc"/);
+  assert.match(
+    execCall?.[5] ?? "",
+    /SESSION_SETUP_FILE="\/usr\/local\/bin\/parallaize-desktop-session-setup"/,
+  );
+  assert.match(
+    execCall?.[5] ?? "",
+    /SESSION_AUTOSTART_FILE="\/etc\/xdg\/autostart\/parallaize-desktop-session-setup\.desktop"/,
+  );
   assert.match(execCall?.[5] ?? "", /parallaize-x11vnc\.service/);
   assert.match(execCall?.[5] ?? "", /parallaize-desktop-bootstrap\.service/);
   assert.match(execCall?.[5] ?? "", /find_guest_auth_file\(\)/);
@@ -2291,6 +2405,10 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /ps -C x11vnc -o args=/);
   assert.match(execCall?.[5] ?? "", /ps -C Xwayland -o args=/);
   assert.match(execCall?.[5] ?? "", /Acquire::ForceIPv4=true/);
+  assert.match(execCall?.[5] ?? "", /indicator-multiload/);
+  assert.match(execCall?.[5] ?? "", /dock-position RIGHT/);
+  assert.match(execCall?.[5] ?? "", /dash-max-icon-size 32/);
+  assert.match(execCall?.[5] ?? "", /picture-uri-dark/);
   assert.match(execCall?.[5] ?? "", /ATTEMPT=0/);
   assert.match(execCall?.[5] ?? "", /sleep 2/);
   assert.match(execCall?.[5] ?? "", /-xrandr newfbsize/);
@@ -2369,6 +2487,167 @@ test("incus provider reads VM logs from the console stream and falls back to inf
   assert.equal(fallbackLogs.source, "incus info --show-log");
   assert.match(fallbackLogs.content, /Fallback info log/);
   assert.match(fallbackLogs.content, /Agent connected/);
+});
+
+test("incus provider emits Python None for the default file browse request", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0200-file-browser";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        calls.push(args);
+
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        if (args[0] === "exec" && args[1] === instanceName) {
+          return ok(
+            JSON.stringify({
+              homePath: "/home/ubuntu",
+              currentPath: "/home/ubuntu",
+              entries: [],
+            }),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0200",
+    name: "file-browser",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 200,
+    activeWindow: "browser",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const snapshot = await provider.browseVmFiles(vm);
+  assert.equal(snapshot.homePath, "/home/ubuntu");
+  assert.equal(snapshot.currentPath, "/home/ubuntu");
+
+  const execCall = calls.find((args) => args[0] === "exec" && args[1] === instanceName);
+  assert.ok(execCall);
+
+  const script = execCall?.at(-1) ?? "";
+  assert.match(script, /requested_path = None/);
+  assert.doesNotMatch(script, /requested_path = null/);
+});
+
+test("incus provider prefers /home/ubuntu for touched file scans when it exists", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0200-touched-files";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        calls.push(args);
+
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        if (args[0] === "exec" && args[1] === instanceName) {
+          return ok(
+            JSON.stringify({
+              scanPath: "/home/ubuntu",
+              truncated: false,
+              entries: [
+                {
+                  name: "project",
+                  path: "/home/ubuntu/project",
+                  kind: "directory",
+                  sizeBytes: null,
+                  modifiedAt: new Date().toISOString(),
+                  changedAt: new Date().toISOString(),
+                  reasons: ["mtime"],
+                },
+              ],
+            }),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0200",
+    name: "touched-files",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 200,
+    activeWindow: "browser",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+    commandHistory: [
+      {
+        command: "cd /home/ubuntu/project",
+        output: [],
+        workspacePath: "/home/ubuntu/project",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        command: "cd /home/ubuntu/.cache/f",
+        output: [],
+        workspacePath: "/home/ubuntu/.cache/f",
+        createdAt: new Date().toISOString(),
+      },
+    ],
+  };
+
+  const snapshot = await provider.readVmTouchedFiles(vm);
+  assert.equal(snapshot.workspacePath, "/root");
+  assert.equal(snapshot.scanPath, "/home/ubuntu");
+  assert.ok(snapshot.entries.some((entry) => entry.path === "/home/ubuntu/project"));
+  assert.ok(snapshot.entries.every((entry) => !entry.path.startsWith("/home/ubuntu/.cache")));
+  assert.match(snapshot.limitationSummary, /\/home\/ubuntu\/\.cache is ignored/);
+
+  const execCall = calls.find((args) => args[0] === "exec" && args[1] === instanceName);
+  assert.ok(execCall);
+
+  const script = execCall?.at(-1) ?? "";
+  assert.match(script, /scan_path = "\/home\/ubuntu" if os\.path\.isdir\("\/home\/ubuntu"\) else workspace_path/);
+  assert.match(script, /ignored_paths = \{/);
+  assert.match(script, /dirnames\[:\] = \[/);
+  assert.match(script, /os\.walk\(scan_path\)/);
 });
 
 test("incus provider resource resize only updates changed limits and preserves the current session", async () => {
@@ -3452,7 +3731,9 @@ test("manager derives browser VNC and forwarded service routes for incus VMs", a
   const store = new JsonStateStore(join(tempDir, "state.json"), () =>
     createSeedState(provider.state),
   );
-  const manager = new DesktopManager(store, provider);
+  const manager = new DesktopManager(store, provider, {
+    forwardedServiceHostBase: "localhost",
+  });
 
   const vm = manager.createVm({
     templateId: "tpl-0001",
@@ -3478,6 +3759,7 @@ test("manager derives browser VNC and forwarded service routes for incus VMs", a
   assert.equal(detail.vm.session?.webSocketPath, `/api/vms/${vm.id}/vnc`);
   assert.equal(detail.vm.session?.browserPath, `/?vm=${vm.id}`);
   assert.equal(detail.vm.forwardedPorts[0]?.publicPath, `/vm/${vm.id}/forwards/port-01/`);
+  assert.equal(detail.vm.forwardedPorts[0]?.publicHostname, `app-ui--${vm.id}.localhost`);
 
   manager.updateVmForwardedPorts(vm.id, {
     forwardedPorts: [
@@ -3494,6 +3776,7 @@ test("manager derives browser VNC and forwarded service routes for incus VMs", a
   assert.equal(updated.vm.forwardedPorts.length, 1);
   assert.equal(updated.vm.forwardedPorts[0]?.guestPort, 8080);
   assert.equal(updated.vm.forwardedPorts[0]?.publicPath, `/vm/${vm.id}/forwards/port-01/`);
+  assert.equal(updated.vm.forwardedPorts[0]?.publicHostname, `api--${vm.id}.localhost`);
 });
 
 test("incus clones do not reuse the source VM VNC identity", async (context) => {
@@ -4209,6 +4492,15 @@ test("manager keeps refreshing newly created VMs while guest VNC is still pendin
       throw new Error("not implemented");
     },
     async readVmLogs() {
+      throw new Error("not implemented");
+    },
+    async browseVmFiles() {
+      throw new Error("not implemented");
+    },
+    async readVmFile() {
+      throw new Error("not implemented");
+    },
+    async readVmTouchedFiles() {
       throw new Error("not implemented");
     },
     tickVm() {

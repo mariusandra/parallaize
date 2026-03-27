@@ -32,6 +32,10 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_RELEASE_NOTES_MODEL: ${{ vars.OPENAI_RELEASE_NOTES_MODEL }}
       OPENAI_RELEASE_NOTES_BASE_URL: ${{ vars.OPENAI_RELEASE_NOTES_BASE_URL }}
+      GNUPGHOME: ${{ runner.temp }}/parallaize-gnupg
+      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+      APT_GPG_SIGNING_KEY_ID: ${{ secrets.APT_GPG_SIGNING_KEY_ID }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
       R2_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
@@ -93,11 +97,23 @@ jobs:
       - name: Validate release secrets
         run: |
           set -euo pipefail
+          : "${APT_GPG_PRIVATE_KEY:?Missing APT_GPG_PRIVATE_KEY secret}"
+          : "${APT_GPG_PASSPHRASE:?Missing APT_GPG_PASSPHRASE secret}"
+          : "${APT_GPG_SIGNING_KEY_ID:?Missing APT_GPG_SIGNING_KEY_ID secret}"
           : "${R2_ACCOUNT_ID:?Missing R2_ACCOUNT_ID secret}"
           : "${R2_BUCKET:?Missing R2_BUCKET secret}"
           : "${AWS_ACCESS_KEY_ID:?Missing R2_ACCESS_KEY_ID secret}"
           : "${AWS_SECRET_ACCESS_KEY:?Missing R2_SECRET_ACCESS_KEY secret}"
           aws --version
+          gpg --version | head -n 1
+
+      - name: Import APT archive signing key
+        run: |
+          set -euo pipefail
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          printf '%s\n' "${APT_GPG_PRIVATE_KEY}" | gpg --batch --import
+          gpg --batch --list-secret-keys "${APT_GPG_SIGNING_KEY_ID}"
 
       - name: Generate release notes body
         run: |
@@ -114,6 +130,8 @@ jobs:
         run: pnpm release:version -- --version "${RELEASE_VERSION}" --package-release "${PACKAGE_RELEASE}"
 
       - name: Build release packages
+        env:
+          PARALLAIZE_PACKAGE_RELEASE: ${{ env.PACKAGE_RELEASE }}
         run: |
           set -euo pipefail
           pnpm package:prepare
@@ -123,10 +141,39 @@ jobs:
             --version "${RELEASE_VERSION}" \
             --release "${PACKAGE_RELEASE}"
 
+      - name: Build signed APT repository
+        run: |
+          set -euo pipefail
+          node scripts/build-apt-repo.mjs \
+            --deb-dir artifacts/packages \
+            --output-dir artifacts/apt \
+            --suite noble \
+            --codename noble \
+            --component main \
+            --arch amd64 \
+            --base-url https://archive.parallaize.com/apt \
+            --signed-by-path /etc/apt/keyrings/parallaize-archive-keyring.gpg \
+            --signing-key-id "${APT_GPG_SIGNING_KEY_ID}"
+
+      - name: Append APT archive details to release notes
+        run: |
+          set -euo pipefail
+          archive_fingerprint="$(tr -d '\n' < artifacts/apt/parallaize-archive-keyring.fingerprint)"
+          source_entry="$(tr -d '\n' < artifacts/apt/parallaize.list)"
+          {
+            printf '\n## APT Archive\n'
+            printf -- '- Ubuntu 24.04 source entry: `%s`\n' "${source_entry}"
+            printf -- '- Archive signing key fingerprint: `%s`\n' "${archive_fingerprint}"
+            printf -- '- Public key files: `parallaize-archive-keyring.gpg` and `parallaize-archive-keyring.asc`\n'
+          } >> artifacts/release-notes.md
+
       - name: Upload package artifacts to Cloudflare R2
         run: |
           set -euo pipefail
           aws s3 cp artifacts/packages "s3://${R2_BUCKET}/packages/" \
+            --recursive \
+            --endpoint-url "${R2_ENDPOINT_URL}"
+          aws s3 cp artifacts/apt "s3://${R2_BUCKET}/apt/" \
             --recursive \
             --endpoint-url "${R2_ENDPOINT_URL}"
 
@@ -136,6 +183,7 @@ jobs:
           name: parallaize-release-${{ steps.resolve_version.outputs.release_version }}-${{ env.PACKAGE_RELEASE }}
           path: |
             artifacts/packages/
+            artifacts/apt/
             artifacts/release-notes.md
           if-no-files-found: error
 
@@ -144,7 +192,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json docs/index.html docs/packaging.md
+          git add package.json docs/index.html docs/latest.json docs/packaging.md
           git commit -m "chore: release ${RELEASE_VERSION}-${PACKAGE_RELEASE}"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
@@ -169,3 +217,7 @@ jobs:
           files: |
             artifacts/packages/parallaize_${{ steps.resolve_version.outputs.release_version }}-${{ env.PACKAGE_RELEASE }}_amd64.deb
             artifacts/packages/parallaize_${{ steps.resolve_version.outputs.release_version }}-${{ env.PACKAGE_RELEASE }}_arm64.deb
+            artifacts/apt/parallaize-archive-keyring.gpg
+            artifacts/apt/parallaize-archive-keyring.asc
+            artifacts/apt/parallaize.list
+            artifacts/apt/parallaize.sources

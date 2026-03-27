@@ -10,6 +10,8 @@ export interface AppConfig {
   appHome: string;
   host: string;
   port: number;
+  releaseMetadataUrl: string;
+  forwardedServiceHostBase: string | null;
   persistenceKind: PersistenceKind;
   dataFile: string;
   databaseUrl: string | null;
@@ -68,6 +70,13 @@ export function loadConfig(): AppConfig {
     appHome,
     host: process.env.HOST ?? "0.0.0.0",
     port: parseInteger(process.env.PORT, 3000),
+    releaseMetadataUrl: parseHttpUrl(
+      process.env.PARALLAIZE_RELEASE_METADATA_URL,
+      "https://parallaize.com/latest.json",
+    ),
+    forwardedServiceHostBase: parseOptionalString(
+      process.env.PARALLAIZE_FORWARDED_SERVICE_HOST_BASE,
+    ) ?? "localhost",
     persistenceKind,
     dataFile:
       process.env.PARALLAIZE_DATA_FILE ??
@@ -129,6 +138,27 @@ function parsePersistenceKind(
 function parseOptionalString(value: string | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function parseHttpUrl(value: string | undefined, fallback: string): string {
+  const candidate = parseOptionalString(value) ?? fallback;
+  let parsed: URL;
+
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error(
+      "PARALLAIZE_RELEASE_METADATA_URL must be an absolute http or https URL.",
+    );
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      "PARALLAIZE_RELEASE_METADATA_URL must use the http or https scheme.",
+    );
+  }
+
+  return parsed.toString();
 }
 
 function parseInteger(value: string | undefined, fallback: number): number {

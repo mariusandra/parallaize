@@ -3316,6 +3316,139 @@ section.workspace-shell {
   padding-inline: 0.75rem;
 }
 
+.vm-file-browser {
+  display: grid;
+  gap: 0.72rem;
+}
+
+.vm-file-browser__head {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.vm-file-browser__breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+}
+
+.vm-file-browser__breadcrumb-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.vm-file-browser__breadcrumb-link:hover {
+  color: var(--ink);
+}
+
+.vm-file-browser__breadcrumb-link:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.vm-file-browser__breadcrumb-current {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vm-file-browser__separator {
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+}
+
+.vm-file-browser__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.vm-file-browser__list {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--panel-muted);
+}
+
+.vm-file-browser__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  background: transparent;
+  padding: 0.46rem 0.68rem;
+  color: var(--ink);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.vm-file-browser__row:first-child {
+  border-top: none;
+}
+
+.vm-file-browser__row:hover {
+  background: color-mix(in srgb, var(--panel) 72%, var(--panel-muted));
+}
+
+.vm-file-browser__row:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 82%, white);
+  outline-offset: -2px;
+}
+
+.vm-file-browser__row--static {
+  cursor: default;
+}
+
+.vm-file-browser__row--static:hover {
+  background: transparent;
+}
+
+.vm-file-browser__name-shell {
+  display: flex;
+  align-items: center;
+  gap: 0.48rem;
+  min-width: 0;
+}
+
+.vm-file-browser__kind {
+  flex-shrink: 0;
+  color: var(--ink-soft);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.vm-file-browser__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vm-file-browser__meta {
+  flex-shrink: 0;
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .template-init-preview {
   display: grid;
   gap: 0.45rem;

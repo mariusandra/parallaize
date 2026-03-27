@@ -1,4 +1,5 @@
 import {
+  Fragment,
   startTransition,
   useDeferredValue,
   useEffect,
@@ -47,13 +48,18 @@ import type {
   UpdateVmInput,
   UpdateVmNetworkInput,
   VmDetail,
+  VmFileBrowserSnapshot,
+  VmFileEntry,
   VmInstance,
   VmLogsSnapshot,
+  LatestReleaseMetadata,
   VmNetworkMode,
   VmPowerAction,
   VmPortForward,
   VmResolutionControlSnapshot,
   VmStatus,
+  VmTouchedFile,
+  VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
 import {
   applyViewportBoundsToResolution,
@@ -76,6 +82,10 @@ import {
 } from "./deferredCollections.js";
 import { parseAnsiText, resolveAnsiSegmentStyle } from "./ansi.js";
 import { NoVncViewport } from "./NoVncViewport.js";
+import {
+  appPackageReleaseLabel,
+  hasNewerReleaseAvailable,
+} from "./releaseVersion.js";
 
 interface CreateDraft {
   templateId: string;
@@ -303,6 +313,7 @@ const defaultDesktopResolutionPreference: DesktopResolutionPreference = {
 export function DashboardApp(): JSX.Element {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [latestRelease, setLatestRelease] = useState<LatestReleaseMetadata | null>(null);
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
   const [detail, setDetail] = useState<VmDetail | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -325,6 +336,12 @@ export function DashboardApp(): JSX.Element {
   const [renameDraft, setRenameDraft] = useState("");
   const [vmLogsDialog, setVmLogsDialog] = useState<VmLogsDialogState | null>(null);
   const [vmLogsRefreshTick, setVmLogsRefreshTick] = useState(0);
+  const [vmFileBrowser, setVmFileBrowser] = useState<VmFileBrowserSnapshot | null>(null);
+  const [vmFileBrowserLoading, setVmFileBrowserLoading] = useState(false);
+  const [vmFileBrowserError, setVmFileBrowserError] = useState<string | null>(null);
+  const [vmTouchedFiles, setVmTouchedFiles] = useState<VmTouchedFilesSnapshot | null>(null);
+  const [vmTouchedFilesLoading, setVmTouchedFilesLoading] = useState(false);
+  const [vmTouchedFilesError, setVmTouchedFilesError] = useState<string | null>(null);
   const [sidepanelCollapsedByVm, setSidepanelCollapsedByVm] = useState<
     Record<string, true>
   >(() => readSidepanelCollapsedByVm());
@@ -480,6 +497,11 @@ export function DashboardApp(): JSX.Element {
       ? "Take over control"
       : "Take over here";
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
+  const newerReleaseAvailable = hasNewerReleaseAvailable(
+    appVersionLabel,
+    appPackageReleaseLabel,
+    latestRelease,
+  );
   const persistence = health?.persistence ?? null;
   const incusStorage = health?.incusStorage ?? null;
   const desktopResolutionMode = selectedDesktopResolutionPreference.mode;
@@ -785,6 +807,7 @@ export function DashboardApp(): JSX.Element {
 
   useEffect(() => {
     if (authState !== "ready") {
+      setLatestRelease(null);
       setHealth(null);
       return;
     }
@@ -796,6 +819,40 @@ export function DashboardApp(): JSX.Element {
 
     return () => {
       window.clearInterval(interval);
+    };
+  }, [authState]);
+
+  useEffect(() => {
+    if (authState !== "ready") {
+      setLatestRelease(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const releaseMetadata = await fetchJson<LatestReleaseMetadata | null>("/api/version/latest");
+
+        if (!cancelled) {
+          setLatestRelease(releaseMetadata);
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+
+        setLatestRelease(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
     };
   }, [authState]);
 
@@ -867,6 +924,65 @@ export function DashboardApp(): JSX.Element {
       cancelled = true;
     };
   }, [selectedVmId, summary?.generatedAt]);
+
+  useEffect(() => {
+    if (authState !== "ready" || !detail) {
+      setVmFileBrowser(null);
+      setVmFileBrowserError(null);
+      setVmFileBrowserLoading(false);
+      setVmTouchedFiles(null);
+      setVmTouchedFilesError(null);
+      setVmTouchedFilesLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const vmId = detail.vm.id;
+
+    setVmFileBrowserLoading(true);
+    setVmFileBrowserError(null);
+    setVmTouchedFilesLoading(true);
+    setVmTouchedFilesError(null);
+
+    void Promise.all([
+      fetchJson<VmFileBrowserSnapshot>(`/api/vms/${vmId}/files`),
+      fetchJson<VmTouchedFilesSnapshot>(`/api/vms/${vmId}/files/touched`),
+    ])
+      .then(([browserSnapshot, touchedSnapshot]) => {
+        if (cancelled) {
+          return;
+        }
+
+        setVmFileBrowser(browserSnapshot);
+        setVmTouchedFiles(touchedSnapshot);
+      })
+      .catch((error) => {
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        const message = errorMessage(error);
+        setVmFileBrowserError(message);
+        setVmTouchedFilesError(message);
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setVmFileBrowserLoading(false);
+        setVmTouchedFilesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authState, detail?.vm.id, detail?.vm.workspacePath]);
 
   useEffect(() => {
     if (authState !== "ready" || !vmLogsDialog) {
@@ -1536,11 +1652,63 @@ export function DashboardApp(): JSX.Element {
     setDetail(await fetchJson<VmDetail>(`/api/vms/${vmId}`));
   }
 
+  async function refreshVmFileBrowserSnapshot(
+    vmId: string,
+    path?: string,
+  ): Promise<void> {
+    setVmFileBrowserLoading(true);
+    setVmFileBrowserError(null);
+
+    try {
+      const query = path && path.trim().length > 0
+        ? `?path=${encodeURIComponent(path)}`
+        : "";
+      const snapshot = await fetchJson<VmFileBrowserSnapshot>(
+        `/api/vms/${vmId}/files${query}`,
+      );
+      setVmFileBrowser(snapshot);
+    } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        requireLogin();
+        return;
+      }
+
+      setVmFileBrowserError(errorMessage(error));
+    } finally {
+      setVmFileBrowserLoading(false);
+    }
+  }
+
+  async function refreshVmTouchedFilesSnapshot(vmId: string): Promise<void> {
+    setVmTouchedFilesLoading(true);
+    setVmTouchedFilesError(null);
+
+    try {
+      const snapshot = await fetchJson<VmTouchedFilesSnapshot>(`/api/vms/${vmId}/files/touched`);
+      setVmTouchedFiles(snapshot);
+    } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        requireLogin();
+        return;
+      }
+
+      setVmTouchedFilesError(errorMessage(error));
+    } finally {
+      setVmTouchedFilesLoading(false);
+    }
+  }
+
   function requireLogin(): void {
     setAuthState("required");
     setHealth(null);
     setSummary(null);
     setDetail(null);
+    setVmFileBrowser(null);
+    setVmFileBrowserError(null);
+    setVmFileBrowserLoading(false);
+    setVmTouchedFiles(null);
+    setVmTouchedFilesError(null);
+    setVmTouchedFilesLoading(false);
     setNotice(null);
     setBusyLabel(null);
     setShellMenuOpen(false);
@@ -3288,9 +3456,19 @@ export function DashboardApp(): JSX.Element {
                           </span>
                           <span
                             className="workspace-rail__brand-version"
-                            aria-label={`Version ${appVersionLabel}`}
+                            aria-label={
+                              newerReleaseAvailable && latestRelease
+                                ? `Version ${appVersionLabel}. Newer release available: ${latestRelease.packageLabel}`
+                                : `Version ${appVersionLabel}`
+                            }
+                            title={
+                              newerReleaseAvailable && latestRelease
+                                ? `Newer release available: ${latestRelease.packageLabel}`
+                                : undefined
+                            }
                           >
                             {appVersionLabel}
+                            {newerReleaseAvailable ? " !" : ""}
                           </span>
                         </span>
                       </button>
@@ -3551,6 +3729,9 @@ export function DashboardApp(): JSX.Element {
                 collapsed={effectiveSidePanelCollapsed}
                 commandDraft={commandDraft}
                 detail={currentDetail}
+                fileBrowser={vmFileBrowser}
+                fileBrowserError={vmFileBrowserError}
+                fileBrowserLoading={vmFileBrowserLoading}
                 forwardDraft={forwardDraft}
                 resolutionControlBlocked={blocksLiveResolutionControl}
                 resolutionControlTakeoverBusy={resolutionControlTakeoverBusy}
@@ -3560,8 +3741,12 @@ export function DashboardApp(): JSX.Element {
                 resolutionState={effectiveDesktopResolution}
                 resourceDraft={resourceDraft}
                 summary={summary}
+                touchedFiles={vmTouchedFiles}
+                touchedFilesError={vmTouchedFilesError}
+                touchedFilesLoading={vmTouchedFilesLoading}
                 vm={selectedVm}
                 onCaptureDraftChange={setCaptureDraft}
+                onBrowsePath={(path) => refreshVmFileBrowserSnapshot(selectedVm.id, path)}
                 onClone={handleClone}
                 onCommandDraftChange={setCommandDraft}
                 onDelete={handleDelete}
@@ -3571,6 +3756,7 @@ export function DashboardApp(): JSX.Element {
                 onTakeOverResolutionControl={handleTakeOverResolutionControl}
                 onViewportScaleChange={(scale) =>
                   applyViewportScalePreference(selectedVm.id, scale)}
+                onRefreshTouchedFiles={() => refreshVmTouchedFilesSnapshot(selectedVm.id)}
                 onRemoveForward={handleRemoveForward}
                 onResourceDraftChange={setResourceDraft}
                 onRename={handleRenameVm}
@@ -4038,25 +4224,6 @@ function CreateVmDialog({
             <div className="inline-note">
               <strong>Launch blocked</strong>
               <p>{validationError}</p>
-            </div>
-          ) : null}
-
-          {selectedTemplate ? (
-            <div className="dialog-panel__template">
-              <div className="dialog-panel__template-head">
-                <strong>{selectedTemplate.name}</strong>
-                <span className="surface-pill">{formatResources(selectedTemplate.defaultResources)}</span>
-              </div>
-              <p>{selectedTemplate.description}</p>
-              {selectedTemplate.defaultForwardedPorts.length > 0 ? (
-                <div className="chip-row">
-                  {selectedTemplate.defaultForwardedPorts.map((port) => (
-                    <span key={`${port.name}-${port.guestPort}`} className="surface-pill">
-                      {port.name}:{port.guestPort}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
             </div>
           ) : null}
 
@@ -5118,6 +5285,9 @@ interface WorkspaceSidepanelProps {
   commandDraft: string;
   detail: VmDetail | null;
   forwardDraft: ForwardDraft;
+  fileBrowser: VmFileBrowserSnapshot | null;
+  fileBrowserError: string | null;
+  fileBrowserLoading: boolean;
   resolutionControlBlocked: boolean;
   resolutionControlMessage: string | null;
   resolutionControlTakeoverBusy: boolean;
@@ -5126,8 +5296,12 @@ interface WorkspaceSidepanelProps {
   resolutionState: DesktopResolutionState;
   resourceDraft: ResourceDraft;
   summary: DashboardSummary;
+  touchedFiles: VmTouchedFilesSnapshot | null;
+  touchedFilesError: string | null;
+  touchedFilesLoading: boolean;
   vm: VmInstance;
   onApplyResolution: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  onBrowsePath: (path: string) => Promise<void>;
   onCaptureDraftChange: (draft: CaptureDraft) => void;
   onClone: (vm: VmInstance) => Promise<void>;
   onCommandDraftChange: (value: string) => void;
@@ -5138,6 +5312,7 @@ interface WorkspaceSidepanelProps {
   onResolutionDraftChange: (draft: ResolutionDraft) => void;
   onTakeOverResolutionControl: (vm: VmInstance) => Promise<void>;
   onViewportScaleChange: (scale: number) => void;
+  onRefreshTouchedFiles: () => Promise<void>;
   onRemoveForward: (forwardId: string) => Promise<void>;
   onResourceDraftChange: (draft: ResourceDraft) => void;
   onSetNetworkMode: (networkMode: VmNetworkMode) => Promise<void>;
@@ -5367,6 +5542,9 @@ function WorkspaceSidepanel({
   collapsed,
   commandDraft,
   detail,
+  fileBrowser,
+  fileBrowserError,
+  fileBrowserLoading,
   forwardDraft,
   resolutionControlBlocked,
   resolutionControlMessage,
@@ -5376,8 +5554,12 @@ function WorkspaceSidepanel({
   resolutionState,
   resourceDraft,
   summary,
+  touchedFiles,
+  touchedFilesError,
+  touchedFilesLoading,
   vm,
   onApplyResolution,
+  onBrowsePath,
   onCaptureDraftChange,
   onClone,
   onCommandDraftChange,
@@ -5388,6 +5570,7 @@ function WorkspaceSidepanel({
   onResolutionDraftChange,
   onTakeOverResolutionControl,
   onViewportScaleChange,
+  onRefreshTouchedFiles,
   onRemoveForward,
   onResourceDraftChange,
   onSetNetworkMode,
@@ -5788,14 +5971,31 @@ function WorkspaceSidepanel({
                         <div className="compact-grid">
                           <FieldPair label="Guest port" mono value={String(forward.guestPort)} />
                           <FieldPair label="Public path" mono value={forward.publicPath} />
+                          {forward.publicHostname ? (
+                            <FieldPair
+                              label="Public host"
+                              mono
+                              value={forward.publicHostname}
+                            />
+                          ) : null}
                         </div>
+                        {forward.publicHostname ? (
+                          <a
+                            className="button button--secondary button--full"
+                            href={buildForwardBrowserHref(forward)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open via hostname
+                          </a>
+                        ) : null}
                         <a
-                          className="button button--secondary button--full"
+                          className="button button--ghost button--full"
                           href={forward.publicPath}
                           target="_blank"
                           rel="noreferrer"
                         >
-                          Open service
+                          Open via path
                         </a>
                       </div>
                     ))
@@ -5913,6 +6113,253 @@ function WorkspaceSidepanel({
                 </div>
               </SidepanelSection>
 
+              <SidepanelSection title="Files">
+                <div className="stack">
+                  <div className="vm-file-browser">
+                    <div className="vm-file-browser__head">
+                      <nav aria-label="Current folder" className="vm-file-browser__breadcrumb">
+                        {buildVmFileBrowserBreadcrumbs(
+                          fileBrowser?.currentPath ??
+                            fileBrowser?.homePath ??
+                            detail.vm.workspacePath,
+                        ).map((crumb, index, crumbs) => (
+                          <Fragment key={crumb.path}>
+                            {index > 1 ? (
+                              <span aria-hidden="true" className="vm-file-browser__separator">
+                                /
+                              </span>
+                            ) : null}
+                            {index === crumbs.length - 1 ? (
+                              <span className="mono-font vm-file-browser__breadcrumb-current">
+                                {crumb.label}
+                              </span>
+                            ) : (
+                              <button
+                                className="mono-font vm-file-browser__breadcrumb-link"
+                                type="button"
+                                onClick={() => void onBrowsePath(crumb.path)}
+                                disabled={busy || fileBrowserLoading}
+                              >
+                                {crumb.label}
+                              </button>
+                            )}
+                          </Fragment>
+                        ))}
+                      </nav>
+
+                      <div className="vm-file-browser__actions">
+                        <button
+                          className="button button--ghost"
+                          type="button"
+                          onClick={() =>
+                            void onBrowsePath(fileBrowser?.homePath ?? detail.vm.workspacePath)}
+                          disabled={busy || fileBrowserLoading}
+                        >
+                          Home
+                        </button>
+                        <button
+                          className="button button--ghost"
+                          type="button"
+                          onClick={() => void onBrowsePath("/")}
+                          disabled={busy || fileBrowserLoading}
+                        >
+                          Root
+                        </button>
+                        <button
+                          className="button button--ghost"
+                          type="button"
+                          onClick={() => {
+                            if (fileBrowser?.parentPath) {
+                              void onBrowsePath(fileBrowser.parentPath);
+                            }
+                          }}
+                          disabled={busy || fileBrowserLoading || !fileBrowser?.parentPath}
+                        >
+                          Up
+                        </button>
+                        <button
+                          className="button button--secondary"
+                          type="button"
+                          onClick={() =>
+                            void onBrowsePath(
+                              fileBrowser?.currentPath ??
+                                fileBrowser?.homePath ??
+                                detail.vm.workspacePath,
+                            )}
+                          disabled={busy || fileBrowserLoading}
+                        >
+                          {fileBrowserLoading ? "Refreshing..." : "Refresh"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {fileBrowserError ? (
+                      <p className="empty-copy">{fileBrowserError}</p>
+                    ) : null}
+
+                    {fileBrowser && fileBrowser.entries.length > 0 ? (
+                      <div className="vm-file-browser__list" role="list">
+                        {fileBrowser.entries.map((entry) => {
+                          const meta = formatVmFileBrowserRowMeta(entry);
+                          const title = buildVmFileBrowserEntryTitle(entry);
+                          const row = (
+                            <>
+                              <span className="vm-file-browser__name-shell">
+                                <span className="vm-file-browser__kind">
+                                  {formatVmFileBrowserKindToken(entry.kind)}
+                                </span>
+                                <span className="mono-font vm-file-browser__name" title={title}>
+                                  {entry.name}
+                                  {entry.kind === "directory" ? "/" : ""}
+                                </span>
+                              </span>
+                              {meta ? <span className="vm-file-browser__meta">{meta}</span> : null}
+                            </>
+                          );
+
+                          if (entry.kind === "directory") {
+                            return (
+                              <button
+                                key={entry.path}
+                                className="vm-file-browser__row"
+                                type="button"
+                                title={title}
+                                onClick={() => void onBrowsePath(entry.path)}
+                                disabled={busy || fileBrowserLoading}
+                              >
+                                {row}
+                              </button>
+                            );
+                          }
+
+                          if (entry.kind === "file") {
+                            return (
+                              <a
+                                key={entry.path}
+                                className="vm-file-browser__row"
+                                download={entry.name}
+                                href={buildVmFileDownloadHref(vm.id, entry.path)}
+                                title={title}
+                              >
+                                {row}
+                              </a>
+                            );
+                          }
+
+                          return (
+                            <div
+                              key={entry.path}
+                              className="vm-file-browser__row vm-file-browser__row--static"
+                              title={title}
+                            >
+                              {row}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : fileBrowserLoading ? (
+                      <p className="empty-copy">Loading files...</p>
+                    ) : (
+                      <p className="empty-copy">No files in this folder.</p>
+                    )}
+                  </div>
+                </div>
+              </SidepanelSection>
+
+              <SidepanelSection title="Touched this session">
+                <div className="stack">
+                  <p className="empty-copy">
+                    {touchedFiles?.baselineLabel ??
+                      "Best effort from workspace timestamps and command-history hints."}
+                  </p>
+                  <p className="empty-copy">
+                    {touchedFiles?.limitationSummary ??
+                      "This view is intentionally conservative and may miss or over-report edits."}
+                  </p>
+
+                  <div className="action-grid">
+                    <button
+                      className="button button--secondary"
+                      type="button"
+                      onClick={() => void onRefreshTouchedFiles()}
+                      disabled={busy || touchedFilesLoading}
+                    >
+                      {touchedFilesLoading ? "Refreshing..." : "Refresh touched files"}
+                    </button>
+                  </div>
+
+                  {touchedFilesError ? (
+                    <p className="empty-copy">{touchedFilesError}</p>
+                  ) : null}
+
+                  {touchedFiles && touchedFiles.entries.length > 0 ? (
+                    <div className="vm-file-browser__list" role="list">
+                      {touchedFiles.entries.map((entry) => {
+                        const meta = formatTouchedFileRowMeta(entry);
+                        const title = buildTouchedFileEntryTitle(entry);
+                        const row = (
+                          <>
+                            <span className="vm-file-browser__name-shell">
+                              <span className="vm-file-browser__kind">
+                                {formatVmFileBrowserKindToken(entry.kind)}
+                              </span>
+                              <span className="mono-font vm-file-browser__name" title={title}>
+                                {entry.path}
+                                {entry.kind === "directory" ? "/" : ""}
+                              </span>
+                            </span>
+                            {meta ? <span className="vm-file-browser__meta">{meta}</span> : null}
+                          </>
+                        );
+
+                        if (entry.kind === "directory") {
+                          return (
+                            <button
+                              key={entry.path}
+                              className="vm-file-browser__row"
+                              type="button"
+                              title={title}
+                              onClick={() => void onBrowsePath(entry.path)}
+                              disabled={busy || touchedFilesLoading}
+                            >
+                              {row}
+                            </button>
+                          );
+                        }
+
+                        if (entry.kind === "file") {
+                          return (
+                            <a
+                              key={entry.path}
+                              className="vm-file-browser__row"
+                              download={entry.name}
+                              href={buildVmFileDownloadHref(vm.id, entry.path)}
+                              title={title}
+                            >
+                              {row}
+                            </a>
+                          );
+                        }
+
+                        return (
+                          <div
+                            key={entry.path}
+                            className="vm-file-browser__row vm-file-browser__row--static"
+                            title={title}
+                          >
+                            {row}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : touchedFilesLoading ? (
+                    <p className="empty-copy">Comparing workspace timestamps...</p>
+                  ) : (
+                    <p className="empty-copy">No recently touched paths were detected.</p>
+                  )}
+                </div>
+              </SidepanelSection>
+
               <SidepanelSection title="Capture template">
                 <form className="sidepanel-form" onSubmit={onSubmitCapture}>
                   {vm.status === "running" ? (
@@ -5953,31 +6400,34 @@ function WorkspaceSidepanel({
                   </label>
 
                   {captureDraft.mode === "existing" ? (
-                    <label className="field-shell">
-                      <span>Template</span>
-                      <select
-                        className="field-input"
-                        value={captureDraft.templateId}
-                        onChange={(event) => {
-                          const template =
-                            summary.templates.find((entry) => entry.id === event.target.value) ?? null;
+                    <>
+                      <label className="field-shell">
+                        <span>Template</span>
+                        <select
+                          className="field-input"
+                          value={captureDraft.templateId}
+                          onChange={(event) => {
+                            const template =
+                              summary.templates.find((entry) => entry.id === event.target.value) ?? null;
 
-                          onCaptureDraftChange({
-                            mode: "existing",
-                            templateId: event.target.value,
-                            name: template?.name ?? captureDraft.name,
-                            description: template?.description ?? captureDraft.description,
-                          });
-                        }}
-                        disabled={busy}
-                      >
-                        {summary.templates.map((template) => (
-                          <option key={template.id} value={template.id}>
-                            {template.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                            onCaptureDraftChange({
+                              mode: "existing",
+                              templateId: event.target.value,
+                              name: template?.name ?? captureDraft.name,
+                              description: template?.description ?? captureDraft.description,
+                            });
+                          }}
+                          disabled={busy}
+                        >
+                          {summary.templates.map((template) => (
+                            <option key={template.id} value={template.id}>
+                              {template.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                    </>
                   ) : null}
 
                   <label className="field-shell">
@@ -6204,6 +6654,7 @@ interface TemplateCardProps {
   onDelete: (template: EnvironmentTemplate) => Promise<void>;
   onRename: (template: EnvironmentTemplate) => Promise<void>;
   onToggleMenu: (templateId: string) => void;
+  recentSnapshots: Snapshot[];
   template: EnvironmentTemplate;
 }
 
@@ -6216,6 +6667,7 @@ function TemplateCard({
   onDelete,
   onRename,
   onToggleMenu,
+  recentSnapshots,
   template,
 }: TemplateCardProps): JSX.Element {
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -6239,6 +6691,11 @@ function TemplateCard({
             <span className="surface-pill">
               {template.snapshotIds.length} snapshot{template.snapshotIds.length === 1 ? "" : "s"}
             </span>
+            {template.provenance ? (
+              <span className="surface-pill">
+                {formatTemplateProvenanceKindLabel(template.provenance.kind)}
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -6312,7 +6769,60 @@ function TemplateCard({
       </div>
 
       <p>{template.description || "No description yet."}</p>
+      <TemplateLifecyclePreview recentSnapshots={recentSnapshots} template={template} />
       <TemplateInitCommandsPreview commands={template.initCommands} truncateAfter={3} />
+    </div>
+  );
+}
+
+function TemplateLifecyclePreview({
+  compact = false,
+  recentSnapshots,
+  template,
+}: {
+  compact?: boolean;
+  recentSnapshots: Snapshot[];
+  template: EnvironmentTemplate;
+}): JSX.Element | null {
+  const visibleNotes = template.notes
+    .filter((note) => note !== template.provenance?.summary)
+    .slice(0, compact ? 2 : 3);
+  const visibleHistory = (template.history ?? []).slice(0, compact ? 2 : 3);
+
+  if (!template.provenance && visibleNotes.length === 0 && visibleHistory.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="stack">
+      {template.provenance ? (
+        <p className="empty-copy">{template.provenance.summary}</p>
+      ) : null}
+
+      {recentSnapshots.length > 0 ? (
+        <div className="chip-row">
+          {recentSnapshots.map((snapshot) => (
+            <span key={snapshot.id} className="surface-pill">
+              {snapshot.label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {visibleNotes.map((note) => (
+        <p key={note} className="empty-copy">
+          {note}
+        </p>
+      ))}
+
+      {visibleHistory.map((entry) => (
+        <p
+          key={`${entry.kind}-${entry.createdAt}-${entry.summary}`}
+          className="list-card__timestamp"
+        >
+          {formatTimestamp(entry.createdAt)} · {entry.summary}
+        </p>
+      ))}
     </div>
   );
 }
@@ -6590,6 +7100,11 @@ function OverviewSidepanel({
                       onDelete={onDeleteTemplate}
                       onRename={onRenameTemplate}
                       onToggleMenu={onToggleTemplateMenu}
+                      recentSnapshots={resolveRecentTemplateSnapshots(
+                        template,
+                        summary.snapshots,
+                        3,
+                      )}
                       template={template}
                     />
                   ))
@@ -7009,6 +7524,189 @@ function buildCaptureDraft(
     name: `Captured ${vm.name}`,
     description: `Captured from workspace ${vm.name}.`,
   };
+}
+
+function formatTemplateProvenanceKindLabel(
+  kind: NonNullable<EnvironmentTemplate["provenance"]>["kind"],
+): string {
+  switch (kind) {
+    case "seed":
+      return "Seed";
+    case "cloned":
+      return "Clone";
+    case "captured":
+      return "Captured";
+    case "recovered":
+      return "Recovered";
+  }
+}
+
+function resolveRecentTemplateSnapshots(
+  template: EnvironmentTemplate,
+  snapshots: Snapshot[],
+  limit: number,
+): Snapshot[] {
+  const snapshotIds = new Set(template.snapshotIds);
+
+  return snapshots
+    .filter((snapshot) => snapshotIds.has(snapshot.id))
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+    .slice(0, limit);
+}
+
+function formatVmFileEntryKindLabel(kind: VmFileEntry["kind"]): string {
+  switch (kind) {
+    case "directory":
+      return "Directory";
+    case "file":
+      return "File";
+    case "symlink":
+      return "Symlink";
+    case "other":
+    default:
+      return "Other";
+  }
+}
+
+function formatVmFileSize(sizeBytes: number | null): string {
+  if (sizeBytes === null) {
+    return "n/a";
+  }
+
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+
+  if (sizeBytes < 1024 * 1024) {
+    return `${trimTrailingZeros((sizeBytes / 1024).toFixed(1))} KB`;
+  }
+
+  return `${trimTrailingZeros((sizeBytes / (1024 * 1024)).toFixed(1))} MB`;
+}
+
+function formatVmFileEntryMeta(entry: VmFileEntry): string {
+  const sizeLabel = formatVmFileSize(entry.sizeBytes);
+  const kindLabel = formatVmFileEntryKindLabel(entry.kind);
+  return entry.kind === "directory" ? kindLabel : `${kindLabel} · ${sizeLabel}`;
+}
+
+function formatVmFileBrowserRowMeta(entry: VmFileEntry): string | null {
+  switch (entry.kind) {
+    case "directory":
+      return null;
+    case "file":
+      return formatVmFileSize(entry.sizeBytes);
+    case "symlink":
+      return "symlink";
+    case "other":
+      return "other";
+  }
+}
+
+function formatVmFileBrowserKindToken(kind: VmFileEntry["kind"]): string {
+  switch (kind) {
+    case "directory":
+      return "dir";
+    case "file":
+      return "file";
+    case "symlink":
+      return "link";
+    case "other":
+      return "other";
+  }
+}
+
+function buildVmFileBrowserBreadcrumbs(
+  currentPath: string,
+): Array<{ label: string; path: string }> {
+  if (currentPath === "/") {
+    return [{ label: "/", path: "/" }];
+  }
+
+  let path = "";
+  return [
+    { label: "/", path: "/" },
+    ...currentPath.split("/").filter(Boolean).map((segment) => {
+      path = `${path}/${segment}`;
+      return {
+        label: segment,
+        path,
+      };
+    }),
+  ];
+}
+
+function buildVmFileBrowserEntryTitle(entry: VmFileEntry): string {
+  const lines = [entry.path];
+
+  if (entry.kind === "file") {
+    lines.push(`Size: ${formatVmFileSize(entry.sizeBytes)}`);
+  }
+
+  if (entry.modifiedAt) {
+    lines.push(`Modified: ${formatTimestamp(entry.modifiedAt)}`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildVmFileDownloadHref(vmId: string, path: string): string {
+  return `/api/vms/${encodeURIComponent(vmId)}/files/download?path=${encodeURIComponent(path)}`;
+}
+
+function formatTouchedFileRowMeta(entry: VmTouchedFile): string {
+  const reasonsLabel = entry.reasons.map(formatTouchedFileReasonLabel).join(", ");
+
+  if (entry.kind === "file") {
+    return `${reasonsLabel} · ${formatVmFileSize(entry.sizeBytes)}`;
+  }
+
+  return reasonsLabel;
+}
+
+function buildTouchedFileEntryTitle(entry: VmTouchedFile): string {
+  const lines = [
+    entry.path,
+    `Reasons: ${entry.reasons.map(formatTouchedFileReasonLabel).join(", ")}`,
+  ];
+
+  if (entry.kind === "file") {
+    lines.push(`Size: ${formatVmFileSize(entry.sizeBytes)}`);
+  }
+
+  if (entry.modifiedAt) {
+    lines.push(`Modified: ${formatTimestamp(entry.modifiedAt)}`);
+  }
+
+  if (entry.changedAt) {
+    lines.push(`Changed: ${formatTimestamp(entry.changedAt)}`);
+  }
+
+  return lines.join("\n");
+}
+
+function formatTouchedFileReasonLabel(reason: VmTouchedFilesSnapshot["entries"][number]["reasons"][number]): string {
+  switch (reason) {
+    case "mtime":
+      return "mtime";
+    case "ctime":
+      return "ctime";
+    case "command-history":
+      return "command history";
+  }
+}
+
+function buildForwardBrowserHref(forward: VmPortForward): string {
+  if (!forward.publicHostname || typeof window === "undefined") {
+    return forward.publicPath;
+  }
+
+  const current = new URL(window.location.href);
+  current.hostname = forward.publicHostname;
+  current.pathname = "/";
+  current.search = "";
+  current.hash = "";
+  return current.toString();
 }
 
 function toTemplatePortForward(forward: VmPortForward): TemplatePortForward {

@@ -75,6 +75,7 @@ Other useful env vars:
 - `PARALLAIZE_DATA_FILE`: JSON state file path
 - `PARALLAIZE_INCUS_PROJECT`: Incus project to target
 - `PARALLAIZE_INCUS_STORAGE_POOL`: storage pool for new VMs and clones
+- `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE`: hostname suffix for forwarded services, defaults to `localhost`
 
 An example runtime file lives at [infra/parallaize.env.example](infra/parallaize.env.example).
 
@@ -95,6 +96,8 @@ The repo also includes a persistence admin CLI for moving state between JSON and
 - `pnpm persistence:import`
 - `pnpm persistence:copy`
 
+The operational backup, restore, and packaged-service ordering notes live in [docs/postgres-operations.md](docs/postgres-operations.md).
+
 ## Validation
 
 Useful validation commands:
@@ -113,20 +116,25 @@ Parallaize includes a real package-build path for host installs.
 
 - Supported package target: Ubuntu 24.04 `amd64` `.deb`
 - Experimental package target: Ubuntu 24.04 `arm64` `.deb`
+- Supported signed APT archive: Ubuntu 24.04 `amd64`
 
 Build commands:
 
 ```bash
 flox activate -d . -- pnpm package:deb
 flox activate -d . -- pnpm package:deb:arm64
+flox activate -d . -- pnpm package:apt-repo
 flox activate -d . -- pnpm package:release
 ```
 
-See [docs/packaging.md](docs/packaging.md) for package contents, install flow, and systemd layout.
+See [docs/packaging.md](docs/packaging.md) for package contents and host-install layout, and [docs/apt-repository.md](docs/apt-repository.md) for the signed Ubuntu 24.04 APT source and key flow.
 
 ## Further Reading
 
 - [docs/live-incus-setup.md](docs/live-incus-setup.md)
+- [docs/postgres-operations.md](docs/postgres-operations.md)
+- [docs/template-prep.md](docs/template-prep.md)
+- [docs/apt-repository.md](docs/apt-repository.md)
 - [docs/packaging.md](docs/packaging.md)
 - [infra/Caddyfile](infra/Caddyfile)
 - [infra/docker-compose.postgres.yml](infra/docker-compose.postgres.yml)
