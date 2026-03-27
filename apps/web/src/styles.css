@@ -2057,6 +2057,13 @@ section.workspace-shell {
   gap: 0.45rem;
 }
 
+.workspace-rail__home-link-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
 .workspace-rail__brand-lockup {
   display: inline-flex;
   align-items: baseline;
@@ -2075,6 +2082,32 @@ section.workspace-shell {
   font-size: 0.62rem;
   font-weight: 500;
   letter-spacing: 0.12em;
+}
+
+.workspace-rail__brand-release-indicator {
+  display: inline-flex;
+  align-items: center;
+  color: #facc15;
+  font-size: 0.76rem;
+  font-weight: 800;
+  line-height: 1;
+  text-decoration: none;
+  text-shadow: 0 0 0.4rem rgba(250, 204, 21, 0.2);
+  transition:
+    color 120ms ease,
+    text-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.workspace-rail__brand-release-indicator:hover,
+.workspace-rail__brand-release-indicator:focus-visible {
+  color: #fde047;
+  text-shadow: 0 0 0.55rem rgba(253, 224, 71, 0.3);
+  transform: translateY(-1px);
+}
+
+.workspace-rail__brand-release-indicator:focus-visible {
+  outline: none;
 }
 
 .brand-wordmark__accent {

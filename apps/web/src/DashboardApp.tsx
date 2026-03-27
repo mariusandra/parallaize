@@ -179,6 +179,7 @@ interface ResolutionControlStatus {
 }
 
 const appVersionLabel = __PARALLAIZE_VERSION__;
+const githubReleaseTagBaseUrl = "https://github.com/mariusandra/parallaize/releases/tag/v";
 
 interface DesktopResolutionTarget {
   height: number;
@@ -3446,43 +3447,45 @@ export function DashboardApp(): JSX.Element {
                 ) : (
                   <>
                     <div className="workspace-rail__topbar">
-                      <button
-                        className="workspace-shell__eyebrow workspace-rail__home-link"
-                        type="button"
-                        title={providerStatusTitle(summary.provider)}
-                        onClick={openHomepage}
-                      >
-                        <span
-                          className={joinClassNames(
-                            "workspace-rail__status-dot",
-                            providerStatusDotClassName(summary.provider),
-                          )}
-                          aria-hidden="true"
-                        />
-                        <span className="workspace-rail__brand-lockup">
+                      <div className="workspace-rail__home-link-group">
+                        <button
+                          className="workspace-shell__eyebrow workspace-rail__home-link"
+                          type="button"
+                          title={providerStatusTitle(summary.provider)}
+                          onClick={openHomepage}
+                        >
+                          <span
+                            className={joinClassNames(
+                              "workspace-rail__status-dot",
+                              providerStatusDotClassName(summary.provider),
+                            )}
+                            aria-hidden="true"
+                          />
                           <span className="brand-wordmark" aria-label="Parallaize">
                             <span>Parall</span>
                             <span className="brand-wordmark__accent">ai</span>
                             <span>ze</span>
                           </span>
-                          <span
-                            className="workspace-rail__brand-version"
-                            aria-label={
-                              newerReleaseAvailable && latestRelease
-                                ? `Version ${appVersionLabel}. Newer release available: ${latestRelease.packageLabel}`
-                                : `Version ${appVersionLabel}`
-                            }
-                            title={
-                              newerReleaseAvailable && latestRelease
-                                ? `Newer release available: ${latestRelease.packageLabel}`
-                                : undefined
-                            }
-                          >
-                            {appVersionLabel}
-                            {newerReleaseAvailable ? " !" : ""}
-                          </span>
+                        </button>
+                        <span
+                          className="workspace-rail__brand-lockup"
+                          aria-label={`Version ${appVersionLabel}`}
+                        >
+                          <span className="workspace-rail__brand-version">{appVersionLabel}</span>
+                          {newerReleaseAvailable && latestRelease ? (
+                            <a
+                              className="workspace-rail__brand-release-indicator"
+                              href={buildLatestReleaseTagUrl(latestRelease.version)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              aria-label="New version available!"
+                              title="New version available!"
+                            >
+                              !
+                            </a>
+                          ) : null}
                         </span>
-                      </button>
+                      </div>
                       <button
                         ref={shellMenuButtonRef}
                         className={joinClassNames(
@@ -8661,6 +8664,10 @@ function buildSparklinePoints(
 
 function joinClassNames(...values: Array<string | false | null | undefined>): string {
   return values.filter(Boolean).join(" ");
+}
+
+function buildLatestReleaseTagUrl(version: string): string {
+  return `${githubReleaseTagBaseUrl}${version}`;
 }
 
 function isNearScrollBottom(element: HTMLElement): boolean {
