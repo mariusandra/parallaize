@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  classifyAvailableRelease,
   compareReleaseLabels,
   compareSemver,
   hasNewerReleaseAvailable,
@@ -42,5 +43,48 @@ test("update availability checks version and package release", () => {
       packageLabel: "0.1.8-4",
     }),
     false,
+  );
+});
+
+test("release classification maps package and semver bumps to patch, minor, and major", () => {
+  assert.equal(
+    classifyAvailableRelease("0.1.8", "1", {
+      version: "0.1.8",
+      packageRelease: "2",
+      packageLabel: "0.1.8-2",
+    }),
+    "patch",
+  );
+  assert.equal(
+    classifyAvailableRelease("0.1.8", "1", {
+      version: "0.1.9",
+      packageRelease: "1",
+      packageLabel: "0.1.9-1",
+    }),
+    "patch",
+  );
+  assert.equal(
+    classifyAvailableRelease("0.1.8", "1", {
+      version: "0.2.0",
+      packageRelease: "1",
+      packageLabel: "0.2.0-1",
+    }),
+    "minor",
+  );
+  assert.equal(
+    classifyAvailableRelease("0.1.8", "1", {
+      version: "1.0.0",
+      packageRelease: "1",
+      packageLabel: "1.0.0-1",
+    }),
+    "major",
+  );
+  assert.equal(
+    classifyAvailableRelease("0.1.8", "2", {
+      version: "0.1.8",
+      packageRelease: "2",
+      packageLabel: "0.1.8-2",
+    }),
+    null,
   );
 });

@@ -27,7 +27,9 @@ const DEFAULT_GUEST_VNC_PORT = 5900;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 const DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 30_000;
-const DEFAULT_GUEST_HOME = "/home/ubuntu";
+const DEFAULT_GUEST_USERNAME = "ubuntu";
+const DEFAULT_GUEST_HOME = `/home/${DEFAULT_GUEST_USERNAME}`;
+const DEFAULT_GUEST_WALLPAPER = "Monument_valley_by_orbitelambda.jpg";
 const DEFAULT_GUEST_WORKSPACE = "/root";
 const DEFAULT_GUEST_INIT_LOG_PATH = "/var/log/parallaize-template-init.log";
 const DEFAULT_VM_CREATE_HEARTBEAT_MS = 4000;
@@ -3062,7 +3064,7 @@ function validateDisplayResolution(width: number, height: number): void {
 function buildGuestGdmCustomConfig(): string {
   return `[daemon]
 AutomaticLoginEnable=true
-AutomaticLogin=ubuntu
+AutomaticLogin=${DEFAULT_GUEST_USERNAME}
 WaylandEnable=false`;
 }
 
@@ -3288,26 +3290,32 @@ function buildGuestDesktopSessionSetupScript(): string {
 set -eu
 DASH_TO_DOCK_SCHEMA="org.gnome.shell.extensions.dash-to-dock"
 BACKGROUND_SCHEMA="org.gnome.desktop.background"
+WALLPAPER_NAME="${DEFAULT_GUEST_WALLPAPER}"
 WALLPAPER_ROOTS="/usr/share/backgrounds /usr/share/gnome-background-properties"
+PARALLAIZE_CONFIG_DIR="\${XDG_CONFIG_HOME:-$HOME/.config}/parallaize"
+WALLPAPER_MARKER_FILE="$PARALLAIZE_CONFIG_DIR/desktop-wallpaper-initialized"
 set_dash_to_dock_defaults() {
   gsettings set "$DASH_TO_DOCK_SCHEMA" dock-position RIGHT >/dev/null 2>&1 || true
   gsettings set "$DASH_TO_DOCK_SCHEMA" dash-max-icon-size 32 >/dev/null 2>&1 || true
 }
-select_random_wallpaper() {
-  find $WALLPAPER_ROOTS -type f \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \\) 2>/dev/null \\
-    | grep -Ev '/(thumbnail|cropped|lockscreen)/' \\
-    | sort -u \\
-    | shuf -n 1
+find_named_wallpaper() {
+  find $WALLPAPER_ROOTS -type f -name "$WALLPAPER_NAME" 2>/dev/null \\
+    | sort \\
+    | head -n 1
 }
-apply_random_wallpaper() {
-  wallpaper="$(select_random_wallpaper || true)"
-  if [ -z "$wallpaper" ]; then
+apply_first_boot_wallpaper() {
+  if [ -f "$WALLPAPER_MARKER_FILE" ]; then
     return 0
   fi
-  wallpaper_uri="file://$wallpaper"
-  gsettings set "$BACKGROUND_SCHEMA" picture-uri "$wallpaper_uri" >/dev/null 2>&1 || true
-  gsettings set "$BACKGROUND_SCHEMA" picture-uri-dark "$wallpaper_uri" >/dev/null 2>&1 || true
-  gsettings set "$BACKGROUND_SCHEMA" picture-options zoom >/dev/null 2>&1 || true
+  mkdir -p "$PARALLAIZE_CONFIG_DIR"
+  wallpaper="$(find_named_wallpaper || true)"
+  if [ -n "$wallpaper" ]; then
+    wallpaper_uri="file://$wallpaper"
+    gsettings set "$BACKGROUND_SCHEMA" picture-uri "$wallpaper_uri" >/dev/null 2>&1 || true
+    gsettings set "$BACKGROUND_SCHEMA" picture-uri-dark "$wallpaper_uri" >/dev/null 2>&1 || true
+    gsettings set "$BACKGROUND_SCHEMA" picture-options zoom >/dev/null 2>&1 || true
+  fi
+  : > "$WALLPAPER_MARKER_FILE"
 }
 ensure_indicator_multiload() {
   if ! command -v indicator-multiload >/dev/null 2>&1; then
@@ -3319,7 +3327,7 @@ ensure_indicator_multiload() {
   nohup indicator-multiload >/dev/null 2>&1 &
 }
 set_dash_to_dock_defaults
-apply_random_wallpaper
+apply_first_boot_wallpaper
 ensure_indicator_multiload`;
 }
 
@@ -3343,6 +3351,10 @@ LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
 SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
 SESSION_SETUP_FILE="/usr/local/bin/parallaize-desktop-session-setup"
 SESSION_AUTOSTART_FILE="/etc/xdg/autostart/parallaize-desktop-session-setup.desktop"
+WELCOME_STATE_DIR="${DEFAULT_GUEST_HOME}/.config"
+WELCOME_DONE_FILE="$WELCOME_STATE_DIR/gnome-initial-setup-done"
+WELCOME_AUTOSTART_DIR="$WELCOME_STATE_DIR/autostart"
+WELCOME_AUTOSTART_FILE="$WELCOME_AUTOSTART_DIR/gnome-initial-setup-first-login.desktop"
 CURRENT_GDM="$(cat "$GDM_FILE" 2>/dev/null || true)"
 DESIRED_GDM="$(cat <<'CONF'
 ${buildGuestGdmCustomConfig()}
@@ -3368,9 +3380,33 @@ DESIRED_SESSION_AUTOSTART="$(cat <<'DESKTOP'
 ${buildGuestDesktopSessionAutostartEntry()}
 DESKTOP
 )"
+DESIRED_WELCOME_AUTOSTART="$(cat <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=GNOME Initial Setup
+Hidden=true
+X-GNOME-Autostart-enabled=false
+DESKTOP
+)"
 RESTART_GDM=0
 RESTART_VNC=0
 MISSING_PACKAGES=""
+if id ${DEFAULT_GUEST_USERNAME} >/dev/null 2>&1 && [ -d "${DEFAULT_GUEST_HOME}" ]; then
+  install -d -m 0755 -o ${DEFAULT_GUEST_USERNAME} -g ${DEFAULT_GUEST_USERNAME} "$WELCOME_STATE_DIR" "$WELCOME_AUTOSTART_DIR"
+  touch "$WELCOME_DONE_FILE"
+  chown ${DEFAULT_GUEST_USERNAME}:${DEFAULT_GUEST_USERNAME} "$WELCOME_DONE_FILE"
+  CURRENT_WELCOME_AUTOSTART="$(cat "$WELCOME_AUTOSTART_FILE" 2>/dev/null || true)"
+  if [ "$CURRENT_WELCOME_AUTOSTART" != "$DESIRED_WELCOME_AUTOSTART" ]; then
+    cat > "$WELCOME_AUTOSTART_FILE" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=GNOME Initial Setup
+Hidden=true
+X-GNOME-Autostart-enabled=false
+DESKTOP
+    chown ${DEFAULT_GUEST_USERNAME}:${DEFAULT_GUEST_USERNAME} "$WELCOME_AUTOSTART_FILE"
+  fi
+fi
 if [ "$CURRENT_GDM" != "$DESIRED_GDM" ]; then
   mkdir -p /etc/gdm3
   cat > "$GDM_FILE" <<'CONF'

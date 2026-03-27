@@ -2087,22 +2087,43 @@ section.workspace-shell {
 .workspace-rail__brand-release-indicator {
   display: inline-flex;
   align-items: center;
-  color: #facc15;
+  color: var(--release-indicator-color, #f59e0b);
   font-size: 0.76rem;
   font-weight: 800;
   line-height: 1;
   text-decoration: none;
-  text-shadow: 0 0 0.4rem rgba(250, 204, 21, 0.2);
+  text-shadow: 0 0 0.4rem var(--release-indicator-shadow, rgba(245, 158, 11, 0.22));
   transition:
     color 120ms ease,
     text-shadow 120ms ease,
     transform 120ms ease;
 }
 
+.workspace-rail__brand-release-indicator--patch {
+  --release-indicator-color: #9ca3af;
+  --release-indicator-shadow: rgba(156, 163, 175, 0.2);
+  --release-indicator-hover-color: #d1d5db;
+  --release-indicator-hover-shadow: rgba(209, 213, 219, 0.26);
+}
+
+.workspace-rail__brand-release-indicator--minor {
+  --release-indicator-color: #f59e0b;
+  --release-indicator-shadow: rgba(245, 158, 11, 0.22);
+  --release-indicator-hover-color: #fbbf24;
+  --release-indicator-hover-shadow: rgba(251, 191, 36, 0.3);
+}
+
+.workspace-rail__brand-release-indicator--major {
+  --release-indicator-color: #ef4444;
+  --release-indicator-shadow: rgba(239, 68, 68, 0.24);
+  --release-indicator-hover-color: #f87171;
+  --release-indicator-hover-shadow: rgba(248, 113, 113, 0.32);
+}
+
 .workspace-rail__brand-release-indicator:hover,
 .workspace-rail__brand-release-indicator:focus-visible {
-  color: #fde047;
-  text-shadow: 0 0 0.55rem rgba(253, 224, 71, 0.3);
+  color: var(--release-indicator-hover-color, #fbbf24);
+  text-shadow: 0 0 0.55rem var(--release-indicator-hover-shadow, rgba(251, 191, 36, 0.3));
   transform: translateY(-1px);
 }
 

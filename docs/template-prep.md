@@ -12,7 +12,8 @@ Parallaize already bootstraps the default Ubuntu desktop guest for you:
 - applies Ubuntu dock defaults in the desktop session:
   - dock on the right
   - 32px dock icons
-- picks a random wallpaper from the installed Ubuntu wallpaper set each desktop login
+- dismisses the Ubuntu first-login welcome flow before it can prompt for Ubuntu Pro, system data sharing, or App Center
+- applies `Monument_valley_by_orbitelambda.jpg` on the first desktop login only when that wallpaper is present
 - autostarts `indicator-multiload` in the GNOME session
 
 You should still validate that first-boot automation succeeded before you capture a long-lived template.
@@ -26,7 +27,8 @@ You should still validate that first-boot automation succeeded before you captur
    - the workspace has a reachable VNC session
    - the dock is on the right with smaller icons
    - `indicator-multiload` is visible in the desktop panel
-   - the wallpaper is not the stock default every boot
+   - the Ubuntu welcome wizard does not appear
+   - the wallpaper is `Monument_valley_by_orbitelambda.jpg` when that file exists in the guest image
 5. Open the command console for that VM and run:
 
 ```bash

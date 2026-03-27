@@ -235,7 +235,8 @@ That checklist now lines up with what the guest bootstrap already does automatic
 
 - `indicator-multiload` is installed and started in the desktop session
 - the Ubuntu dock is pinned to the right with 32px icons
-- each desktop login picks a random wallpaper from the installed wallpaper set
+- the Ubuntu first-login welcome flow is pre-dismissed for the default `ubuntu` user
+- the first desktop login applies `Monument_valley_by_orbitelambda.jpg` when that wallpaper ships in the guest image
 
 ## DMZ Mode
 

@@ -85,6 +85,7 @@ import { parseAnsiText, resolveAnsiSegmentStyle } from "./ansi.js";
 import { NoVncViewport } from "./NoVncViewport.js";
 import {
   appPackageReleaseLabel,
+  classifyAvailableRelease,
   hasNewerReleaseAvailable,
 } from "./releaseVersion.js";
 
@@ -505,6 +506,11 @@ export function DashboardApp(): JSX.Element {
       : "Take over here";
   const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
   const newerReleaseAvailable = hasNewerReleaseAvailable(
+    appVersionLabel,
+    appPackageReleaseLabel,
+    latestRelease,
+  );
+  const releaseIndicatorSeverity = classifyAvailableRelease(
     appVersionLabel,
     appPackageReleaseLabel,
     latestRelease,
@@ -3546,7 +3552,7 @@ export function DashboardApp(): JSX.Element {
                           <span className="workspace-rail__brand-version">{appVersionLabel}</span>
                           {newerReleaseAvailable && latestRelease ? (
                             <a
-                              className="workspace-rail__brand-release-indicator"
+                              className={`workspace-rail__brand-release-indicator${releaseIndicatorSeverity ? ` workspace-rail__brand-release-indicator--${releaseIndicatorSeverity}` : ""}`}
                               href={buildLatestReleaseTagUrl(latestRelease.version)}
                               target="_blank"
                               rel="noopener noreferrer"

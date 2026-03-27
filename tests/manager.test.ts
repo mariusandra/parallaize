@@ -1616,7 +1616,15 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /indicator-multiload/);
   assert.match(configSetCall?.[4] ?? "", /dock-position RIGHT/);
   assert.match(configSetCall?.[4] ?? "", /dash-max-icon-size 32/);
+  assert.match(configSetCall?.[4] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
+  assert.match(configSetCall?.[4] ?? "", /desktop-wallpaper-initialized/);
   assert.match(configSetCall?.[4] ?? "", /picture-uri-dark/);
+  assert.doesNotMatch(configSetCall?.[4] ?? "", /shuf -n 1/);
+  assert.match(configSetCall?.[4] ?? "", /gnome-initial-setup-done/);
+  assert.match(
+    configSetCall?.[4] ?? "",
+    /gnome-initial-setup-first-login\.desktop/,
+  );
   assert.match(configSetCall?.[4] ?? "", /-xrandr newfbsize/);
   assert.match(configSetCall?.[4] ?? "", /-noshm/);
   assert.match(configSetCall?.[4] ?? "", /xset r on \|\| true/);
@@ -2441,7 +2449,12 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /indicator-multiload/);
   assert.match(execCall?.[5] ?? "", /dock-position RIGHT/);
   assert.match(execCall?.[5] ?? "", /dash-max-icon-size 32/);
+  assert.match(execCall?.[5] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
+  assert.match(execCall?.[5] ?? "", /desktop-wallpaper-initialized/);
   assert.match(execCall?.[5] ?? "", /picture-uri-dark/);
+  assert.doesNotMatch(execCall?.[5] ?? "", /shuf -n 1/);
+  assert.match(execCall?.[5] ?? "", /gnome-initial-setup-done/);
+  assert.match(execCall?.[5] ?? "", /gnome-initial-setup-first-login\.desktop/);
   assert.match(execCall?.[5] ?? "", /ATTEMPT=0/);
   assert.match(execCall?.[5] ?? "", /sleep 2/);
   assert.match(execCall?.[5] ?? "", /-xrandr newfbsize/);
