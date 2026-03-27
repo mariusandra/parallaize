@@ -4,7 +4,7 @@ Last updated: 2026-03-27
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
-Current focus: finish the last live-host packaged validation gaps on clean distro-managed Incus `amd64` and real `arm64` hosts before starting the first trusted collection flow for untrusted AI workloads.
+Current focus: start the first trusted collection flow for untrusted AI workloads.
 
 Completed implementation details now live in:
 
@@ -14,21 +14,7 @@ Completed implementation details now live in:
 - `docs/packaging.md`
 - `docs/apt-repository.md`
 
-## Current
-
-- [ ] Repeat the Ubuntu 24.04 `amd64` packaged install validation on a clean distro-managed Incus host and close the remaining daemon-conflict ambiguity before calling that path fully supported.
-- [ ] Validate the generated `arm64` `.deb` on a real `arm64` Incus and QEMU host before promoting it beyond experimental.
-
-Validation notes:
-
-- On March 27, 2026, the signed Ubuntu 24.04 `amd64` APT archive path was replayed in a clean Ubuntu 24.04 `amd64` container: initial key bootstrap succeeded, `apt-get install parallaize` installed `0.1.10-1`, and `apt-get install --only-upgrade parallaize` upgraded the same host to `0.1.10-2`.
-- On March 27, 2026, the packaged PostgreSQL deployment path was replayed in a clean Ubuntu 24.04 `amd64` container using the packaged env file plus the packaged `parallaize`, `parallaize-persistence`, and Caddy launchers: health stayed `ok`, export/import worked, an upgrade to `0.1.10-3` succeeded, and restoring the baseline export brought VM count back from 2 to 1.
-
-Open validation note:
-
-- The March 26, 2026 live packaged-host run still cannot close the support claim by itself because that machine was mixed between a manually started Flox `incusd` and distro `incus.socket` on `/var/lib/incus/unix.socket`.
-
-## Next Slice: Untrusted AI Workloads
+## Current Slice: Untrusted AI Workloads
 
 Target slice: run agents against Git-backed codebases inside untrusted worker VMs without handing write-capable upstream credentials to those guests.
 

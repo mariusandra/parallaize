@@ -5,6 +5,7 @@ export type ProviderHostStatus =
   | "network-unreachable"
   | "missing-cli"
   | "daemon-unreachable"
+  | "daemon-conflict"
   | "error";
 export type ProviderDesktopTransport = "synthetic" | "novnc";
 export type PersistenceStatus = "ready" | "degraded";

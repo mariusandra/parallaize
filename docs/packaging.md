@@ -63,6 +63,7 @@ Run these from the repo root.
 ```bash
 flox activate -d . -- pnpm package:deb
 flox activate -d . -- pnpm package:deb:arm64
+flox activate -d . -- pnpm package:validate:qemu:amd64
 flox activate -d . -- pnpm package:apt-repo
 flox activate -d . -- pnpm package:release
 ```
@@ -176,7 +177,13 @@ sudo ufw status verbose
 
 sudo systemctl enable --now parallaize.service
 sudo systemctl status --no-pager parallaize.service
-curl http://127.0.0.1:3000/api/health
+COOKIE_JAR="$(mktemp)"
+trap 'rm -f "$COOKIE_JAR"' EXIT
+curl -fsS -c "$COOKIE_JAR" \
+  -H 'content-type: application/json' \
+  -d "{\"username\":\"admin\",\"password\":\"$PARALLAIZE_ADMIN_PASSWORD\"}" \
+  http://127.0.0.1:3000/api/auth/login >/dev/null
+curl -fsS -b "$COOKIE_JAR" http://127.0.0.1:3000/api/health
 ```
 
 What that does:
@@ -222,31 +229,51 @@ That default Btrfs pool is loop-backed on blank hosts, which is still a compromi
 
 The packaged env file also defaults `PARALLAIZE_INCUS_STORAGE_POOL=default` so new VM creates and copies keep targeting the bootstrap pool until the operator changes it.
 
+## Automated QEMU Validation
+
+The clean Ubuntu 24.04 `amd64` packaged-host replay now has a checked-in validator:
+
+```bash
+flox activate -d . -- pnpm package:validate:qemu:amd64
+```
+
+That flow boots a fresh Ubuntu 24.04 cloud image under QEMU, installs Caddy plus the generated `.deb`, confirms the guest is using distro-managed Incus instead of a mixed daemon model, waits for an acceptable packaged `/api/health` result, starts the packaged Caddy unit, and runs the packaged `parallaize-smoke-incus` path under `sudo` inside the guest.
+
+Validation summaries land under `.artifacts/package-validation/amd64-qemu-*/summary.json`.
+
+The validator intentionally accepts one expected blank-host compromise from the packaged bootstrap path: `/api/health` can stay `degraded` when the selected Incus pool is the loop-backed `btrfs` bootstrap pool. That warning is acceptable for this clean-host replay as long as:
+
+- provider `hostStatus` is `ready`
+- persistence is `ready`
+- the only `incusd` process is the distro-managed daemon
+- packaged Caddy answers on `:8080`
+- the packaged smoke path passes end to end
+
 ## Live Verification Note
 
-As of March 26, 2026, the Ubuntu 24.04 `amd64` package has been installed and boot-tested on a live host:
+As of March 27, 2026, the supported Ubuntu 24.04 `amd64` packaged path has been replayed across all of its remaining validation layers:
 
-- `dpkg -i` succeeds
-- `parallaize.service` starts from the packaged bundle and env file
-- `parallaize-caddy.service` starts and serves the packaged front door
+- a clean Ubuntu 24.04 `amd64` QEMU host using distro-managed Incus, packaged Caddy, and the packaged smoke path
+- the signed Ubuntu 24.04 `amd64` archive bootstrap and upgrade path in a clean Ubuntu 24.04 `amd64` container
+- the packaged PostgreSQL launcher, export/import, restore, Caddy, and upgrade path in a clean Ubuntu 24.04 `amd64` container
 
-One host-specific caveat still blocks calling this path fully supported: this machine already had a manually started Flox `incusd` process before the distro `incus` package was installed. Installing Ubuntu's `incus` package also enabled `incus.socket`, so the host ended up with a mixed daemon setup on `/var/lib/incus/unix.socket`. In that state, the packaged Parallaize service wiring is correct, but clean Incus API verification is blocked by the host daemon conflict itself.
+The clean QEMU-host replay installed `parallaize_0.1.10-1_amd64.deb`, kept `incus.socket` active and enabled, exposed `/usr/libexec/incus/incusd` as the only `incusd` process, reported provider `hostStatus=ready`, started the packaged Caddy unit, and passed the packaged smoke workflow end to end:
 
-On March 27, 2026, two more clean-environment packaged validation passes were also replayed outside that mixed-daemon host:
+- nested VM create
+- browser VNC through Caddy
+- guest HTTP injection
+- VM restart
+- guest HTTP reachability
+- forwarded-service routing
+- smoke VM cleanup
 
-- the signed Ubuntu 24.04 `amd64` archive bootstrap path on a clean Ubuntu 24.04 `amd64` container, including key bootstrap, `apt-get install parallaize`, and `apt-get install --only-upgrade parallaize`
-- the packaged PostgreSQL path on a clean Ubuntu 24.04 `amd64` container, including packaged launcher startup, Caddy startup after health, export/import, restore, and an upgrade from `0.1.10-2` to `0.1.10-3`
+The March 26, 2026 mixed-daemon host result is still worth remembering as a failure mode, but it no longer blocks the `amd64` support claim. Current builds now report that host state explicitly as a daemon conflict in `/api/health` and the dashboard instead of leaving it ambiguous.
 
-Those runs remove the remaining APT archive and PostgreSQL ambiguity, but they do not replace the final live Incus-host validation below.
-
-The clean distro-managed validation still needs to be repeated on a host that is either:
-
-- fully managed by the distro `incus` package, or
-- still using the manual Flox daemon without also enabling the distro socket-activated units
+The only packaging support gap left open is `arm64`, which should stay experimental until the same replay is run on a real `arm64` host with Incus and QEMU helpers.
 
 ## Clean Host Validation Checklist
 
-Use this run sheet when re-validating the supported Ubuntu 24.04 `amd64` packaged path on a fresh host.
+Use this run sheet when re-validating future Ubuntu 24.04 `amd64` packaged releases on a fresh host.
 
 1. Choose one Incus ownership model before installing Parallaize:
    - distro-managed: install Ubuntu's `incus` package and do not manually start Flox `incusd`
@@ -261,11 +288,11 @@ sudo ss -lx | grep /var/lib/incus/unix.socket
 
 3. Install the package or use the signed archive bootstrap path from [apt-repository.md](apt-repository.md).
 4. Rotate `/etc/parallaize/parallaize.env` credentials before starting services.
-5. Start `parallaize.service`, validate `curl http://127.0.0.1:3000/api/health`, then start `parallaize-caddy.service` if it is part of the target deployment.
+5. Start `parallaize.service`, validate the authenticated `http://127.0.0.1:3000/api/health` endpoint, then start `parallaize-caddy.service` if it is part of the target deployment.
 6. Launch a VM, snapshot it, clone it, delete the clone, and confirm forwarded-service routes still work.
 7. Record which Incus daemon model the host used in the validation notes so the result is not ambiguous later.
 
-If step 2 shows both a manually started Flox daemon and the distro socket-activated units on the same host, stop and fix that first. That mixed state is exactly the ambiguity still blocking the support claim.
+If step 2 shows both a manually started Flox daemon and the distro socket-activated units on the same host, stop and fix that first. That mixed state is still unsupported, and current builds now surface it explicitly as a daemon conflict.
 
 ## Upgrade Path
 
@@ -274,7 +301,7 @@ Current upgrade contract:
 1. Export or back up state before the upgrade.
 2. Stop `parallaize-caddy.service` first, then `parallaize.service`.
 3. Install the new package.
-4. Start `parallaize.service`, validate `/api/health`, then start `parallaize-caddy.service`.
+4. Start `parallaize.service`, validate the authenticated `/api/health` endpoint, then start `parallaize-caddy.service`.
 5. If the upgrade fails, reinstall the previous package and restore the exported state.
 
 Use the packaged CLI for JSON/PostgreSQL state backups:

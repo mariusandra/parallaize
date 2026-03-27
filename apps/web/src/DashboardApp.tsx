@@ -7975,6 +7975,8 @@ function providerStatusTitle(provider: DashboardSummary["provider"]): string {
         ? "CLI missing"
         : provider.hostStatus === "daemon-unreachable"
           ? "Daemon unreachable"
+          : provider.hostStatus === "daemon-conflict"
+            ? "Daemon conflict"
           : "Error";
 
   return `${capitalizeWord(provider.kind)} ${status}. ${provider.detail}`;
@@ -7988,6 +7990,8 @@ function providerStatusDotClassName(provider: DashboardSummary["provider"]): str
     case "missing-cli":
     case "daemon-unreachable":
       return "workspace-rail__status-dot--warning";
+    case "daemon-conflict":
+      return "workspace-rail__status-dot--error";
     default:
       return "workspace-rail__status-dot--error";
   }

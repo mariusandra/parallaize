@@ -26,6 +26,7 @@ const archMatrix = {
     debDepends: [
       "bash",
       "incus",
+      "btrfs-progs",
       "attr",
       "genisoimage",
       "ovmf",
@@ -39,6 +40,7 @@ const archMatrix = {
     debDepends: [
       "bash",
       "incus",
+      "btrfs-progs",
       "attr",
       "genisoimage",
       "qemu-efi-aarch64",

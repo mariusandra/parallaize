@@ -47,6 +47,7 @@ const VM_DISK_WARNING_FREE_BYTES = 4 * BYTES_PER_GIB;
 const VM_DISK_CRITICAL_FREE_BYTES = BYTES_PER_GIB;
 const INCUS_PROBE_TIMEOUT_MS = 1_000;
 const HOST_NETWORK_PROBE_CACHE_MS = 60_000;
+const HOST_DAEMON_PROBE_CACHE_MS = 60_000;
 const HOST_NETWORK_PROBE_TIMEOUT_MS = 2_500;
 const PARALLAIZE_DMZ_ACL_NAME = "parallaize-dmz";
 const LEGACY_PARALLAIZE_DMZ_ACL_NAME = "parallaize-airgap";
@@ -74,6 +75,7 @@ export interface CreateProviderOptions {
   commandRunner?: IncusCommandRunner;
   guestPortProbe?: GuestPortProbe;
   hostNetworkProbe?: HostNetworkProbe;
+  hostDaemonProbe?: HostDaemonProbe;
   templatePublishHeartbeatMs?: number;
   templateCompression?: IncusImageCompression;
 }
@@ -231,6 +233,24 @@ interface HostNetworkDiagnostic {
   status: "ready" | "unreachable" | "unknown";
   detail: string | null;
   nextSteps: string[];
+}
+
+interface HostDaemonProbe {
+  probe(): HostDaemonDiagnostic;
+}
+
+interface HostDaemonDiagnostic {
+  status: "ready" | "conflict" | "unknown";
+  detail: string | null;
+  nextSteps: string[];
+}
+
+interface IncusDaemonOwnershipSnapshot {
+  processLines: string[];
+  socketActive: boolean | null;
+  socketEnabled: boolean | null;
+  serviceActive: boolean | null;
+  serviceEnabled: boolean | null;
 }
 
 interface IncusListInstance {
@@ -660,6 +680,7 @@ class IncusProvider implements DesktopProvider {
   private readonly storagePool: string | null;
   private readonly guestPortProbe: GuestPortProbe;
   private readonly hostNetworkProbe: HostNetworkProbe;
+  private readonly hostDaemonProbe: HostDaemonProbe;
   private readonly templatePublishHeartbeatMs: number;
   private readonly templateCompression: IncusImageCompression | null;
   private telemetrySnapshotAt = 0;
@@ -668,6 +689,12 @@ class IncusProvider implements DesktopProvider {
   private readonly guestDesktopBootstrapAttemptAt = new Map<string, number>();
   private hostNetworkDiagnosticAt = 0;
   private hostNetworkDiagnostic: HostNetworkDiagnostic = {
+    status: "unknown",
+    detail: null,
+    nextSteps: [],
+  };
+  private hostDaemonDiagnosticAt = 0;
+  private hostDaemonDiagnostic: HostDaemonDiagnostic = {
     status: "unknown",
     detail: null,
     nextSteps: [],
@@ -695,6 +722,9 @@ class IncusProvider implements DesktopProvider {
     this.hostNetworkProbe =
       options.hostNetworkProbe ??
       (options.commandRunner ? new NoopHostNetworkProbe() : new ShellHostNetworkProbe());
+    this.hostDaemonProbe =
+      options.hostDaemonProbe ??
+      (options.commandRunner ? new NoopHostDaemonProbe() : new ShellHostDaemonProbe());
     this.templatePublishHeartbeatMs = Math.max(
       options.templatePublishHeartbeatMs ?? DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS,
       50,
@@ -1707,6 +1737,7 @@ class IncusProvider implements DesktopProvider {
       this.project,
       probe,
       this.getHostNetworkDiagnostic(),
+      this.getHostDaemonDiagnostic(),
     );
   }
 
@@ -1730,6 +1761,28 @@ class IncusProvider implements DesktopProvider {
     }
 
     return this.hostNetworkDiagnostic;
+  }
+
+  private getHostDaemonDiagnostic(): HostDaemonDiagnostic {
+    const now = Date.now();
+
+    if (now - this.hostDaemonDiagnosticAt < HOST_DAEMON_PROBE_CACHE_MS) {
+      return this.hostDaemonDiagnostic;
+    }
+
+    this.hostDaemonDiagnosticAt = now;
+
+    try {
+      this.hostDaemonDiagnostic = this.hostDaemonProbe.probe();
+    } catch {
+      this.hostDaemonDiagnostic = {
+        status: "unknown",
+        detail: null,
+        nextSteps: [],
+      };
+    }
+
+    return this.hostDaemonDiagnostic;
   }
 
   private assertLaunchSource(template: EnvironmentTemplate): void {
@@ -2564,6 +2617,16 @@ class NoopHostNetworkProbe implements HostNetworkProbe {
   }
 }
 
+class NoopHostDaemonProbe implements HostDaemonProbe {
+  probe(): HostDaemonDiagnostic {
+    return {
+      status: "unknown",
+      detail: null,
+      nextSteps: [],
+    };
+  }
+}
+
 class ShellHostNetworkProbe implements HostNetworkProbe {
   probe(): HostNetworkDiagnostic {
     const hostEgress = this.runCheck("exec 3<>/dev/tcp/1.1.1.1/443");
@@ -2622,6 +2685,23 @@ class ShellHostNetworkProbe implements HostNetworkProbe {
   }
 }
 
+class ShellHostDaemonProbe implements HostDaemonProbe {
+  probe(): HostDaemonDiagnostic {
+    const processResult = spawnSync("bash", ["-lc", "pgrep -af '[i]ncusd' || true"], {
+      encoding: "utf8",
+      timeout: HOST_NETWORK_PROBE_TIMEOUT_MS,
+    });
+
+    return diagnoseIncusDaemonConflict({
+      processLines: parseIncusdProcessLines(processResult.stdout),
+      socketActive: readSystemdUnitState("incus.socket", "ActiveState"),
+      socketEnabled: readSystemdUnitState("incus.socket", "UnitFileState"),
+      serviceActive: readSystemdUnitState("incus.service", "ActiveState"),
+      serviceEnabled: readSystemdUnitState("incus.service", "UnitFileState"),
+    });
+  }
+}
+
 function buildCommandReply(command: string, currentWorkspace: string): string {
   if (command.startsWith("cd ")) {
     return `cwd: ${command.slice(3).trim() || currentWorkspace}`;
@@ -2673,7 +2753,23 @@ function buildIncusProviderState(
   project: string | null,
   result: CommandResult,
   hostNetworkDiagnostic: HostNetworkDiagnostic,
+  hostDaemonDiagnostic: HostDaemonDiagnostic,
 ): ProviderState {
+  if (hostDaemonDiagnostic.status === "conflict") {
+    return {
+      kind: "incus",
+      available: result.status === 0,
+      detail:
+        hostDaemonDiagnostic.detail ??
+        "Mixed Incus daemon ownership detected on the host.",
+      hostStatus: "daemon-conflict",
+      binaryPath: incusBinary,
+      project,
+      desktopTransport: "novnc",
+      nextSteps: hostDaemonDiagnostic.nextSteps,
+    };
+  }
+
   if (result.status === 0) {
     if (hostNetworkDiagnostic.status === "unreachable") {
       return {
@@ -4706,6 +4802,12 @@ function buildProbeNextSteps(status: ProviderState["hostStatus"]): string[] {
         "Initialize storage and networking with `flox activate -d . -- incus admin init --minimal` if this is the first run.",
         "Restart the dashboard with PARALLAIZE_PROVIDER=incus once `incus list --format json` succeeds.",
       ];
+    case "daemon-conflict":
+      return [
+        "Pick one owner for `/var/lib/incus/unix.socket`: either the distro `incus` units or a manual Flox `incusd`, not both.",
+        "If this host should stay distro-managed, stop the Flox daemon and remove any manual startup wrapper.",
+        "If this host should stay Flox-managed, disable `incus.socket` and `incus.service` before starting `incusd` manually.",
+      ];
     case "error":
       return [
         "Run `flox activate -d . -- incus list --format json` on the host and resolve the reported error.",
@@ -4715,6 +4817,135 @@ function buildProbeNextSteps(status: ProviderState["hostStatus"]): string[] {
     default:
       return [];
   }
+}
+
+function diagnoseIncusDaemonConflict(
+  snapshot: IncusDaemonOwnershipSnapshot,
+): HostDaemonDiagnostic {
+  const ownerKinds = new Set(
+    snapshot.processLines.map(classifyIncusdOwner).filter((owner) => owner !== "unknown"),
+  );
+  const systemdIncusManaged =
+    snapshot.socketActive === true ||
+    snapshot.socketEnabled === true ||
+    snapshot.serviceActive === true ||
+    snapshot.serviceEnabled === true;
+  const hasFloxProcess = snapshot.processLines.some(
+    (line) => classifyIncusdOwner(line) === "flox",
+  );
+
+  if (ownerKinds.size > 1 || (systemdIncusManaged && hasFloxProcess)) {
+    const systemdState = [
+      snapshot.socketActive === true ? "incus.socket active" : null,
+      snapshot.socketEnabled === true ? "incus.socket enabled" : null,
+      snapshot.serviceActive === true ? "incus.service active" : null,
+      snapshot.serviceEnabled === true ? "incus.service enabled" : null,
+    ].filter((entry): entry is string => entry !== null);
+    const systemdSummary =
+      systemdState.length > 0
+        ? systemdState.join(", ")
+        : "no active or enabled incus systemd units";
+    const ownerSummary =
+      snapshot.processLines.length > 0
+        ? snapshot.processLines
+            .map((line) => `${describeIncusdOwner(line)}: ${summarizeProcessCommand(line)}`)
+            .join("; ")
+        : "no running incusd process was detected";
+
+    return {
+      status: "conflict",
+      detail:
+        `Mixed Incus daemon ownership detected. ${systemdSummary}; ${ownerSummary}. ` +
+        "Pick one owner for `/var/lib/incus/unix.socket` before treating this host as supported.",
+      nextSteps: [
+        "If this host should stay distro-managed, stop any manual Flox `incusd` process and remove its startup wrapper.",
+        "If this host should stay Flox-managed, disable `incus.socket` and `incus.service` before starting `incusd` manually.",
+        "Re-run `systemctl status incus.socket incus.service --no-pager`, `pgrep -af incusd`, and `ss -lx | grep /var/lib/incus/unix.socket` to confirm a single owner.",
+      ],
+    };
+  }
+
+  return {
+    status: "ready",
+    detail: null,
+    nextSteps: [],
+  };
+}
+
+function parseIncusdProcessLines(output: string): string[] {
+  return output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function readSystemdUnitState(
+  unit: string,
+  property: "ActiveState" | "UnitFileState",
+): boolean | null {
+  const result = spawnSync("systemctl", ["show", "--property", property, "--value", unit], {
+    encoding: "utf8",
+    timeout: HOST_NETWORK_PROBE_TIMEOUT_MS,
+  });
+
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+
+  const value = result.stdout.trim();
+
+  if (property === "ActiveState") {
+    return value === "active";
+  }
+
+  return value === "enabled" || value === "enabled-runtime";
+}
+
+function classifyIncusdOwner(commandLine: string): "flox" | "distro" | "other" | "unknown" {
+  const normalized = commandLine.toLowerCase();
+
+  if (!normalized.includes("incusd")) {
+    return "unknown";
+  }
+
+  if (normalized.includes("/.flox/") || normalized.includes("/flox/")) {
+    return "flox";
+  }
+
+  if (
+    normalized.includes("/usr/") ||
+    normalized.includes("/snap/") ||
+    normalized.includes("/var/lib/snapd/")
+  ) {
+    return "distro";
+  }
+
+  return "other";
+}
+
+function describeIncusdOwner(commandLine: string): string {
+  switch (classifyIncusdOwner(commandLine)) {
+    case "flox":
+      return "Flox incusd";
+    case "distro":
+      return "distro incusd";
+    case "other":
+      return "manual incusd";
+    default:
+      return "unknown owner";
+  }
+}
+
+function summarizeProcessCommand(commandLine: string): string {
+  const firstSpaceIndex = commandLine.indexOf(" ");
+  const command =
+    firstSpaceIndex === -1 ? commandLine : commandLine.slice(firstSpaceIndex + 1).trim();
+
+  if (command.length <= 120) {
+    return command;
+  }
+
+  return `${command.slice(0, 117)}...`;
 }
 
 function normalizeVmNetworkMode(mode: VmNetworkMode | undefined): VmNetworkMode {

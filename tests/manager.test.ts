@@ -1729,6 +1729,39 @@ test("incus provider treats a timed-out readiness probe as daemon-unreachable", 
   assert.match(provider.state.detail, /readiness probe timed out/i);
 });
 
+test("incus provider reports mixed Flox and distro daemon ownership explicitly", () => {
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+    hostDaemonProbe: {
+      probe() {
+        return {
+          status: "conflict",
+          detail:
+            "Mixed Incus daemon ownership detected. incus.socket enabled; Flox incusd: /home/marius/.flox/bin/incusd --group sudo.",
+          nextSteps: [
+            "Disable `incus.socket` before running Flox `incusd` manually.",
+          ],
+        };
+      },
+    },
+  });
+
+  assert.equal(provider.state.available, true);
+  assert.equal(provider.state.hostStatus, "daemon-conflict");
+  assert.match(provider.state.detail, /mixed incus daemon ownership detected/i);
+  assert.deepEqual(provider.state.nextSteps, [
+    "Disable `incus.socket` before running Flox `incusd` manually.",
+  ]);
+});
+
 test("incus provider applies a managed DMZ ACL and NIC override for dmz VMs", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0100-dmz";
