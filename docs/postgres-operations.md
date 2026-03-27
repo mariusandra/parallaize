@@ -101,6 +101,17 @@ curl http://127.0.0.1:3000/api/health
 8. Restart `parallaize.service` and validate that VMs, templates, snapshots, and jobs are still present.
 9. If Caddy is in use, start or restart `parallaize-caddy.service` only after the control plane health check passes.
 
+Useful packaged-host commands for that run:
+
+```bash
+sudo apt-get install -y postgresql
+sudo -u postgres createuser --createdb --login parallaize
+sudo -u postgres createdb --owner=parallaize parallaize
+sudo systemctl restart parallaize.service
+parallaize-persistence export --from postgres --output /var/backups/parallaize-state.json
+parallaize-persistence import --to postgres --input /var/backups/parallaize-state.json
+```
+
 ## Upgrade ordering
 
 For packaged upgrades, use this order:
@@ -114,3 +125,10 @@ For packaged upgrades, use this order:
 7. Start `parallaize-caddy.service`.
 
 If the new build fails, reinstall the previous package, import the saved export, and repeat the service start order above.
+
+That means the packaged PostgreSQL validation should explicitly cover four things every time:
+
+- initial boot with `PARALLAIZE_PERSISTENCE=postgres`
+- export before upgrade
+- import or restore after upgrade
+- service restart ordering: `parallaize.service` healthy first, `parallaize-caddy.service` second

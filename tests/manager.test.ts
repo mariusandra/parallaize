@@ -2489,6 +2489,89 @@ test("incus provider reads VM logs from the console stream and falls back to inf
   assert.match(fallbackLogs.content, /Agent connected/);
 });
 
+test("incus provider parses guest disk usage snapshots and flags low free space", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0200-disk-usage";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        calls.push(args);
+
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        if (args[0] === "exec" && args[1] === instanceName) {
+          return ok(
+            JSON.stringify({
+              root: {
+                path: "/",
+                mountPath: "/",
+                filesystem: "/dev/sda2",
+                sizeBytes: 64 * 1024 ** 3,
+                usedBytes: 52 * 1024 ** 3,
+                availableBytes: 12 * 1024 ** 3,
+                usedPercent: 81,
+              },
+              workspace: {
+                path: "/srv/workspaces/alpha",
+                mountPath: "/srv/workspaces",
+                filesystem: "/dev/sdb1",
+                sizeBytes: 20 * 1024 ** 3,
+                usedBytes: 18 * 1024 ** 3,
+                availableBytes: 2 * 1024 ** 3,
+                usedPercent: 90,
+              },
+            }),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0200",
+    name: "disk-usage",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 200,
+    activeWindow: "browser",
+    workspacePath: "/srv/workspaces/alpha",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const snapshot = await provider.readVmDiskUsage?.(vm);
+  assert.ok(snapshot);
+  assert.equal(snapshot?.status, "warning");
+  assert.equal(snapshot?.workspace?.mountPath, "/srv/workspaces");
+  assert.equal(snapshot?.workspace?.availableBytes, 2 * 1024 ** 3);
+  assert.match(snapshot?.detail ?? "", /drops under 1 GB free/);
+
+  const execCall = calls.find((args) => args[0] === "exec" && args[1] === instanceName);
+  assert.ok(execCall);
+  const script = execCall?.at(-1) ?? "";
+  assert.match(script, /df", "-B1", "-P"/);
+  assert.match(script, /workspace_path = "\/srv\/workspaces\/alpha"/);
+});
+
 test("incus provider emits Python None for the default file browse request", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0200-file-browser";

@@ -48,6 +48,7 @@ import type {
   UpdateVmInput,
   UpdateVmNetworkInput,
   VmDetail,
+  VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmFileEntry,
   VmInstance,
@@ -303,6 +304,7 @@ const sidepanelMaxWidth = 560;
 const sidepanelCollapseSnapWidth = Math.round(sidepanelMinWidth / 2);
 const sidepanelCompactBreakpoint = 1120;
 const vmLogsPollIntervalMs = 4000;
+const vmDiskUsagePollIntervalMs = 30_000;
 
 const defaultDesktopResolutionPreference: DesktopResolutionPreference = {
   mode: "viewport",
@@ -344,6 +346,9 @@ export function DashboardApp(): JSX.Element {
   const [vmTouchedFiles, setVmTouchedFiles] = useState<VmTouchedFilesSnapshot | null>(null);
   const [vmTouchedFilesLoading, setVmTouchedFilesLoading] = useState(false);
   const [vmTouchedFilesError, setVmTouchedFilesError] = useState<string | null>(null);
+  const [vmDiskUsage, setVmDiskUsage] = useState<VmDiskUsageSnapshot | null>(null);
+  const [vmDiskUsageLoading, setVmDiskUsageLoading] = useState(false);
+  const [vmDiskUsageError, setVmDiskUsageError] = useState<string | null>(null);
   const [sidepanelCollapsedByVm, setSidepanelCollapsedByVm] = useState<
     Record<string, true>
   >(() => readSidepanelCollapsedByVm());
@@ -945,30 +950,42 @@ export function DashboardApp(): JSX.Element {
       setVmTouchedFiles(null);
       setVmTouchedFilesError(null);
       setVmTouchedFilesLoading(false);
+      setVmDiskUsage(null);
+      setVmDiskUsageError(null);
+      setVmDiskUsageLoading(false);
       return;
     }
 
     let cancelled = false;
+    let refreshTimer: number | null = null;
     const vmId = detail.vm.id;
 
     setVmFileBrowserLoading(true);
     setVmFileBrowserError(null);
     setVmTouchedFilesLoading(true);
     setVmTouchedFilesError(null);
+    setVmDiskUsageLoading(true);
+    setVmDiskUsageError(null);
 
-    void Promise.all([
-      fetchJson<VmFileBrowserSnapshot>(`/api/vms/${vmId}/files`),
-      fetchJson<VmTouchedFilesSnapshot>(`/api/vms/${vmId}/files/touched`),
-    ])
-      .then(([browserSnapshot, touchedSnapshot]) => {
+    const loadSnapshots = async (): Promise<void> => {
+      try {
+        const [browserSnapshot, touchedSnapshot, diskUsageSnapshot] = await Promise.all([
+          fetchJson<VmFileBrowserSnapshot>(`/api/vms/${vmId}/files`),
+          fetchJson<VmTouchedFilesSnapshot>(`/api/vms/${vmId}/files/touched`),
+          fetchJson<VmDiskUsageSnapshot>(`/api/vms/${vmId}/disk-usage`),
+        ]);
+
         if (cancelled) {
           return;
         }
 
         setVmFileBrowser(browserSnapshot);
         setVmTouchedFiles(touchedSnapshot);
-      })
-      .catch((error) => {
+        setVmDiskUsage(diskUsageSnapshot);
+        setVmFileBrowserError(null);
+        setVmTouchedFilesError(null);
+        setVmDiskUsageError(null);
+      } catch (error) {
         if (error instanceof AuthRequiredError) {
           requireLogin();
           return;
@@ -981,20 +998,72 @@ export function DashboardApp(): JSX.Element {
         const message = errorMessage(error);
         setVmFileBrowserError(message);
         setVmTouchedFilesError(message);
-      })
-      .finally(() => {
+        setVmDiskUsageError(message);
+      } finally {
         if (cancelled) {
           return;
         }
 
         setVmFileBrowserLoading(false);
         setVmTouchedFilesLoading(false);
-      });
+        setVmDiskUsageLoading(false);
+      }
+    };
+
+    const refreshDiskUsage = async (): Promise<void> => {
+      setVmDiskUsageLoading(true);
+
+      try {
+        const diskUsageSnapshot = await fetchJson<VmDiskUsageSnapshot>(`/api/vms/${vmId}/disk-usage`);
+
+        if (cancelled) {
+          return;
+        }
+
+        setVmDiskUsage(diskUsageSnapshot);
+        setVmDiskUsageError(null);
+      } catch (error) {
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setVmDiskUsageError(errorMessage(error));
+      } finally {
+        if (cancelled) {
+          return;
+        }
+
+        setVmDiskUsageLoading(false);
+      }
+
+      if (!cancelled && detail.vm.status === "running") {
+        refreshTimer = window.setTimeout(() => {
+          void refreshDiskUsage();
+        }, vmDiskUsagePollIntervalMs);
+      }
+    };
+
+    void loadSnapshots().then(() => {
+      if (!cancelled && detail.vm.status === "running") {
+        refreshTimer = window.setTimeout(() => {
+          void refreshDiskUsage();
+        }, vmDiskUsagePollIntervalMs);
+      }
+    });
 
     return () => {
       cancelled = true;
+
+      if (refreshTimer !== null) {
+        window.clearTimeout(refreshTimer);
+      }
     };
-  }, [authState, detail?.vm.id, detail?.vm.workspacePath]);
+  }, [authState, detail?.vm.id, detail?.vm.workspacePath, detail?.vm.status]);
 
   useEffect(() => {
     if (authState !== "ready" || !vmLogsDialog) {
@@ -1721,6 +1790,9 @@ export function DashboardApp(): JSX.Element {
     setVmTouchedFiles(null);
     setVmTouchedFilesError(null);
     setVmTouchedFilesLoading(false);
+    setVmDiskUsage(null);
+    setVmDiskUsageError(null);
+    setVmDiskUsageLoading(false);
     setNotice(null);
     setBusyLabel(null);
     setShellMenuOpen(false);
@@ -3743,6 +3815,9 @@ export function DashboardApp(): JSX.Element {
                 collapsed={effectiveSidePanelCollapsed}
                 commandDraft={commandDraft}
                 detail={currentDetail}
+                diskUsage={vmDiskUsage}
+                diskUsageError={vmDiskUsageError}
+                diskUsageLoading={vmDiskUsageLoading}
                 fileBrowser={vmFileBrowser}
                 fileBrowserError={vmFileBrowserError}
                 fileBrowserLoading={vmFileBrowserLoading}
@@ -5298,6 +5373,9 @@ interface WorkspaceSidepanelProps {
   collapsed: boolean;
   commandDraft: string;
   detail: VmDetail | null;
+  diskUsage: VmDiskUsageSnapshot | null;
+  diskUsageError: string | null;
+  diskUsageLoading: boolean;
   forwardDraft: ForwardDraft;
   fileBrowser: VmFileBrowserSnapshot | null;
   fileBrowserError: string | null;
@@ -5556,6 +5634,9 @@ function WorkspaceSidepanel({
   collapsed,
   commandDraft,
   detail,
+  diskUsage,
+  diskUsageError,
+  diskUsageLoading,
   fileBrowser,
   fileBrowserError,
   fileBrowserLoading,
@@ -5661,6 +5742,16 @@ function WorkspaceSidepanel({
 
               <div className="chip-row">
                 <span className="surface-pill">{detail.template?.name ?? "Unlinked template"}</span>
+                {diskUsage && isDiskUsageAlert(diskUsage) ? (
+                  <span
+                    className={joinClassNames(
+                      "surface-pill",
+                      "surface-pill--warning",
+                    )}
+                  >
+                    {diskUsageChipLabel(diskUsage)}
+                  </span>
+                ) : null}
               </div>
               <div className="sidepanel-summary__toolbar">
                 <button
@@ -5916,6 +6007,34 @@ function WorkspaceSidepanel({
                     DMZ
                   </button>
                 </div>
+              </div>
+            </SidepanelSection>
+
+            <SidepanelSection title="Disk" defaultOpen>
+              <div className="disk-usage-panel">
+                <div className="disk-usage-panel__copy">
+                  <p
+                    className={joinClassNames(
+                      "disk-usage-panel__summary",
+                      diskUsage && isDiskUsageAlert(diskUsage)
+                        ? "disk-usage-panel__summary--warning"
+                        : "",
+                    )}
+                  >
+                    {diskUsage
+                      ? diskUsageSummaryText(diskUsage)
+                      : diskUsageLoading
+                        ? "Inspecting guest filesystems..."
+                        : "Disk usage appears once the guest answers the probe."}
+                  </p>
+                  {diskUsage ? (
+                    <p className="disk-usage-panel__meta">
+                      Checked {formatTimestamp(diskUsage.checkedAt)}
+                    </p>
+                  ) : null}
+                </div>
+
+                {diskUsageError ? <p className="empty-copy">{diskUsageError}</p> : null}
               </div>
             </SidepanelSection>
 
@@ -7598,6 +7717,72 @@ function formatVmFileSize(sizeBytes: number | null): string {
   }
 
   return `${trimTrailingZeros((sizeBytes / (1024 * 1024)).toFixed(1))} MB`;
+}
+
+function isDiskUsageAlert(snapshot: VmDiskUsageSnapshot): boolean {
+  return snapshot.status === "warning" || snapshot.status === "critical";
+}
+
+function diskUsageChipLabel(snapshot: VmDiskUsageSnapshot): string {
+  switch (snapshot.status) {
+    case "warning":
+      return "Disk low";
+    case "critical":
+      return "Disk critical";
+    default:
+      return "Disk notice";
+  }
+}
+
+function diskUsageSummaryText(snapshot: VmDiskUsageSnapshot): string {
+  const focus = resolveDiskUsageFocus(snapshot);
+
+  if (!focus || focus.availableBytes === null) {
+    return snapshot.detail;
+  }
+
+  const subject = focus.path === "/" ? "root filesystem" : focus.path;
+  return `${formatBytes(focus.availableBytes)} free on ${subject}`;
+}
+
+function resolveDiskUsageFocus(
+  snapshot: VmDiskUsageSnapshot,
+): VmDiskUsageSnapshot["root"] {
+  if (!snapshot.root) {
+    return snapshot.workspace;
+  }
+
+  if (!snapshot.workspace) {
+    return snapshot.root;
+  }
+
+  const rootAvailable = snapshot.root.availableBytes ?? Number.POSITIVE_INFINITY;
+  const workspaceAvailable = snapshot.workspace.availableBytes ?? Number.POSITIVE_INFINITY;
+  return workspaceAvailable <= rootAvailable ? snapshot.workspace : snapshot.root;
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) {
+    return "Unknown";
+  }
+
+  if (value < 1024) {
+    return `${value} B`;
+  }
+
+  if (value < 1024 ** 2) {
+    return `${trimTrailingZeros((value / 1024).toFixed(1))} KiB`;
+  }
+
+  if (value < 1024 ** 3) {
+    return `${trimTrailingZeros((value / (1024 ** 2)).toFixed(1))} MiB`;
+  }
+
+  if (value < 1024 ** 4) {
+    return `${trimTrailingZeros((value / (1024 ** 3)).toFixed(1))} GiB`;
+  }
+
+  return `${trimTrailingZeros((value / (1024 ** 4)).toFixed(1))} TiB`;
 }
 
 function formatVmFileEntryMeta(entry: VmFileEntry): string {

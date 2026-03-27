@@ -31,6 +31,7 @@ import type {
   UpdateVmForwardedPortsInput,
   UpdateVmNetworkInput,
   VmDetail,
+  VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmCommandResult,
   VmInstance,
@@ -271,6 +272,44 @@ export class DesktopManager {
     const vm = this.requireVm(state, vmId);
     this.ensureActiveProvider(vm);
     return this.provider.readVmTouchedFiles(vm);
+  }
+
+  async getVmDiskUsage(vmId: string): Promise<VmDiskUsageSnapshot> {
+    this.syncProviderState();
+    const state = this.store.load();
+    const vm = this.requireVm(state, vmId);
+
+    if (vm.status !== "running") {
+      return {
+        vmId: vm.id,
+        workspacePath: vm.workspacePath,
+        checkedAt: nowIso(),
+        status: "unavailable",
+        detail: "Guest disk usage is only available while the workspace is running.",
+        warningThresholdBytes: 4 * 1024 ** 3,
+        criticalThresholdBytes: 1024 ** 3,
+        root: null,
+        workspace: null,
+      };
+    }
+
+    this.ensureActiveProvider(vm);
+
+    if (!this.provider.readVmDiskUsage) {
+      return {
+        vmId: vm.id,
+        workspacePath: vm.workspacePath,
+        checkedAt: nowIso(),
+        status: "unavailable",
+        detail: "The active provider does not expose guest disk usage probes.",
+        warningThresholdBytes: 4 * 1024 ** 3,
+        criticalThresholdBytes: 1024 ** 3,
+        root: null,
+        workspace: null,
+      };
+    }
+
+    return this.provider.readVmDiskUsage(vm);
   }
 
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {

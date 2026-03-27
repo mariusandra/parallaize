@@ -31,6 +31,7 @@ import type {
   UpdateVmForwardedPortsInput,
   UpdateVmNetworkInput,
   VmDetail,
+  VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmLogsSnapshot,
   VmResolutionControlSnapshot,
@@ -225,6 +226,14 @@ const server = createServer(async (request, response) => {
       return writeJson<VmLogsSnapshot>(response, 200, {
         ok: true,
         data: await manager.getVmLogs(vmLogsMatch[1]),
+      });
+    }
+
+    const vmDiskUsageMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/disk-usage$/);
+    if (method === "GET" && vmDiskUsageMatch) {
+      return writeJson<VmDiskUsageSnapshot>(response, 200, {
+        ok: true,
+        data: await manager.getVmDiskUsage(vmDiskUsageMatch[1]),
       });
     }
 

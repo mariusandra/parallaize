@@ -109,6 +109,29 @@ Optional Incus tuning:
 - Set `PARALLAIZE_INCUS_STORAGE_POOL` if you want new VMs and clones to land on a faster `lvm`, `btrfs`, or `zfs` pool instead of a slow `dir` pool.
 - Set `PARALLAIZE_INCUS_PROJECT` if you want Parallaize isolated inside a dedicated Incus project.
 
+## Hostname-based forwarded services
+
+Every forwarded guest service gets two public entry points:
+
+- a path route such as `/vm/<vm-id>/forwards/<forward-id>/`
+- a hostname route built from `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE` as `<forward-name>--<vm-id>.<base>`
+
+Path routes do not need DNS. Hostname routes do.
+
+Practical expectations:
+
+- `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=localhost` is the local-debug path. Browsers can resolve names like `app-ui--vm-0001.localhost` back to loopback, so opening the dashboard on `127.0.0.1:3000` or through the example Caddy front door on `:8080` is enough.
+- For a real hostname base such as `workspaces.example.com`, publish wildcard DNS for that base so `*.workspaces.example.com` resolves to the Parallaize front door.
+- The bundled `infra/Caddyfile` listens on `:8080` and forwards requests to `127.0.0.1:3000` without requiring per-host config, so once wildcard DNS points at that port, host-header routing works through the same front door as the rest of the app.
+- If you do not want wildcard DNS, stay on the path routes. They are the compatibility fallback and do not depend on host-header routing.
+
+Tailscale-specific expectation:
+
+- Tailscale MagicDNS gives stable names to Tailscale devices themselves, for example `host-name.tailnet-name.ts.net`.
+- Parallaize-generated forwarded-service names are extra subdomains under your configured base. Setting `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE` to a Tailscale device FQDN does not create matching per-forward MagicDNS records.
+- If operators are reaching Parallaize over Tailscale only, the safe default is to keep using the path-based forwarded-service URLs on the device's normal tailnet name.
+- If you want hostname-based forwarded services while staying on Tailscale, bring your own wildcard DNS zone that points at the Tailscale-reachable front door and keep `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE` on that wildcard-managed zone instead of on the raw `ts.net` device name.
+
 ## First live start
 
 Start the control plane:

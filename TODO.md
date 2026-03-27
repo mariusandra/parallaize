@@ -20,8 +20,6 @@ Completed implementation details now live in:
 - [ ] Validate the signed Ubuntu 24.04 `amd64` APT archive path on a clean host, including initial key bootstrap, `apt-get install parallaize`, and `apt-get install --only-upgrade parallaize`.
 - [ ] Validate the packaged PostgreSQL deployment path end to end, including install, upgrade, export, restore, and packaged service restart ordering.
 - [ ] Validate the generated `arm64` `.deb` on a real `arm64` Incus and QEMU host before promoting it beyond experimental.
-- [ ] Document wildcard DNS and Tailscale expectations for hostname-based forwarded-service routing.
-- [ ] Surface actual guest disk usage and low-space warnings before Ubuntu desktops hit the last-gigabyte state.
 
 Open validation note:
 

@@ -182,6 +182,55 @@ test("file browser defaults to the ubuntu home and downloads mock guest files", 
   assert.match(downloadResponse.body, /Mock workspace/);
 });
 
+test("disk usage endpoint reports guest filesystem usage for the selected VM", async (context) => {
+  const { port } = await startServer(context, {
+    adminPassword: "",
+    tempDirPrefix: "parallaize-server-disk-usage-",
+  });
+
+  const diskUsageResponse = await sendRequest(port, {
+    path: "/api/vms/vm-0001/disk-usage",
+    method: "GET",
+    headers: {
+      accept: "application/json",
+    },
+  });
+  assert.equal(diskUsageResponse.statusCode, 200);
+
+  const diskUsagePayload = JSON.parse(diskUsageResponse.body) as {
+    ok: boolean;
+    data: {
+      vmId: string;
+      workspacePath: string;
+      status: string;
+      detail: string;
+      root: {
+        mountPath: string;
+        path: string;
+        filesystem: string | null;
+      } | null;
+      workspace: {
+        mountPath: string;
+        path: string;
+        filesystem: string | null;
+      } | null;
+    };
+  };
+
+  assert.equal(diskUsagePayload.ok, true);
+  assert.equal(diskUsagePayload.data.vmId, "vm-0001");
+  assert.equal(diskUsagePayload.data.workspacePath, "/srv/workspaces/alpha-workbench");
+  assert.equal(diskUsagePayload.data.status, "ready");
+  assert.match(diskUsagePayload.data.detail, /free on the workspace path/i);
+  assert.equal(diskUsagePayload.data.root?.mountPath, "/");
+  assert.equal(diskUsagePayload.data.root?.path, "/");
+  assert.equal(diskUsagePayload.data.workspace?.mountPath, "/");
+  assert.equal(
+    diskUsagePayload.data.workspace?.path,
+    "/srv/workspaces/alpha-workbench",
+  );
+});
+
 test("protected APIs and event streams require a session cookie when admin auth is enabled", async (context) => {
   const { port } = await startServer(context, {
     adminPassword: "change-me",

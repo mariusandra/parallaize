@@ -77,6 +77,14 @@ Other useful env vars:
 - `PARALLAIZE_INCUS_STORAGE_POOL`: storage pool for new VMs and clones
 - `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE`: hostname suffix for forwarded services, defaults to `localhost`
 
+Forwarded guest HTTP and WebSocket services always get a path route such as
+`/vm/<vm-id>/forwards/<forward-id>/`. Hostname-based routes only work when the
+generated hostnames resolve in the browser. With the default `localhost` base,
+Parallaize emits names like `app-ui--vm-0001.localhost`, which is good for
+local testing. For remote hostnames, provide wildcard DNS for the chosen base
+and see [docs/live-incus-setup.md](docs/live-incus-setup.md) for the Tailscale
+and front-door expectations.
+
 An example runtime file lives at [infra/parallaize.env.example](infra/parallaize.env.example).
 
 ## Persistence

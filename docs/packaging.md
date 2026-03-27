@@ -237,6 +237,29 @@ The clean distro-managed validation still needs to be repeated on a host that is
 - fully managed by the distro `incus` package, or
 - still using the manual Flox daemon without also enabling the distro socket-activated units
 
+## Clean Host Validation Checklist
+
+Use this run sheet when re-validating the supported Ubuntu 24.04 `amd64` packaged path on a fresh host.
+
+1. Choose one Incus ownership model before installing Parallaize:
+   - distro-managed: install Ubuntu's `incus` package and do not manually start Flox `incusd`
+   - manual Flox daemon: keep using the Flox `incusd`, but do not enable the distro `incus.socket` or `incus.service`
+2. Confirm there is only one daemon owner for `/var/lib/incus/unix.socket`:
+
+```bash
+systemctl status incus.socket incus.service --no-pager
+pgrep -af incusd
+sudo ss -lx | grep /var/lib/incus/unix.socket
+```
+
+3. Install the package or use the signed archive bootstrap path from [apt-repository.md](apt-repository.md).
+4. Rotate `/etc/parallaize/parallaize.env` credentials before starting services.
+5. Start `parallaize.service`, validate `curl http://127.0.0.1:3000/api/health`, then start `parallaize-caddy.service` if it is part of the target deployment.
+6. Launch a VM, snapshot it, clone it, delete the clone, and confirm forwarded-service routes still work.
+7. Record which Incus daemon model the host used in the validation notes so the result is not ambiguous later.
+
+If step 2 shows both a manually started Flox daemon and the distro socket-activated units on the same host, stop and fix that first. That mixed state is exactly the ambiguity still blocking the support claim.
+
 ## Upgrade Path
 
 Current upgrade contract:

@@ -324,6 +324,30 @@ export interface VmTouchedFilesSnapshot {
   generatedAt: string;
 }
 
+export type VmDiskUsageStatus = "ready" | "warning" | "critical" | "unavailable";
+
+export interface VmFilesystemUsage {
+  path: string;
+  mountPath: string;
+  filesystem: string | null;
+  sizeBytes: number | null;
+  usedBytes: number | null;
+  availableBytes: number | null;
+  usedPercent: number | null;
+}
+
+export interface VmDiskUsageSnapshot {
+  vmId: string;
+  workspacePath: string;
+  checkedAt: string;
+  status: VmDiskUsageStatus;
+  detail: string;
+  warningThresholdBytes: number;
+  criticalThresholdBytes: number;
+  root: VmFilesystemUsage | null;
+  workspace: VmFilesystemUsage | null;
+}
+
 export interface CreateVmInput {
   templateId: string;
   name: string;

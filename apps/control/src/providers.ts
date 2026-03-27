@@ -9,6 +9,7 @@ import type {
   ProviderState,
   ResourceSpec,
   Snapshot,
+  VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmFileEntry,
   VmFileEntryKind,
@@ -42,6 +43,8 @@ const TEMPLATE_PUBLISH_START_PERCENT = 58;
 const TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT = 78;
 const TEMPLATE_PUBLISH_COMPLETE_PERCENT = 92;
 const BYTES_PER_GIB = 1024 ** 3;
+const VM_DISK_WARNING_FREE_BYTES = 4 * BYTES_PER_GIB;
+const VM_DISK_CRITICAL_FREE_BYTES = BYTES_PER_GIB;
 const INCUS_PROBE_TIMEOUT_MS = 1_000;
 const HOST_NETWORK_PROBE_CACHE_MS = 60_000;
 const HOST_NETWORK_PROBE_TIMEOUT_MS = 2_500;
@@ -140,6 +143,7 @@ export interface DesktopProvider {
   ): Promise<ProviderSnapshot>;
   injectCommand(vm: VmInstance, command: string): Promise<ProviderMutation>;
   readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot>;
+  readVmDiskUsage?(vm: VmInstance): Promise<VmDiskUsageSnapshot>;
   browseVmFiles(vm: VmInstance, path?: string | null): Promise<VmFileBrowserSnapshot>;
   readVmFile(vm: VmInstance, path: string): Promise<VmFileContent>;
   readVmTouchedFiles(vm: VmInstance): Promise<VmTouchedFilesSnapshot>;
@@ -598,6 +602,10 @@ class MockProvider implements DesktopProvider {
       content,
       fetchedAt: new Date().toISOString(),
     };
+  }
+
+  async readVmDiskUsage(vm: VmInstance): Promise<VmDiskUsageSnapshot> {
+    return buildMockVmDiskUsageSnapshot(vm);
   }
 
   async browseVmFiles(
@@ -1534,6 +1542,27 @@ class IncusProvider implements DesktopProvider {
         formatCommandFailure(infoArgs, infoResult),
       ].filter(Boolean).join("\n"),
     );
+  }
+
+  async readVmDiskUsage(vm: VmInstance): Promise<VmDiskUsageSnapshot> {
+    this.assertAvailable();
+    const workspacePath = vm.workspacePath || DEFAULT_GUEST_WORKSPACE;
+    const result = await this.runAsync([
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      "/",
+      "--",
+      "sh",
+      "-lc",
+      buildReadVmDiskUsageScript(workspacePath),
+    ]);
+    const payload = parseJson<{
+      root: VmDiskUsageSnapshot["root"];
+      workspace: VmDiskUsageSnapshot["workspace"];
+    }>(result.stdout);
+
+    return buildVmDiskUsageSnapshot(vm, payload.root, payload.workspace);
   }
 
   async browseVmFiles(
@@ -4094,6 +4123,83 @@ function buildMockVmTouchedFilesSnapshot(vm: VmInstance): VmTouchedFilesSnapshot
   };
 }
 
+function buildMockVmDiskUsageSnapshot(vm: VmInstance): VmDiskUsageSnapshot {
+  const workspacePath = normalizeGuestPath(vm.workspacePath || DEFAULT_GUEST_WORKSPACE);
+  const sizeBytes = Math.max(vm.resources.diskGb, 1) * BYTES_PER_GIB;
+  const usedPercent = Math.min(96, 68 + (vm.screenSeed % 25));
+  const usedBytes = Math.round((sizeBytes * usedPercent) / 100);
+  const availableBytes = Math.max(0, sizeBytes - usedBytes);
+  const sharedMount = {
+    mountPath: "/",
+    filesystem: "mockfs",
+    sizeBytes,
+    usedBytes,
+    availableBytes,
+    usedPercent,
+  };
+
+  return buildVmDiskUsageSnapshot(
+    vm,
+    {
+      path: "/",
+      ...sharedMount,
+    },
+    {
+      path: workspacePath,
+      ...sharedMount,
+    },
+  );
+}
+
+function buildReadVmDiskUsageScript(workspacePath: string): string {
+  return `python3 - <<'PY'
+import json
+import os
+import subprocess
+
+workspace_path = ${JSON.stringify(workspacePath)}
+
+def resolve_existing_path(candidate: str) -> str:
+  current = os.path.abspath(candidate or "/")
+  while not os.path.exists(current):
+    parent = os.path.dirname(current)
+    if parent == current:
+      return "/"
+    current = parent
+  return current
+
+def read_usage(target_path: str):
+  existing_path = resolve_existing_path(target_path)
+  output = subprocess.check_output(["df", "-B1", "-P", existing_path], text=True)
+  lines = [line for line in output.splitlines() if line.strip()]
+  if len(lines) < 2:
+    raise RuntimeError(f"Unexpected df output for {existing_path}: {output!r}")
+  parts = lines[-1].split()
+  if len(parts) < 6:
+    raise RuntimeError(f"Unexpected df row for {existing_path}: {lines[-1]!r}")
+  filesystem = parts[0]
+  size_bytes = int(parts[1])
+  used_bytes = int(parts[2])
+  available_bytes = int(parts[3])
+  used_percent = int(parts[4].rstrip("%")) if parts[4].endswith("%") else None
+  mount_path = " ".join(parts[5:])
+  return {
+    "path": os.path.abspath(target_path),
+    "mountPath": mount_path,
+    "filesystem": filesystem,
+    "sizeBytes": size_bytes,
+    "usedBytes": used_bytes,
+    "availableBytes": available_bytes,
+    "usedPercent": used_percent,
+  }
+
+print(json.dumps({
+  "root": read_usage("/"),
+  "workspace": read_usage(workspace_path),
+}))
+PY`;
+}
+
 function buildBrowseVmFilesScript(
   workspacePath: string,
   requestedPath: string | null,
@@ -4366,6 +4472,107 @@ function sortTouchedFileReasons(
   reasons: VmTouchedFileReason[],
 ): VmTouchedFileReason[] {
   return [...reasons].sort((left, right) => left.localeCompare(right));
+}
+
+function buildVmDiskUsageSnapshot(
+  vm: VmInstance,
+  root: VmDiskUsageSnapshot["root"],
+  workspace: VmDiskUsageSnapshot["workspace"],
+): VmDiskUsageSnapshot {
+  const focus = pickVmDiskUsageFocus(root, workspace);
+  const status = resolveVmDiskUsageStatus(root, workspace);
+
+  return {
+    vmId: vm.id,
+    workspacePath: vm.workspacePath || DEFAULT_GUEST_WORKSPACE,
+    checkedAt: new Date().toISOString(),
+    status,
+    detail: describeVmDiskUsageStatus(status, focus),
+    warningThresholdBytes: VM_DISK_WARNING_FREE_BYTES,
+    criticalThresholdBytes: VM_DISK_CRITICAL_FREE_BYTES,
+    root,
+    workspace,
+  };
+}
+
+function pickVmDiskUsageFocus(
+  root: VmDiskUsageSnapshot["root"],
+  workspace: VmDiskUsageSnapshot["workspace"],
+): VmDiskUsageSnapshot["root"] {
+  if (!root) {
+    return workspace;
+  }
+
+  if (!workspace) {
+    return root;
+  }
+
+  const rootAvailable = root.availableBytes ?? Number.POSITIVE_INFINITY;
+  const workspaceAvailable = workspace.availableBytes ?? Number.POSITIVE_INFINITY;
+
+  return workspaceAvailable <= rootAvailable ? workspace : root;
+}
+
+function resolveVmDiskUsageStatus(
+  root: VmDiskUsageSnapshot["root"],
+  workspace: VmDiskUsageSnapshot["workspace"],
+): VmDiskUsageSnapshot["status"] {
+  const entries = [workspace, root].filter(
+    (entry): entry is NonNullable<VmDiskUsageSnapshot["root"]> => entry !== null,
+  );
+
+  if (entries.length === 0) {
+    return "unavailable";
+  }
+
+  if (
+    entries.some(
+      (entry) =>
+        entry.availableBytes !== null &&
+        entry.availableBytes <= VM_DISK_CRITICAL_FREE_BYTES,
+    )
+  ) {
+    return "critical";
+  }
+
+  if (
+    entries.some(
+      (entry) =>
+        entry.availableBytes !== null &&
+        entry.availableBytes <= VM_DISK_WARNING_FREE_BYTES,
+    )
+  ) {
+    return "warning";
+  }
+
+  return "ready";
+}
+
+function describeVmDiskUsageStatus(
+  status: VmDiskUsageSnapshot["status"],
+  focus: VmDiskUsageSnapshot["root"],
+): string {
+  if (!focus || focus.availableBytes === null) {
+    return "Parallaize could not inspect guest disk usage from the running VM.";
+  }
+
+  const freeLabel = formatByteCount(focus.availableBytes);
+  const locationLabel =
+    focus.path === "/"
+      ? `root filesystem at ${focus.mountPath}`
+      : `workspace path ${focus.path} on ${focus.mountPath}`;
+
+  switch (status) {
+    case "critical":
+      return `Only ${freeLabel} free on the ${locationLabel}. Resize or clean the guest before writes fail.`;
+    case "warning":
+      return `${freeLabel} free on the ${locationLabel}. Resize or clean the guest before it drops under 1 GB free.`;
+    case "ready":
+      return `${freeLabel} free on the ${locationLabel}.`;
+    case "unavailable":
+    default:
+      return "Parallaize could not inspect guest disk usage from the running VM.";
+  }
 }
 
 function resolveGuestParentPath(currentPath: string): string | null {
