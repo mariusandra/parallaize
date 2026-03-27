@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version to publish, for example 0.1.1
+        description: Release version to publish, or patch/minor/major to bump from the latest release
         required: true
+        default: patch
         type: string
       package_release:
         description: Package release suffix for Debian artifacts
@@ -26,7 +27,7 @@ jobs:
     environment: default
     timeout-minutes: 90
     env:
-      RELEASE_VERSION: ${{ github.event.inputs.version }}
+      VERSION_INPUT: ${{ github.event.inputs.version }}
       PACKAGE_RELEASE: ${{ github.event.inputs.package_release }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
@@ -64,6 +65,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Resolve release version
+        id: resolve_version
+        run: |
+          set -euo pipefail
+          release_version="$(pnpm release:version -- --version "${VERSION_INPUT}" --resolve-only)"
+          echo "Resolved release version: ${release_version}"
+          echo "RELEASE_VERSION=${release_version}" >> "${GITHUB_ENV}"
+          echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
+
       - name: Run test suite
         run: pnpm test
 
@@ -99,7 +109,7 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: parallaize-release-${{ env.RELEASE_VERSION }}-${{ env.PACKAGE_RELEASE }}
+          name: parallaize-release-${{ steps.resolve_version.outputs.release_version }}-${{ env.PACKAGE_RELEASE }}
           path: artifacts/packages/
           if-no-files-found: error
 
@@ -141,5 +151,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            artifacts/packages/parallaize_${{ env.RELEASE_VERSION }}-${{ env.PACKAGE_RELEASE }}_amd64.deb
-            artifacts/packages/parallaize_${{ env.RELEASE_VERSION }}-${{ env.PACKAGE_RELEASE }}_arm64.deb
+            artifacts/packages/parallaize_${{ steps.resolve_version.outputs.release_version }}-${{ env.PACKAGE_RELEASE }}_amd64.deb
+            artifacts/packages/parallaize_${{ steps.resolve_version.outputs.release_version }}-${{ env.PACKAGE_RELEASE }}_arm64.deb
