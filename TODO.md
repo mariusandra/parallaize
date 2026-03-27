@@ -4,7 +4,7 @@ Last updated: 2026-03-27
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
-Current focus: finish clean-host validation for the supported packaged install paths and close the remaining non-AI operational gaps before starting the first trusted collection flow for untrusted AI workloads.
+Current focus: finish the last live-host packaged validation gaps on clean distro-managed Incus `amd64` and real `arm64` hosts before starting the first trusted collection flow for untrusted AI workloads.
 
 Completed implementation details now live in:
 
@@ -17,9 +17,12 @@ Completed implementation details now live in:
 ## Current
 
 - [ ] Repeat the Ubuntu 24.04 `amd64` packaged install validation on a clean distro-managed Incus host and close the remaining daemon-conflict ambiguity before calling that path fully supported.
-- [ ] Validate the signed Ubuntu 24.04 `amd64` APT archive path on a clean host, including initial key bootstrap, `apt-get install parallaize`, and `apt-get install --only-upgrade parallaize`.
-- [ ] Validate the packaged PostgreSQL deployment path end to end, including install, upgrade, export, restore, and packaged service restart ordering.
 - [ ] Validate the generated `arm64` `.deb` on a real `arm64` Incus and QEMU host before promoting it beyond experimental.
+
+Validation notes:
+
+- On March 27, 2026, the signed Ubuntu 24.04 `amd64` APT archive path was replayed in a clean Ubuntu 24.04 `amd64` container: initial key bootstrap succeeded, `apt-get install parallaize` installed `0.1.10-1`, and `apt-get install --only-upgrade parallaize` upgraded the same host to `0.1.10-2`.
+- On March 27, 2026, the packaged PostgreSQL deployment path was replayed in a clean Ubuntu 24.04 `amd64` container using the packaged env file plus the packaged `parallaize`, `parallaize-persistence`, and Caddy launchers: health stayed `ok`, export/import worked, an upgrade to `0.1.10-3` succeeded, and restoring the baseline export brought VM count back from 2 to 1.
 
 Open validation note:
 

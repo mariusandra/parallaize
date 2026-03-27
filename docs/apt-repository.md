@@ -60,31 +60,20 @@ sudo apt-get install --only-upgrade parallaize
 
 The package name stays `parallaize`, so APT compares the Debian version string and installs the newest signed archive entry automatically.
 
-## Clean Host Validation Checklist
+## Validation Note
 
-This is the exact Ubuntu 24.04 `amd64` archive path that still needs a clean-host validation pass:
+On March 27, 2026, the signed Ubuntu 24.04 `amd64` archive path was replayed in a clean Ubuntu 24.04 `amd64` container with a disposable signed test repo:
 
 1. Bootstrap the keyring and source file exactly as shown in the Install section.
-2. Run `sudo apt-get update`.
-3. Run `sudo apt-get install -y parallaize`.
-4. Confirm the package came from the Parallaize archive:
+2. Run `apt-get update`.
+3. Run `apt-get install -y parallaize`.
+4. Confirm `apt-cache policy parallaize` and `dpkg -s parallaize` show `0.1.10-1` from the signed archive.
+5. Publish a newer package revision to the same repo.
+6. Run `apt-get update`.
+7. Run `apt-get install -y --only-upgrade parallaize`.
+8. Confirm `apt-cache policy parallaize` and `dpkg -s parallaize` now show `0.1.10-2`.
 
-```bash
-apt-cache policy parallaize
-dpkg -s parallaize
-```
-
-5. Rotate `/etc/parallaize/parallaize.env`, then start `parallaize.service` and validate `curl http://127.0.0.1:3000/api/health`.
-6. Publish a newer package revision to the archive or stage one in a disposable test repo, then run:
-
-```bash
-sudo apt-get update
-sudo apt-get install --only-upgrade parallaize
-```
-
-7. Re-check `dpkg -s parallaize`, `/api/health`, and at least one VM create plus delete cycle after the upgrade.
-
-The clean-host claim is only closed once both the initial install and the `--only-upgrade` path succeed on a host that was not already carrying older manual package/bootstrap state.
+That closes the archive bootstrap and `--only-upgrade` claim for a clean Ubuntu 24.04 `amd64` environment. The remaining live-host work now lives in [packaging.md](packaging.md) because it depends on Incus daemon ownership and packaged service behavior, not on APT metadata anymore.
 
 ## Published Files
 

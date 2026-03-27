@@ -232,6 +232,13 @@ As of March 26, 2026, the Ubuntu 24.04 `amd64` package has been installed and bo
 
 One host-specific caveat still blocks calling this path fully supported: this machine already had a manually started Flox `incusd` process before the distro `incus` package was installed. Installing Ubuntu's `incus` package also enabled `incus.socket`, so the host ended up with a mixed daemon setup on `/var/lib/incus/unix.socket`. In that state, the packaged Parallaize service wiring is correct, but clean Incus API verification is blocked by the host daemon conflict itself.
 
+On March 27, 2026, two more clean-environment packaged validation passes were also replayed outside that mixed-daemon host:
+
+- the signed Ubuntu 24.04 `amd64` archive bootstrap path on a clean Ubuntu 24.04 `amd64` container, including key bootstrap, `apt-get install parallaize`, and `apt-get install --only-upgrade parallaize`
+- the packaged PostgreSQL path on a clean Ubuntu 24.04 `amd64` container, including packaged launcher startup, Caddy startup after health, export/import, restore, and an upgrade from `0.1.10-2` to `0.1.10-3`
+
+Those runs remove the remaining APT archive and PostgreSQL ambiguity, but they do not replace the final live Incus-host validation below.
+
 The clean distro-managed validation still needs to be repeated on a host that is either:
 
 - fully managed by the distro `incus` package, or
