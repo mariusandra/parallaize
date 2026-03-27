@@ -192,13 +192,16 @@ sudo systemctl start parallaize.service</code></pre>
                 instead of exposing the app directly.
               </p>
 
-              <p class="install-card__label">Ubuntu 24.04 command line</p>
+              <p class="install-card__label">Ubuntu 24.04 via signed APT archive</p>
               <pre><code>sudo apt-get update
 sudo apt-get install -y curl pwgen ufw
-
-curl -fLo /tmp/parallaize_0.1.8-1_amd64.deb \
-  https://archive.parallaize.com/packages/parallaize_0.1.8-1_amd64.deb
-sudo apt-get install -y /tmp/parallaize_0.1.8-1_amd64.deb
+sudo mkdir -p /etc/apt/keyrings /etc/apt/sources.list.d
+curl -fsSL https://archive.parallaize.com/apt/parallaize-archive-keyring.gpg \
+  | sudo tee /etc/apt/keyrings/parallaize-archive-keyring.gpg >/dev/null
+curl -fsSL https://archive.parallaize.com/apt/parallaize.sources \
+  | sudo tee /etc/apt/sources.list.d/parallaize.sources >/dev/null
+sudo apt-get update
+sudo apt-get install -y parallaize
 
 sudo cp /etc/parallaize/parallaize.env /etc/parallaize/parallaize.env.bak
 PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"

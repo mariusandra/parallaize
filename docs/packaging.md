@@ -144,15 +144,19 @@ The cleanest [Hetzner](https://hetzner.cloud/?ref=qOKe5qXBXByK) setup is:
 - allow inbound SSH only at the firewall
 - reach the UI through SSH port forwarding from your laptop
 
-On Ubuntu 24.04 `amd64`, this is the full command-line flow:
+On Ubuntu 24.04 `amd64`, default to the signed APT archive:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y curl pwgen ufw
 
-curl -fLo /tmp/parallaize_0.1.8-1_amd64.deb \
-  https://archive.parallaize.com/packages/parallaize_0.1.8-1_amd64.deb
-sudo apt-get install -y /tmp/parallaize_0.1.8-1_amd64.deb
+sudo mkdir -p /etc/apt/keyrings /etc/apt/sources.list.d
+curl -fsSL https://archive.parallaize.com/apt/parallaize-archive-keyring.gpg \
+  | sudo tee /etc/apt/keyrings/parallaize-archive-keyring.gpg >/dev/null
+curl -fsSL https://archive.parallaize.com/apt/parallaize.sources \
+  | sudo tee /etc/apt/sources.list.d/parallaize.sources >/dev/null
+sudo apt-get update
+sudo apt-get install -y parallaize
 
 sudo cp /etc/parallaize/parallaize.env /etc/parallaize/parallaize.env.bak
 sudo sed -i 's/^PARALLAIZE_ADMIN_USERNAME=.*/PARALLAIZE_ADMIN_USERNAME=admin/' \
@@ -177,7 +181,8 @@ curl http://127.0.0.1:3000/api/health
 
 What that does:
 
-- `apt-get install /tmp/parallaize_...deb` installs the package and resolves the distro dependencies such as `incus`, QEMU helpers, and firmware from Ubuntu.
+- The signed archive bootstrap installs the Parallaize key into `/etc/apt/keyrings`, adds the Ubuntu 24.04 `noble` source, and lets standard APT flows manage upgrades after the first install.
+- `apt-get install parallaize` installs the package and resolves the distro dependencies such as `incus`, QEMU helpers, and firmware from Ubuntu.
 - The packaged env file already defaults `HOST=127.0.0.1` and `PORT=3000`, so the control plane stays local to the host.
 - UFW ends up denying all new inbound traffic except SSH, which means you do not need to expose `3000` or `8080` publicly.
 - You can skip Caddy entirely for this workflow because SSH tunneling is the intended front door.

@@ -131,3 +131,107 @@ test("response text extraction reads output_text content from responses payloads
 
   assert.equal(text, "## Highlights\n- Example release note");
 });
+
+test("response text extraction accepts top-level helpers and nested text values", () => {
+  assert.equal(releaseNotesModule.extractResponseText({ output_text: "## Highlights\n- Helper output" }), "## Highlights\n- Helper output");
+
+  const nestedText = releaseNotesModule.extractResponseText({
+    output: [
+      {
+        type: "message",
+        content: [
+          {
+            type: "output_text",
+            text: {
+              value: "## Highlights\n- Nested output",
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(nestedText, "## Highlights\n- Nested output");
+});
+
+test("requestOpenAIText retries once when the first response exhausts tokens without visible output", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body ?? "{}")));
+
+    if (requests.length === 1) {
+      return new Response(
+        JSON.stringify({
+          status: "incomplete",
+          incomplete_details: {
+            reason: "max_output_tokens",
+          },
+          output: [],
+          usage: {
+            output_tokens: 900,
+            output_tokens_details: {
+              reasoning_tokens: 900,
+            },
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            content: [
+              {
+                type: "output_text",
+                text: "## Highlights\n- Retry succeeded",
+              },
+            ],
+          },
+        ],
+      }),
+      {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+        },
+      },
+    );
+  };
+
+  try {
+    const text = await releaseNotesModule.requestOpenAIText({
+      apiKey: "test-key",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-5.4",
+      instructions: "Write release notes.",
+      input: "Summarize this release.",
+      maxOutputTokens: 900,
+    });
+
+    assert.equal(text, "## Highlights\n- Retry succeeded");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0]?.max_output_tokens, 900);
+    assert.equal(requests[1]?.max_output_tokens, 1800);
+    assert.deepEqual(requests[0]?.text, {
+      format: {
+        type: "text",
+      },
+    });
+    assert.deepEqual(requests[0]?.reasoning, {
+      effort: "none",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

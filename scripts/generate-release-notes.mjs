@@ -8,11 +8,14 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-const DEFAULT_MODEL = "gpt-5-mini";
+const DEFAULT_MODEL = "gpt-5.4";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MAX_COMMITS_PER_BATCH = 18;
 const DEFAULT_MAX_BATCH_CHARS = 7_500;
 const DEFAULT_COMMIT_REFERENCE_LIMIT = 15;
+const DEFAULT_REASONING_EFFORT = "none";
+const MAX_OPENAI_TEXT_RETRIES = 1;
+const MAX_OPENAI_RETRY_TOKENS = 4_000;
 const MAX_GIT_BUFFER_BYTES = 32 * 1024 * 1024;
 const RECORD_SEPARATOR = 0x1e;
 
@@ -418,6 +421,10 @@ export function extractResponseText(payload) {
     return "";
   }
 
+  if (typeof payload.output_text === "string") {
+    return payload.output_text.trim();
+  }
+
   const outputs = Array.isArray(payload.output) ? payload.output : [];
   const segments = [];
 
@@ -427,8 +434,17 @@ export function extractResponseText(payload) {
     }
 
     for (const contentPart of item.content) {
-      if (contentPart?.type === "output_text" && typeof contentPart.text === "string") {
+      if (contentPart?.type !== "output_text") {
+        continue;
+      }
+
+      if (typeof contentPart.text === "string") {
         segments.push(contentPart.text);
+        continue;
+      }
+
+      if (typeof contentPart.text?.value === "string") {
+        segments.push(contentPart.text.value);
       }
     }
   }
@@ -640,30 +656,76 @@ async function generateFinalSections({ apiKey, baseUrl, model, changeSet, batchS
   });
 }
 
-async function requestOpenAIText({ apiKey, baseUrl, model, instructions, input, maxOutputTokens }) {
+export async function requestOpenAIText({ apiKey, baseUrl, model, instructions, input, maxOutputTokens }) {
+  let tokenBudget = maxOutputTokens;
+  let attempt = 0;
+  let lastPayload = null;
+
+  while (attempt <= MAX_OPENAI_TEXT_RETRIES) {
+    const payload = await createOpenAIResponse({
+      apiKey,
+      baseUrl,
+      model,
+      instructions,
+      input,
+      maxOutputTokens: tokenBudget,
+    });
+
+    lastPayload = payload;
+    const outputText = extractResponseText(payload);
+
+    if (outputText) {
+      return outputText.trim();
+    }
+
+    if (!shouldRetryMissingOutputText(payload, attempt, tokenBudget)) {
+      throw new Error(buildMissingOutputTextError(payload));
+    }
+
+    tokenBudget = Math.min(tokenBudget * 2, MAX_OPENAI_RETRY_TOKENS);
+    attempt += 1;
+  }
+
+  throw new Error(buildMissingOutputTextError(lastPayload));
+}
+
+async function createOpenAIResponse({ apiKey, baseUrl, model, instructions, input, maxOutputTokens }) {
+  const requestBody = {
+    model,
+    instructions,
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: input,
+          },
+        ],
+      },
+    ],
+    max_output_tokens: maxOutputTokens,
+    store: false,
+    text: {
+      format: {
+        type: "text",
+      },
+    },
+  };
+
+  if (model === DEFAULT_MODEL) {
+    requestBody.reasoning = {
+      effort: DEFAULT_REASONING_EFFORT,
+    };
+  }
+
   const response = await fetch(`${baseUrl.replace(/\/+$/u, "")}/responses`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${apiKey}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({
-      model,
-      instructions,
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: input,
-            },
-          ],
-        },
-      ],
-      max_output_tokens: maxOutputTokens,
-      store: false,
-    }),
+    body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(90_000),
   });
 
@@ -672,14 +734,80 @@ async function requestOpenAIText({ apiKey, baseUrl, model, instructions, input, 
     throw new Error(`OpenAI API ${response.status}: ${errorText.slice(0, 500)}`);
   }
 
-  const payload = await response.json();
-  const outputText = extractResponseText(payload);
+  return response.json();
+}
 
-  if (!outputText) {
-    throw new Error("OpenAI API response did not contain any output text.");
+function shouldRetryMissingOutputText(payload, attempt, maxOutputTokens) {
+  if (attempt >= MAX_OPENAI_TEXT_RETRIES) {
+    return false;
   }
 
-  return outputText.trim();
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+
+  if (maxOutputTokens >= MAX_OPENAI_RETRY_TOKENS) {
+    return false;
+  }
+
+  if (payload.incomplete_details?.reason === "max_output_tokens") {
+    return true;
+  }
+
+  const outputTokens = payload.usage?.output_tokens;
+  const reasoningTokens = payload.usage?.output_tokens_details?.reasoning_tokens;
+
+  return Number.isFinite(outputTokens) && outputTokens >= maxOutputTokens && reasoningTokens > 0;
+}
+
+function buildMissingOutputTextError(payload) {
+  const details = [];
+
+  if (typeof payload?.status === "string") {
+    details.push(`status=${payload.status}`);
+  }
+
+  if (typeof payload?.incomplete_details?.reason === "string") {
+    details.push(`incomplete_reason=${payload.incomplete_details.reason}`);
+  }
+
+  const outputTypes = Array.isArray(payload?.output)
+    ? [...new Set(payload.output.map((item) => item?.type).filter((type) => typeof type === "string"))]
+    : [];
+
+  if (outputTypes.length > 0) {
+    details.push(`output_types=${outputTypes.join(",")}`);
+  }
+
+  const contentTypes = Array.isArray(payload?.output)
+    ? [
+        ...new Set(
+          payload.output.flatMap((item) =>
+            Array.isArray(item?.content)
+              ? item.content.map((contentPart) => contentPart?.type).filter((type) => typeof type === "string")
+              : [],
+          ),
+        ),
+      ]
+    : [];
+
+  if (contentTypes.length > 0) {
+    details.push(`content_types=${contentTypes.join(",")}`);
+  }
+
+  const outputTokens = payload?.usage?.output_tokens;
+  if (Number.isFinite(outputTokens)) {
+    details.push(`output_tokens=${outputTokens}`);
+  }
+
+  const reasoningTokens = payload?.usage?.output_tokens_details?.reasoning_tokens;
+  if (Number.isFinite(reasoningTokens)) {
+    details.push(`reasoning_tokens=${reasoningTokens}`);
+  }
+
+  return details.length > 0
+    ? `OpenAI API response did not contain any output text. ${details.join("; ")}`
+    : "OpenAI API response did not contain any output text.";
 }
 
 function buildBatchPrompt(changeSet, batch) {
