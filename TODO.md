@@ -1,6 +1,6 @@
 # Parallaize TODO
 
-Last updated: 2026-03-27
+Last updated: 2026-03-28
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
@@ -9,6 +9,7 @@ Current focus: start the first trusted collection flow for untrusted AI workload
 Completed implementation details now live in:
 
 - `docs/live-incus-setup.md`
+- `docs/incus-storage-benchmarks.md`
 - `docs/template-prep.md`
 - `docs/postgres-operations.md`
 - `docs/packaging.md`
