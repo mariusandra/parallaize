@@ -2819,6 +2819,45 @@ section.workspace-shell {
   height: 100%;
 }
 
+.workspace-log-surface {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 1rem;
+  height: 100%;
+  padding: clamp(1rem, 2vw, 1.4rem);
+  background:
+    radial-gradient(circle at top left, rgba(94, 211, 136, 0.12), transparent 26%),
+    linear-gradient(180deg, rgba(12, 16, 21, 0.98), rgba(4, 7, 11, 0.96));
+}
+
+.workspace-log-surface__header {
+  display: grid;
+  gap: 0.65rem;
+  align-content: start;
+}
+
+.workspace-log-surface__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 4vw, 2.9rem);
+  line-height: 0.94;
+  letter-spacing: -0.04em;
+  color: #f4f7fa;
+}
+
+.workspace-log-surface__copy {
+  margin: 0;
+  max-width: 44rem;
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.workspace-log-surface__output {
+  margin: 0;
+  min-height: 0;
+  max-height: none;
+  height: 100%;
+}
+
 .workspace-fallback__copy {
   position: absolute;
   inset: 0;

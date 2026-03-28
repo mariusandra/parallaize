@@ -335,17 +335,84 @@ export class DesktopManager {
     let createdVm: VmInstance | null = null;
     let createdJob: ActionJob | null = null;
     let launchTemplate: EnvironmentTemplate | null = null;
+    let launchSnapshot: Snapshot | null = null;
+    const requestedTemplateId = input.templateId?.trim() || null;
+    const requestedSnapshotId = input.snapshotId?.trim() || null;
+    const name = input.name.trim();
+
+    if ((requestedTemplateId === null) === (requestedSnapshotId === null)) {
+      throw new Error("Exactly one launch source is required.");
+    }
+
+    if (!name) {
+      throw new Error("VM name is required.");
+    }
+
+    validateResources(input.resources);
+
+    if (requestedSnapshotId && input.initCommands !== undefined) {
+      throw new Error("Init commands are only supported when launching from a template.");
+    }
 
     this.store.update((draft) => {
-      const template = requireTemplate(draft, input.templateId);
-      validateResources(input.resources);
+      if (requestedSnapshotId) {
+        const snapshot = requireSnapshot(draft, requestedSnapshotId);
+        const template = resolveTemplateForSnapshot(draft, snapshot);
+        const sourceVm = draft.vms.find((entry) => entry.id === snapshot.vmId) ?? null;
+        const forwardedPorts =
+          input.forwardedPorts ??
+          (sourceVm
+            ? sourceVm.forwardedPorts.map(copyForwardAsTemplatePort)
+            : template.defaultForwardedPorts);
+
+        validateTemplateCreateResources(template, input.resources);
+        validateSnapshotCreateResources(snapshot, input.resources);
+        validateForwardedPorts(forwardedPorts);
+
+        const vm = buildVmRecord(
+          draft,
+          template,
+          name,
+          input.resources,
+          forwardedPorts,
+          normalizeVmNetworkMode(input.networkMode ?? sourceVm?.networkMode ?? template.defaultNetworkMode),
+          draft.provider.kind,
+          "creating",
+          this.options.forwardedServiceHostBase ?? null,
+        );
+        vm.lastAction = `Queued from snapshot ${snapshot.label}`;
+
+        if (sourceVm) {
+          vm.activeWindow = sourceVm.activeWindow;
+        }
+
+        appendActivity(vm, `snapshot: ${snapshot.label}`);
+
+        const job = buildJob(
+          draft,
+          "launch-snapshot",
+          vm.id,
+          template.id,
+          `Queued snapshot launch from ${snapshot.label}`,
+        );
+
+        draft.vms.unshift(vm);
+        draft.jobs.unshift(job);
+        trimJobs(draft);
+
+        launchTemplate = template;
+        launchSnapshot = snapshot;
+        createdVm = vm;
+        createdJob = job;
+        return;
+      }
+
+      const template = requireTemplate(
+        draft,
+        requestedTemplateId ?? failMissingCreateTemplateId(),
+      );
       validateTemplateCreateResources(template, input.resources);
       validateForwardedPorts(input.forwardedPorts ?? template.defaultForwardedPorts);
-      const name = input.name.trim();
-
-      if (!name) {
-        throw new Error("VM name is required.");
-      }
 
       const vm = buildVmRecord(
         draft,
@@ -386,6 +453,31 @@ export class DesktopManager {
 
     void this.runJob(jobRecord.id, async (report) => {
       try {
+        if (launchSnapshot) {
+          report("Preparing snapshot launch", 18);
+          await sleep(350);
+          report("Cloning snapshot", 48);
+          const snapshot = launchSnapshot;
+          const template = launchTemplate ?? resolveTemplateForSnapshot(this.store.load(), snapshot);
+          const mutation = await this.provider.launchVmFromSnapshot(
+            snapshot,
+            vmRecord,
+            template,
+          );
+          report("Booting desktop", 86);
+
+          this.store.update((draft) => {
+            const vm = this.requireVm(draft, vmRecord.id);
+            vm.status = "running";
+            vm.liveSince = nowIso();
+            applyProviderMutation(vm, mutation);
+          });
+
+          this.publish();
+
+          return `${vmRecord.name} launched from ${snapshot.label}`;
+        }
+
         const templateRecord = requireTemplate(this.store.load(), vmRecord.templateId);
         const template =
           launchTemplate
@@ -419,11 +511,16 @@ export class DesktopManager {
   cloneVm(input: CloneVmInput): VmInstance {
     let createdVm: VmInstance | null = null;
     let createdJob: ActionJob | null = null;
+    const requestedResources = input.resources ?? null;
+    const shutdownSourceBeforeClone = input.shutdownSourceBeforeClone === true;
 
     this.store.update((draft) => {
       const source = this.requireVm(draft, input.sourceVmId);
       this.ensureActiveProvider(source);
       const template = requireTemplate(draft, source.templateId);
+      const cloneResources = requestedResources ?? source.resources;
+      validateResources(cloneResources);
+      validateVmCloneResources(source, cloneResources);
       const cloneName =
         input.name?.trim() ||
         `${source.name}-clone-${String(draft.sequence).padStart(2, "0")}`;
@@ -432,9 +529,9 @@ export class DesktopManager {
         draft,
         template,
         cloneName,
-        source.resources,
+        cloneResources,
         source.forwardedPorts.map(copyForwardAsTemplatePort),
-        normalizeVmNetworkMode(source.networkMode ?? template.defaultNetworkMode),
+        normalizeVmNetworkMode(input.networkMode ?? source.networkMode ?? template.defaultNetworkMode),
         draft.provider.kind,
         "creating",
         this.options.forwardedServiceHostBase ?? null,
@@ -466,7 +563,6 @@ export class DesktopManager {
       try {
         report("Preparing clone", 18);
         await sleep(500);
-        report("Cloning disks", 46);
         const target = this.getVmDetail(vmRecord.id).vm;
         const source = this.getVmDetail(input.sourceVmId).vm;
         const template = this.getVmDetail(vmRecord.id).template;
@@ -477,6 +573,13 @@ export class DesktopManager {
           throw new Error("Template for clone target was not found.");
         }
 
+        if (shutdownSourceBeforeClone && source.status === "running") {
+          report("Stopping source VM", 32);
+          const stopMutation = await this.provider.stopVm(source);
+          this.markVmStopped(source.id, stopMutation);
+        }
+
+        report("Cloning disks", 52);
         const mutation = await this.provider.cloneVm(source, target, template);
         report("Booting desktop", 86);
 
@@ -1295,6 +1398,12 @@ export class DesktopManager {
 
   private markVmFailed(vmId: string, error: unknown): void {
     const message = errorMessage(error);
+    const currentVm = this.store.load().vms.find((entry) => entry.id === vmId) ?? null;
+    const observedPowerState =
+      currentVm && currentVm.provider === this.provider.state.kind
+        ? this.provider.observeVmPowerState(currentVm)
+        : null;
+    const guestStillRunning = observedPowerState?.status === "running";
 
     this.store.update((draft) => {
       const vm = draft.vms.find((entry) => entry.id === vmId);
@@ -1303,10 +1412,17 @@ export class DesktopManager {
         return false;
       }
 
-      vm.status = "error";
-      vm.liveSince = null;
+      vm.status = guestStillRunning ? "running" : "error";
+      vm.liveSince = guestStillRunning ? (vm.liveSince ?? nowIso()) : null;
       vm.lastAction = message;
       vm.updatedAt = nowIso();
+      vm.frameRevision += 1;
+
+      if (guestStillRunning) {
+        vm.activeWindow = "logs";
+        vm.session = null;
+      }
+
       appendActivity(vm, `error: ${message}`);
       return true;
     });
@@ -2160,6 +2276,10 @@ function requireVmSnapshot(
   return snapshot;
 }
 
+function failMissingCreateTemplateId(): never {
+  throw new Error("Template launch source is required.");
+}
+
 function validateResources(resources: CreateVmInput["resources"]): void {
   if (
     resources.cpu < 1 ||
@@ -2184,6 +2304,28 @@ function validateTemplateCreateResources(
   if (minimumDiskGb !== null && resources.diskGb < minimumDiskGb) {
     throw new Error(
       `Template ${template.name} requires at least ${minimumDiskGb} GB disk because it was captured from a ${minimumDiskGb} GB workspace.`,
+    );
+  }
+}
+
+function validateSnapshotCreateResources(
+  snapshot: Snapshot,
+  resources: CreateVmInput["resources"],
+): void {
+  if (resources.diskGb < snapshot.resources.diskGb) {
+    throw new Error(
+      `Snapshot ${snapshot.label} requires at least ${snapshot.resources.diskGb} GB disk because shrinking a saved filesystem is not supported.`,
+    );
+  }
+}
+
+function validateVmCloneResources(
+  sourceVm: VmInstance,
+  resources: CreateVmInput["resources"],
+): void {
+  if (resources.diskGb < sourceVm.resources.diskGb) {
+    throw new Error(
+      `VM ${sourceVm.name} needs at least ${sourceVm.resources.diskGb} GB disk because shrinking a cloned filesystem is not supported.`,
     );
   }
 }

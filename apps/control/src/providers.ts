@@ -27,6 +27,8 @@ const DEFAULT_GUEST_VNC_PORT = 5900;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 const DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 30_000;
+const DEFAULT_GUEST_AGENT_RETRY_MS = 5_000;
+const DEFAULT_GUEST_AGENT_RETRY_TIMEOUT_MS = 60_000;
 const DEFAULT_GUEST_USERNAME = "ubuntu";
 const DEFAULT_GUEST_HOME = `/home/${DEFAULT_GUEST_USERNAME}`;
 const DEFAULT_GUEST_WALLPAPER = "Monument_valley_by_orbitelambda.jpg";
@@ -74,6 +76,8 @@ export interface CreateProviderOptions {
   guestInotifyMaxUserWatches?: number;
   guestInotifyMaxUserInstances?: number;
   guestDesktopBootstrapRetryMs?: number;
+  guestAgentRetryMs?: number;
+  guestAgentRetryTimeoutMs?: number;
   commandRunner?: IncusCommandRunner;
   guestPortProbe?: GuestPortProbe;
   hostNetworkProbe?: HostNetworkProbe;
@@ -677,6 +681,8 @@ class IncusProvider implements DesktopProvider {
   private readonly guestInotifyMaxUserWatches: number;
   private readonly guestInotifyMaxUserInstances: number;
   private readonly guestDesktopBootstrapRetryMs: number;
+  private readonly guestAgentRetryMs: number;
+  private readonly guestAgentRetryTimeoutMs: number;
   private readonly runner: IncusCommandRunner;
   private readonly project: string | null;
   private readonly storagePool: string | null;
@@ -713,6 +719,14 @@ class IncusProvider implements DesktopProvider {
       options.guestInotifyMaxUserInstances ?? DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES;
     this.guestDesktopBootstrapRetryMs = Math.max(
       options.guestDesktopBootstrapRetryMs ?? DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
+      0,
+    );
+    this.guestAgentRetryMs = Math.max(
+      options.guestAgentRetryMs ?? DEFAULT_GUEST_AGENT_RETRY_MS,
+      0,
+    );
+    this.guestAgentRetryTimeoutMs = Math.max(
+      options.guestAgentRetryTimeoutMs ?? DEFAULT_GUEST_AGENT_RETRY_TIMEOUT_MS,
       0,
     );
     this.project = options.project ?? null;
@@ -2060,7 +2074,7 @@ class IncusProvider implements DesktopProvider {
     instanceName: string,
     networkMode: VmNetworkMode,
   ): Promise<void> {
-    await this.runAsync([
+    await this.runGuestExecWithRetryAsync([
       "exec",
       instanceName,
       "--",
@@ -2176,7 +2190,11 @@ class IncusProvider implements DesktopProvider {
       "-lc",
       buildEnsureGuestDesktopBootstrapScript(this.guestVncPort, false),
     ];
-    const result = await this.executeAsync(args);
+    const result = await this.executeGuestExecWithRetryAsync(args);
+
+    if (result.status !== 0 && isGuestAgentUnavailableExecFailure(args, result)) {
+      throw new Error(formatCommandFailure(args, result));
+    }
 
     return result.status === 0;
   }
@@ -2189,7 +2207,7 @@ class IncusProvider implements DesktopProvider {
       return;
     }
 
-    await this.runAsync([
+    await this.runGuestExecWithRetryAsync([
       "exec",
       instanceName,
       "--cwd",
@@ -2419,11 +2437,45 @@ class IncusProvider implements DesktopProvider {
       : this.runner.execute(args);
   }
 
+  private async executeGuestExecWithRetryAsync(
+    args: string[],
+    listeners?: CommandStreamListeners,
+  ): Promise<CommandResult> {
+    const deadlineAt = Date.now() + this.guestAgentRetryTimeoutMs;
+
+    while (true) {
+      const result = await this.executeAsync(args, listeners);
+
+      if (result.status === 0 || !isGuestAgentUnavailableExecFailure(args, result)) {
+        return result;
+      }
+
+      if (Date.now() >= deadlineAt) {
+        return result;
+      }
+
+      await sleep(this.guestAgentRetryMs);
+    }
+  }
+
   private async runAsync(
     args: string[],
     listeners?: CommandStreamListeners,
   ): Promise<CommandResult> {
     const result = await this.executeAsync(args, listeners);
+
+    if (result.status === 0) {
+      return result;
+    }
+
+    throw new Error(formatCommandFailure(args, result));
+  }
+
+  private async runGuestExecWithRetryAsync(
+    args: string[],
+    listeners?: CommandStreamListeners,
+  ): Promise<CommandResult> {
+    const result = await this.executeGuestExecWithRetryAsync(args, listeners);
 
     if (result.status === 0) {
       return result;
@@ -5210,12 +5262,53 @@ function formatCommandFailure(args: string[], result: CommandResult): string {
     result.error?.message ||
     `Command exited with status ${result.status ?? "unknown"}.`;
 
+  if (isGuestAgentUnavailableExecFailure(args, result)) {
+    return buildGuestAgentUnavailableMessage(args[1]);
+  }
+
   return `incus ${args.join(" ")} failed: ${detail}`;
 }
 
 function isCommandTimeout(result: CommandResult): boolean {
   const errorWithCode = result.error as (Error & { code?: string }) | undefined;
   return errorWithCode?.code === "ETIMEDOUT";
+}
+
+function buildGuestAgentUnavailableMessage(instanceName: string | undefined): string {
+  const instanceLabel =
+    typeof instanceName === "string" && instanceName.length > 0
+      ? ` for ${instanceName}`
+      : "";
+
+  return (
+    `Incus guest agent is unavailable${instanceLabel}. ` +
+    "The VM may already have booted, but guest command execution is not working. " +
+    "Repair the Incus guest-agent payload on the host and retry."
+  );
+}
+
+function isGuestAgentUnavailableExecFailure(
+  args: string[],
+  result: CommandResult,
+): boolean {
+  if (args[0] !== "exec") {
+    return false;
+  }
+
+  const detail = `${result.stderr}\n${result.stdout}\n${result.error?.message ?? ""}`.toLowerCase();
+
+  return (
+    detail.includes("failed connecting to instance agent") ||
+    detail.includes("failed to connect to instance agent") ||
+    detail.includes("vm agent isn't currently connected") ||
+    detail.includes("vm agent is not currently connected") ||
+    detail.includes("vm agent isn't currently running") ||
+    detail.includes("vm agent is not currently running") ||
+    detail.includes("agent isn't currently connected") ||
+    detail.includes("agent is not currently connected") ||
+    detail.includes("agent isn't currently running") ||
+    detail.includes("agent is not currently running")
+  );
 }
 
 function isMissingInstanceFailure(message: string): boolean {

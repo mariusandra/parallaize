@@ -350,7 +350,8 @@ export interface VmDiskUsageSnapshot {
 }
 
 export interface CreateVmInput {
-  templateId: string;
+  templateId?: string;
+  snapshotId?: string;
   name: string;
   resources: ResourceSpec;
   forwardedPorts?: TemplatePortForward[];
@@ -361,6 +362,9 @@ export interface CreateVmInput {
 export interface CloneVmInput {
   sourceVmId: string;
   name?: string;
+  resources?: ResourceSpec;
+  networkMode?: VmNetworkMode;
+  shutdownSourceBeforeClone?: boolean;
 }
 
 export interface ResizeVmInput {

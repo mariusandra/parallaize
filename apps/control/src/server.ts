@@ -373,6 +373,9 @@ const server = createServer(async (request, response) => {
           const vm = manager.cloneVm({
             sourceVmId: vmId,
             name: payload.name,
+            resources: payload.resources,
+            networkMode: payload.networkMode,
+            shutdownSourceBeforeClone: payload.shutdownSourceBeforeClone,
           });
           return writeJson(response, 202, {
             ok: true,

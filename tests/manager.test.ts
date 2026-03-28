@@ -96,6 +96,39 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.ok((job?.progressPercent ?? 100) < 100);
 });
 
+test("create can launch a new VM from a template snapshot", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-create-snapshot-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.createVm({
+    snapshotId: "snap-0001",
+    name: "snapshot-seeded-lab",
+    resources: {
+      cpu: 8,
+      ramMb: 16384,
+      diskGb: 96,
+    },
+  });
+
+  await wait(700);
+
+  const detail = manager.getVmDetail(vm.id);
+  assert.equal(detail.vm.status, "running");
+  assert.equal(detail.vm.templateId, "tpl-0001");
+  assert.match(detail.vm.lastAction, /snapshot/i);
+  assert.ok(
+    detail.recentJobs.some((job) => job.kind === "launch-snapshot" && job.status === "succeeded"),
+  );
+});
+
 test("create can override template init commands for a single VM launch", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-create-init-override-"));
   context.after(() => {
@@ -135,6 +168,58 @@ test("create can override template init commands for a single VM launch", async 
     manager.getSummary().templates.find((entry) => entry.id === "tpl-0001")?.initCommands,
     [],
   );
+});
+
+test("clone can stop the source VM first and keep requested resource overrides", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-clone-stop-first-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const stopVm = provider.stopVm.bind(provider);
+  const cloneVm = provider.cloneVm.bind(provider);
+  const calls: string[] = [];
+
+  provider.stopVm = async (vm) => {
+    calls.push(`stop:${vm.id}`);
+    return await stopVm(vm);
+  };
+  provider.cloneVm = async (sourceVm, targetVm, template) => {
+    calls.push(`clone:${sourceVm.id}`);
+    return await cloneVm(sourceVm, targetVm, template);
+  };
+
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const clone = manager.cloneVm({
+    sourceVmId: "vm-0001",
+    name: "alpha-clean-copy",
+    resources: {
+      cpu: 10,
+      ramMb: 24576,
+      diskGb: 160,
+    },
+    networkMode: "dmz",
+    shutdownSourceBeforeClone: true,
+  });
+
+  await wait(800);
+
+  assert.deepEqual(calls, ["stop:vm-0001", "clone:vm-0001"]);
+  assert.equal(manager.getVmDetail("vm-0001").vm.status, "stopped");
+
+  const cloneDetail = manager.getVmDetail(clone.id);
+  assert.equal(cloneDetail.vm.status, "running");
+  assert.deepEqual(cloneDetail.vm.resources, {
+    cpu: 10,
+    ramMb: 24576,
+    diskGb: 160,
+  });
+  assert.equal(cloneDetail.vm.networkMode, "dmz");
 });
 
 test("manager marks a running VM stopped after the provider reports an external shutdown", (context) => {
@@ -1064,6 +1149,61 @@ test("failed snapshot launches leave the placeholder VM in an error state", asyn
   assert.ok(
     detail.recentJobs.some(
       (job) => job.kind === "launch-snapshot" && job.status === "failed",
+    ),
+  );
+});
+
+test("failed desktop attach keeps the VM running when the provider still sees it booted", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-desktop-attach-error-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  provider.createVm = async () => {
+    throw new Error("desktop bridge failed");
+  };
+  provider.observeVmPowerState = () => ({
+    status: "running",
+  });
+
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "running-without-vnc",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  await wait(100);
+
+  const detail = manager.getVmDetail(vm.id);
+  assert.equal(detail.vm.status, "running");
+  assert.equal(detail.vm.activeWindow, "logs");
+  assert.equal(detail.vm.lastAction, "desktop bridge failed");
+  assert.equal(detail.vm.session, null);
+  assert.ok(detail.vm.liveSince);
+  assert.ok(detail.vm.activityLog.some((entry) => entry === "error: desktop bridge failed"));
+  assert.ok(
+    detail.recentJobs.some(
+      (job) => job.kind === "create" && job.status === "failed",
     ),
   );
 });
@@ -2037,6 +2177,8 @@ test("incus provider repairs captured-template desktops before trusting guest VN
         return ok("", args);
       },
     },
+    guestAgentRetryMs: 0,
+    guestAgentRetryTimeoutMs: 0,
     guestPortProbe: {
       async probe() {
         return true;
@@ -2102,6 +2244,122 @@ test("incus provider repairs captured-template desktops before trusting guest VN
     0,
   );
   assert.equal(mutation.session?.display, "10.55.0.44:5900");
+});
+
+test("incus provider fails fast when captured-template bootstrap repair cannot reach the guest agent", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0100-captured-agent-missing";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        calls.push(args);
+
+        if (
+          args[0] === "list" &&
+          ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+        ) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.45",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+          return expandedRootDevice(args, "osdisk");
+        }
+
+        if (
+          args[0] === "exec" &&
+          args[1] === instanceName &&
+          (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+        ) {
+          return {
+            args,
+            status: 1,
+            stdout: "",
+            stderr: "Error: VM agent isn't currently connected",
+          };
+        }
+
+        return ok("", args);
+      },
+    },
+    guestAgentRetryMs: 0,
+    guestAgentRetryTimeoutMs: 0,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const template: EnvironmentTemplate = {
+    id: "tpl-captured-0101",
+    name: "Captured Desktop",
+    description: "Publishes an existing workspace image",
+    launchSource: "parallaize-template-tpl-captured-0101",
+    defaultResources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    defaultForwardedPorts: [],
+    initCommands: [],
+    tags: ["captured"],
+    notes: [],
+    snapshotIds: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const vm: VmInstance = {
+    id: "vm-0101",
+    name: "captured-agent-missing",
+    templateId: template.id,
+    provider: "incus",
+    providerRef: instanceName,
+    status: "creating",
+    resources: template.defaultResources,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Queued",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 11,
+    activeWindow: "editor",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  await assert.rejects(
+    provider.createVm(vm, template),
+    /Incus guest agent is unavailable.*Repair the Incus guest-agent payload on the host and retry\./s,
+  );
+
+  const inspectCalls = calls.filter((args) => args[0] === "list" && args[1] === instanceName);
+  assert.equal(inspectCalls.length, 1);
 });
 
 test("incus provider reads staged publish progress from the operations API", async () => {
@@ -3425,7 +3683,10 @@ test("incus provider falls back to IPv6 guest metadata when IPv4 is absent", asy
         return expandedRootDevice(args);
       }
 
-      if (args[0] === "list" && args[1] === instanceName) {
+      if (
+        args[0] === "list" &&
+        ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+      ) {
         return ok(
           JSON.stringify([
             {
@@ -3550,7 +3811,10 @@ test("incus provider only marks a guest VNC session ready after an RFB handshake
         return expandedRootDevice(args);
       }
 
-      if (args[0] === "list" && args[1] === instanceName) {
+      if (
+        args[0] === "list" &&
+        ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+      ) {
         return ok(
           JSON.stringify([
             {
@@ -4423,6 +4687,112 @@ test("incus provider treats an already-running instance as a successful resume",
   assert.equal(mutation.session?.display, "10.55.0.111:5901");
   assert.deepEqual(startCall, ["start", instanceName]);
   assert.equal(mutation.lastAction, "Workspace resumed");
+});
+
+test("incus provider retries guest DNS sync until the guest agent is ready", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0112-agent-retry";
+  let dnsExecAttempts = 0;
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args, "root");
+      }
+
+      if (
+        args[0] === "list" &&
+        ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+      ) {
+        return ok(
+          JSON.stringify([
+            {
+              name: instanceName,
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address: "10.55.0.112",
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      if (
+        args[0] === "exec" &&
+        args[1] === instanceName &&
+        (args[5] ?? "").includes("systemctl restart systemd-resolved.service")
+      ) {
+        dnsExecAttempts += 1;
+
+        if (dnsExecAttempts < 3) {
+          return {
+            args,
+            status: 1,
+            stdout: "",
+            stderr: "Error: VM agent isn't currently running",
+          };
+        }
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5901,
+    commandRunner: runner,
+    guestAgentRetryMs: 0,
+    guestAgentRetryTimeoutMs: 50,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0112",
+    name: "agent-retry",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "stopped",
+    resources: {
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 30,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Stopped",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 12,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.startVm(vm);
+
+  assert.equal(mutation.session?.display, "10.55.0.112:5901");
+  assert.equal(dnsExecAttempts, 3);
 });
 
 test("manager reattaches reachable VNC sessions for running incus VMs after startup", async (context) => {

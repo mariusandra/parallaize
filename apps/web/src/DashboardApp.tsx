@@ -89,14 +89,37 @@ import {
   hasNewerReleaseAvailable,
 } from "./releaseVersion.js";
 
+type CreateSourceKind = "template" | "snapshot" | "vm";
+type CreateSourceCategory =
+  | "system-templates"
+  | "my-templates"
+  | "snapshots"
+  | "existing-vms";
+
 interface CreateDraft {
-  templateId: string;
+  launchSource: string;
   name: string;
   cpu: string;
   ramGb: string;
   diskGb: string;
   networkMode: VmNetworkMode;
   initCommands: string;
+  shutdownSourceBeforeClone: boolean;
+}
+
+interface CreateSourceSelection {
+  category: CreateSourceCategory;
+  kind: CreateSourceKind;
+  label: string;
+  snapshot: Snapshot | null;
+  sourceVm: VmInstance | null;
+  template: EnvironmentTemplate;
+  value: string;
+}
+
+interface CreateSourceGroup {
+  label: string;
+  options: CreateSourceSelection[];
 }
 
 interface ResourceDraft {
@@ -217,19 +240,27 @@ interface VmLogsDialogState {
   vmName: string;
 }
 
+interface VmLogsViewState {
+  error: string | null;
+  loading: boolean;
+  logs: VmLogsSnapshot | null;
+  refreshing: boolean;
+}
+
 interface CloneVmDialogState {
   sourceVmId: string;
   sourceVmName: string;
 }
 
 const emptyCreateDraft: CreateDraft = {
-  templateId: "",
+  launchSource: "",
   name: "",
   cpu: "",
   ramGb: "",
   diskGb: "",
   networkMode: "default",
   initCommands: "",
+  shutdownSourceBeforeClone: false,
 };
 
 const emptyResourceDraft: ResourceDraft = {
@@ -256,6 +287,13 @@ const emptyCaptureDraft: CaptureDraft = {
   templateId: "",
   name: "",
   description: "",
+};
+
+const emptyVmLogsViewState: VmLogsViewState = {
+  error: null,
+  loading: false,
+  logs: null,
+  refreshing: false,
 };
 
 const defaultLoginDraft: LoginDraft = {
@@ -340,6 +378,7 @@ export function DashboardApp(): JSX.Element {
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [vmLogsDialog, setVmLogsDialog] = useState<VmLogsDialogState | null>(null);
+  const [workspaceLogs, setWorkspaceLogs] = useState<VmLogsViewState>(emptyVmLogsViewState);
   const [vmLogsRefreshTick, setVmLogsRefreshTick] = useState(0);
   const [vmFileBrowser, setVmFileBrowser] = useState<VmFileBrowserSnapshot | null>(null);
   const [vmFileBrowserLoading, setVmFileBrowserLoading] = useState(false);
@@ -476,10 +515,11 @@ export function DashboardApp(): JSX.Element {
     selectedVmId !== null ? sidePanelCollapsed : wideShellLayout && sidePanelCollapsed;
   const isBusy = busyLabel !== null || vmReorderBusy;
   const currentDetail = selectedVm && detail?.vm.id === selectedVm.id ? detail : null;
+  const showWorkspaceLogs =
+    currentDetail !== null && shouldShowWorkspaceLogsSurface(currentDetail);
   const liveResolutionVmId =
     currentDetail?.vm.status === "running" &&
-    currentDetail.vm.session?.kind === "vnc" &&
-    currentDetail.vm.session.webSocketPath
+    hasBrowserDesktopSession(currentDetail.vm.session)
       ? currentDetail.vm.id
       : null;
   const ownsLiveResolutionControl =
@@ -898,12 +938,14 @@ export function DashboardApp(): JSX.Element {
   }, [summary?.jobs]);
 
   useEffect(() => {
-    if (!summary?.templates.length) {
+    if (!summary || (summary.templates.length === 0 && summary.snapshots.length === 0)) {
       return;
     }
 
-    setCreateDraft((current) => syncCreateDraft(current, summary.templates, createDirty));
-  }, [summary?.templates, createDirty]);
+    setCreateDraft((current) =>
+      syncCreateDraft(current, summary.templates, summary.snapshots, summary.vms, createDirty)
+    );
+  }, [summary?.templates, summary?.snapshots, summary?.vms, createDirty]);
 
   useEffect(() => {
     if (!openTemplateMenuId || summary?.templates.some((template) => template.id === openTemplateMenuId)) {
@@ -1168,9 +1210,77 @@ export function DashboardApp(): JSX.Element {
             ...current,
             vmName: matchingVm.name,
           }
-        : current,
+      : current,
     );
   }, [summary?.generatedAt, vmLogsDialog?.vmId, vmLogsDialog?.vmName]);
+
+  useEffect(() => {
+    if (authState !== "ready" || !currentDetail || !showWorkspaceLogs) {
+      setWorkspaceLogs(emptyVmLogsViewState);
+      return;
+    }
+
+    let cancelled = false;
+    let refreshTimer: number | null = null;
+    const vmId = currentDetail.vm.id;
+
+    setWorkspaceLogs(emptyVmLogsViewState);
+
+    const loadLogs = async (mode: "initial" | "refresh"): Promise<void> => {
+      setWorkspaceLogs((current) => ({
+        ...current,
+        loading: mode === "initial" && current.logs === null,
+        refreshing: mode === "refresh" && current.logs !== null,
+      }));
+
+      try {
+        const logs = await fetchJson<VmLogsSnapshot>(`/api/vms/${vmId}/logs`);
+
+        if (cancelled) {
+          return;
+        }
+
+        setWorkspaceLogs({
+          error: null,
+          loading: false,
+          logs,
+          refreshing: false,
+        });
+      } catch (error) {
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setWorkspaceLogs((current) => ({
+          ...current,
+          error: errorMessage(error),
+          loading: false,
+          refreshing: false,
+        }));
+      }
+
+      if (!cancelled) {
+        refreshTimer = window.setTimeout(() => {
+          void loadLogs("refresh");
+        }, vmLogsPollIntervalMs);
+      }
+    };
+
+    void loadLogs("initial");
+
+    return () => {
+      cancelled = true;
+
+      if (refreshTimer !== null) {
+        window.clearTimeout(refreshTimer);
+      }
+    };
+  }, [authState, currentDetail?.vm.id, showWorkspaceLogs]);
 
   useEffect(() => {
     if (!detail) {
@@ -1848,12 +1958,27 @@ export function DashboardApp(): JSX.Element {
   async function handleCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
-    const selectedTemplate =
-      summary?.templates.find((entry) => entry.id === createDraft.templateId) ?? null;
-    const createValidationError = buildCreateDiskValidationError(
-      selectedTemplate,
+    const selectedSource =
+      summary
+        ? resolveCreateSourceSelection(
+            summary.templates,
+            summary.snapshots,
+            summary.vms,
+            createDraft.launchSource,
+          )
+        : null;
+    const createValidationError = buildCreateLaunchValidationError(
+      selectedSource,
       createDraft.diskGb,
     );
+
+    if (!selectedSource) {
+      setNotice({
+        tone: "error",
+        message: "Choose a template, snapshot, or existing VM before launching a workspace.",
+      });
+      return;
+    }
 
     if (createValidationError) {
       setNotice({
@@ -1863,26 +1988,59 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
-    const payload: CreateVmInput = {
-      templateId: createDraft.templateId,
-      name: createDraft.name.trim(),
-      resources: {
-        cpu: Number(createDraft.cpu),
-        ramMb: parseRamDraftValue(createDraft.ramGb),
-        diskGb: Number(createDraft.diskGb),
-      },
-      networkMode: createDraft.networkMode,
-      initCommands: parseInitCommandsDraft(createDraft.initCommands),
+    const requestedName = createDraft.name.trim();
+    const requestedResources = {
+      cpu: Number(createDraft.cpu),
+      ramMb: parseRamDraftValue(createDraft.ramGb),
+      diskGb: Number(createDraft.diskGb),
     };
+    const pendingLabel =
+      requestedName ||
+      (selectedSource.kind === "vm" && selectedSource.sourceVm
+        ? `${selectedSource.sourceVm.name}-clone`
+        : "workspace");
 
     await runMutation(
-      `Creating ${payload.name || "workspace"}`,
+      `Creating ${pendingLabel}`,
       async () => {
-        const createdVm = await postJson<VmInstance>("/api/vms", payload);
+        const createdVm =
+          selectedSource.kind === "vm" && selectedSource.sourceVm
+            ? await postJson<VmInstance>(`/api/vms/${selectedSource.sourceVm.id}/clone`, {
+                sourceVmId: selectedSource.sourceVm.id,
+                name: requestedName,
+                resources: requestedResources,
+                networkMode: createDraft.networkMode,
+                shutdownSourceBeforeClone: createDraft.shutdownSourceBeforeClone,
+              })
+            : await postJson<VmInstance>("/api/vms", {
+                name: requestedName,
+                resources: requestedResources,
+                networkMode: createDraft.networkMode,
+                ...(selectedSource.kind === "snapshot"
+                  ? { snapshotId: selectedSource.snapshot?.id }
+                  : {
+                      templateId: selectedSource.template.id,
+                      initCommands: parseInitCommandsDraft(createDraft.initCommands),
+                    }),
+              } satisfies CreateVmInput);
         setCreateDirty(false);
-        const template = summary?.templates.find((entry) => entry.id === payload.templateId) ?? null;
-        if (template) {
-          setCreateDraft(buildCreateDraft(template));
+        if (selectedSource.kind === "snapshot" && selectedSource.snapshot) {
+          setCreateDraft(
+            buildCreateDraftFromSnapshot(
+              selectedSource.snapshot,
+              selectedSource.template,
+              selectedSource.sourceVm,
+            ),
+          );
+        } else if (selectedSource.kind === "vm" && selectedSource.sourceVm) {
+          setCreateDraft(
+            buildCreateDraftFromVm(
+              selectedSource.sourceVm,
+              selectedSource.template,
+            ),
+          );
+        } else {
+          setCreateDraft(buildCreateDraftFromTemplate(selectedSource.template));
         }
         setVmSidepanelCollapsed(createdVm.id, false);
         setSelectedVmId(createdVm.id);
@@ -1890,7 +2048,11 @@ export function DashboardApp(): JSX.Element {
         await refreshSummary();
         await refreshDetail(createdVm.id);
       },
-      `Queued create for ${payload.name}.`,
+      selectedSource.kind === "snapshot"
+        ? `Queued snapshot launch for ${pendingLabel}.`
+        : selectedSource.kind === "vm"
+          ? `Queued clone for ${pendingLabel}.`
+          : `Queued create for ${pendingLabel}.`,
     );
   }
 
@@ -1898,10 +2060,10 @@ export function DashboardApp(): JSX.Element {
     setCreateDirty(true);
     setCreateDraft((current) => {
       switch (field) {
-        case "templateId":
+        case "launchSource":
           return {
             ...current,
-            templateId: value,
+            launchSource: value,
           };
         case "name":
           return {
@@ -1933,23 +2095,38 @@ export function DashboardApp(): JSX.Element {
             ...current,
             initCommands: value,
           };
+        case "shutdownSourceBeforeClone":
+          return current;
       }
     });
   }
 
-  function handleTemplateChange(event: ChangeEvent<HTMLSelectElement>): void {
+  function handleCreateShutdownBeforeCloneChange(checked: boolean): void {
+    setCreateDirty(true);
+    setCreateDraft((current) => ({
+      ...current,
+      shutdownSourceBeforeClone: checked,
+    }));
+  }
+
+  function handleCreateSourceChange(event: ChangeEvent<HTMLSelectElement>): void {
     if (!summary) {
       return;
     }
 
-    const template = summary.templates.find((entry) => entry.id === event.target.value);
+    const selectedSource = resolveCreateSourceSelection(
+      summary.templates,
+      summary.snapshots,
+      summary.vms,
+      event.target.value,
+    );
 
-    if (!template) {
+    if (!selectedSource) {
       return;
     }
 
     setCreateDirty(false);
-    setCreateDraft(buildCreateDraft(template, createDraft.name));
+    setCreateDraft(buildCreateDraftFromSource(selectedSource, createDraft.name));
   }
 
   function openCreateDialog(): void {
@@ -1961,7 +2138,7 @@ export function DashboardApp(): JSX.Element {
 
   function openCreateDialogForTemplate(template: EnvironmentTemplate): void {
     setCreateDirty(false);
-    setCreateDraft(buildCreateDraft(template));
+    setCreateDraft(buildCreateDraftFromTemplate(template));
     setOpenTemplateMenuId(null);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
@@ -2220,7 +2397,7 @@ export function DashboardApp(): JSX.Element {
         closeTemplateCloneDialog();
         await refreshSummary();
         setCreateDirty(false);
-        setCreateDraft(buildCreateDraft(createdTemplate));
+        setCreateDraft(buildCreateDraftFromTemplate(createdTemplate));
       },
       `Saved template ${payload.name}.`,
     );
@@ -3754,8 +3931,7 @@ export function DashboardApp(): JSX.Element {
                   </div>
                 ) : getVmDesktopBootState(currentDetail, jobTimingNowMs) ? (
                   <WorkspaceBootSurface state={getVmDesktopBootState(currentDetail, jobTimingNowMs)!} />
-                ) : currentDetail.vm.session?.kind === "vnc" &&
-                  currentDetail.vm.session.webSocketPath ? (
+                ) : hasBrowserDesktopSession(currentDetail.vm.session) ? (
                   <div
                     ref={stageViewportShellRef}
                     className={joinClassNames(
@@ -3784,7 +3960,7 @@ export function DashboardApp(): JSX.Element {
                         viewportMode={
                           desktopResolutionMode === "viewport" ? "scale" : "fit"
                         }
-                        webSocketPath={currentDetail.vm.session.webSocketPath}
+                        webSocketPath={currentDetail.vm.session!.webSocketPath!}
                         showHeader={false}
                         statusMode="overlay"
                       />
@@ -3800,6 +3976,11 @@ export function DashboardApp(): JSX.Element {
                       ) : null}
                     </div>
                   </div>
+                ) : showWorkspaceLogs ? (
+                  <WorkspaceLogsSurface
+                    detail={currentDetail}
+                    logsState={workspaceLogs}
+                  />
                 ) : (
                   <WorkspaceFallbackSurface detail={currentDetail} />
                 )
@@ -3918,15 +4099,37 @@ export function DashboardApp(): JSX.Element {
         <CreateVmDialog
           busy={isBusy}
           createDraft={createDraft}
-          templates={displayedTemplates}
-          validationError={buildCreateDiskValidationError(
-            displayedTemplates.find((entry) => entry.id === createDraft.templateId) ?? null,
+          selectedSource={
+            summary
+              ? resolveCreateSourceSelection(
+                  summary.templates,
+                  summary.snapshots,
+                  summary.vms,
+                  createDraft.launchSource,
+                )
+              : null
+          }
+          sourceGroups={
+            summary
+              ? buildCreateSourceGroups(summary.templates, summary.snapshots, summary.vms)
+              : []
+          }
+          validationError={buildCreateLaunchValidationError(
+            summary
+              ? resolveCreateSourceSelection(
+                  summary.templates,
+                  summary.snapshots,
+                  summary.vms,
+                  createDraft.launchSource,
+                )
+              : null,
             createDraft.diskGb,
           )}
           onClose={() => setShowCreateDialog(false)}
           onFieldChange={handleCreateField}
+          onShutdownBeforeCloneChange={handleCreateShutdownBeforeCloneChange}
           onSubmit={handleCreate}
-          onTemplateChange={handleTemplateChange}
+          onSourceChange={handleCreateSourceChange}
         />
       ) : null}
       {templateCloneDraft ? (
@@ -3991,12 +4194,14 @@ export function DashboardApp(): JSX.Element {
 interface CreateVmDialogProps {
   busy: boolean;
   createDraft: CreateDraft;
-  templates: EnvironmentTemplate[];
+  selectedSource: CreateSourceSelection | null;
+  sourceGroups: CreateSourceGroup[];
   validationError: string | null;
   onClose: () => void;
   onFieldChange: (field: keyof CreateDraft, value: string) => void;
+  onShutdownBeforeCloneChange: (checked: boolean) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
-  onTemplateChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+  onSourceChange: (event: ChangeEvent<HTMLSelectElement>) => void;
 }
 
 interface TemplateCloneDialogProps {
@@ -4043,6 +4248,43 @@ interface VmLogsDialogProps {
   vmName: string;
   onClose: () => void;
   onRefresh: () => void;
+}
+
+function VmLogOutput({
+  className,
+  content,
+}: {
+  className?: string;
+  content: string;
+}): JSX.Element {
+  const outputRef = useRef<HTMLPreElement | null>(null);
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const output = outputRef.current;
+
+    if (!output || !stickToBottomRef.current) {
+      return;
+    }
+
+    output.scrollTop = output.scrollHeight;
+  }, [content]);
+
+  return (
+    <pre
+      ref={outputRef}
+      className={className}
+      onScroll={(event) => {
+        stickToBottomRef.current = isNearScrollBottom(event.currentTarget);
+      }}
+    >
+      {parseAnsiText(content).map((segment, index) => (
+        <span key={index} style={resolveAnsiSegmentStyle(segment)}>
+          {segment.text}
+        </span>
+      ))}
+    </pre>
+  );
 }
 
 function RenameDialog({
@@ -4120,19 +4362,6 @@ function VmLogsDialog({
   onClose,
   onRefresh,
 }: VmLogsDialogProps): JSX.Element {
-  const outputRef = useRef<HTMLPreElement | null>(null);
-  const stickToBottomRef = useRef(true);
-
-  useEffect(() => {
-    const output = outputRef.current;
-
-    if (!output || !stickToBottomRef.current) {
-      return;
-    }
-
-    output.scrollTop = output.scrollHeight;
-  }, [logs?.content]);
-
   return (
     <div className="dialog-backdrop" onClick={onClose}>
       <section
@@ -4176,19 +4405,7 @@ function VmLogsDialog({
         {loading && !logs ? <p className="empty-copy">Loading logs...</p> : null}
 
         {logs && logs.content.trim().length > 0 ? (
-          <pre
-            ref={outputRef}
-            className="vm-logs__output mono-font"
-            onScroll={(event) => {
-              stickToBottomRef.current = isNearScrollBottom(event.currentTarget);
-            }}
-          >
-            {parseAnsiText(logs.content).map((segment, index) => (
-              <span key={index} style={resolveAnsiSegmentStyle(segment)}>
-                {segment.text}
-              </span>
-            ))}
-          </pre>
+          <VmLogOutput className="vm-logs__output mono-font" content={logs.content} />
         ) : null}
 
         {!loading && logs && logs.content.trim().length === 0 ? (
@@ -4202,15 +4419,28 @@ function VmLogsDialog({
 function CreateVmDialog({
   busy,
   createDraft,
-  templates,
+  selectedSource,
+  sourceGroups,
   validationError,
   onClose,
   onFieldChange,
+  onShutdownBeforeCloneChange,
   onSubmit,
-  onTemplateChange,
+  onSourceChange,
 }: CreateVmDialogProps): JSX.Element {
-  const selectedTemplate =
-    templates.find((entry) => entry.id === createDraft.templateId) ?? templates[0] ?? null;
+  const snapshotSelected = selectedSource?.kind === "snapshot";
+  const cloneVmSelected = selectedSource?.kind === "vm";
+  const cloneSourceRunning = cloneVmSelected && selectedSource.sourceVm?.status === "running";
+  const reuseExistingDiskState = snapshotSelected || cloneVmSelected;
+  const lanAccessDisabled = createDraft.networkMode === "dmz";
+  const sourceSummary =
+    selectedSource?.kind === "snapshot" && selectedSource.snapshot
+      ? `Snapshot ${selectedSource.snapshot.label} from ${selectedSource.sourceVm?.name ?? selectedSource.template.name}.`
+      : selectedSource?.kind === "vm" && selectedSource.sourceVm
+        ? `Clone the current workspace state from ${selectedSource.sourceVm.name}.`
+      : selectedSource
+        ? `Template ${selectedSource.template.name} will provision a fresh workspace.`
+        : "Choose a template, snapshot, or existing VM to define the initial workspace state.";
 
   return (
     <div className="dialog-backdrop" onClick={onClose}>
@@ -4220,8 +4450,8 @@ function CreateVmDialog({
             <p className="workspace-shell__eyebrow">Create workspace</p>
             <h2 className="dialog-panel__title">Launch a VM</h2>
             <p className="dialog-panel__copy">
-              Keep the rail lean. Launch from a template here, then manage the rest in the
-              sidepanel.
+              Keep the rail lean. Launch from a template, saved snapshot, or existing VM here,
+              then manage the rest in the sidepanel.
             </p>
           </div>
           <button className="button button--ghost" type="button" onClick={onClose}>
@@ -4231,20 +4461,48 @@ function CreateVmDialog({
 
         <form className="dialog-panel__form" onSubmit={onSubmit}>
           <label className="field-shell">
-            <span>Template</span>
+            <span>Source</span>
             <select
               className="field-input"
-              value={createDraft.templateId}
-              onChange={onTemplateChange}
+              value={createDraft.launchSource}
+              onChange={onSourceChange}
               disabled={busy}
             >
-              {templates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.name}
-                </option>
+              {sourceGroups.map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </label>
+
+          <p className="empty-copy">{sourceSummary}</p>
+
+          {cloneSourceRunning ? (
+            <label
+              className="field-shell"
+              style={{ alignItems: "center", gap: "0.6rem", gridAutoFlow: "column", justifyContent: "start" }}
+            >
+              <input
+                checked={createDraft.shutdownSourceBeforeClone}
+                disabled={busy}
+                onChange={(event) => onShutdownBeforeCloneChange(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Shutdown the VM before cloning</span>
+            </label>
+          ) : null}
+
+          {cloneSourceRunning && !createDraft.shutdownSourceBeforeClone ? (
+            <InlineWarningNote title="Running clone source">
+              Some apps might have stale state and lockfiles when you clone a running VM. Shut it
+              down first if you need a cleaner copy.
+            </InlineWarningNote>
+          ) : null}
 
           <label className="field-shell">
             <span>Name</span>
@@ -4279,41 +4537,51 @@ function CreateVmDialog({
             />
           </div>
 
-          <label className="field-shell">
-            <span>Network</span>
-            <select
-              className="field-input"
-              value={createDraft.networkMode}
-              onChange={(event) => onFieldChange("networkMode", event.target.value)}
+          <label
+            className="field-shell"
+            style={{
+              alignItems: "center",
+              gap: "0.6rem",
+              gridAutoFlow: "column",
+              justifyContent: "start",
+            }}
+          >
+            <input
+              checked={lanAccessDisabled}
               disabled={busy}
-            >
-              <option value="default">Default bridge</option>
-              <option value="dmz">DMZ</option>
-            </select>
-          </label>
-
-          <p className="empty-copy">
-            Default bridge keeps the workspace on the normal network. DMZ keeps guest internet and
-            public DNS access while restricting host and private-range access unless explicitly
-            allowed.
-          </p>
-
-          <label className="field-shell">
-            <span>Init commands</span>
-            <textarea
-              className="field-input field-input--tall field-input--mono"
-              value={createDraft.initCommands}
-              onChange={(event) => onFieldChange("initCommands", event.target.value)}
-              placeholder={"sudo apt-get update\nsudo apt-get install -y ripgrep"}
-              disabled={busy}
-              spellCheck={false}
+              onChange={(event) =>
+                onFieldChange("networkMode", event.target.checked ? "dmz" : "default")}
+              type="checkbox"
             />
+            <span>Disable LAN access</span>
           </label>
 
           <p className="empty-copy">
-            These run once on first boot for this VM only. Use template edit or clone when you
-            want to save them as the default for future launches.
+            {lanAccessDisabled
+              ? "LAN access is disabled. The workspace uses the DMZ profile, which keeps guest internet and public DNS access while restricting host and private-range access unless explicitly allowed."
+              : "LAN access is enabled. The workspace uses the default bridge, including normal host and LAN reachability."}
           </p>
+
+          {!reuseExistingDiskState ? (
+            <>
+              <label className="field-shell">
+                <span>Init commands</span>
+                <textarea
+                  className="field-input field-input--tall field-input--mono"
+                  value={createDraft.initCommands}
+                  onChange={(event) => onFieldChange("initCommands", event.target.value)}
+                  placeholder={"sudo apt-get update\nsudo apt-get install -y ripgrep"}
+                  disabled={busy}
+                  spellCheck={false}
+                />
+              </label>
+
+              <p className="empty-copy">
+                These run once on first boot for this VM only. Use template edit or clone when
+                you want to save them as the default for future launches.
+              </p>
+            </>
+          ) : null}
 
           {validationError ? (
             <div className="inline-note">
@@ -4325,7 +4593,7 @@ function CreateVmDialog({
           <button
             className="button button--primary button--full"
             type="submit"
-            disabled={busy || validationError !== null}
+            disabled={busy || selectedSource === null || validationError !== null}
           >
             Queue workspace
           </button>
@@ -6765,6 +7033,59 @@ function WorkspaceBootSurface({ state }: WorkspaceBootSurfaceProps): JSX.Element
   );
 }
 
+function WorkspaceLogsSurface({
+  detail,
+  logsState,
+}: {
+  detail: VmDetail;
+  logsState: VmLogsViewState;
+}): JSX.Element {
+  return (
+    <div className="workspace-log-surface">
+      <div className="workspace-log-surface__header">
+        <span className="surface-pill surface-pill--busy">
+          {desktopFallbackBadge(detail)}
+        </span>
+        <h2 className="workspace-log-surface__title">
+          {workspaceLogsTitle(detail)}
+        </h2>
+        <p className="workspace-log-surface__copy">
+          {workspaceLogsMessage(detail)}
+        </p>
+        <div className="chip-row vm-logs__meta">
+          {logsState.logs ? (
+            <span className="surface-pill mono-font">{logsState.logs.providerRef}</span>
+          ) : null}
+          <span className="surface-pill">
+            {logsState.logs?.source ?? "Loading guest logs..."}
+          </span>
+          {logsState.logs ? (
+            <span className="surface-pill">
+              Updated {formatTimestamp(logsState.logs.fetchedAt)}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      {logsState.error ? (
+        <p className="empty-copy">Last refresh failed: {logsState.error}</p>
+      ) : null}
+
+      {logsState.loading && !logsState.logs ? (
+        <p className="empty-copy">Loading guest logs...</p>
+      ) : null}
+
+      {logsState.logs && logsState.logs.content.trim().length > 0 ? (
+        <VmLogOutput className="vm-logs__output workspace-log-surface__output mono-font" content={logsState.logs.content} />
+      ) : null}
+
+      {!logsState.loading && logsState.logs && logsState.logs.content.trim().length === 0 ? (
+        <p className="empty-copy">No guest log output is available yet.</p>
+      ) : null}
+    </div>
+  );
+}
+
 function WorkspaceFallbackSurface({ detail }: { detail: VmDetail }): JSX.Element {
   return (
     <div className="workspace-fallback">
@@ -7496,34 +7817,92 @@ function InlineWarningNote({
 function syncCreateDraft(
   current: CreateDraft,
   templates: EnvironmentTemplate[],
+  snapshots: Snapshot[],
+  vms: VmInstance[],
   preserveInput: boolean,
 ): CreateDraft {
-  const template =
-    templates.find((entry) => entry.id === current.templateId) ?? templates[0] ?? null;
+  const selectedSource = resolveCreateSourceSelection(
+    templates,
+    snapshots,
+    vms,
+    current.launchSource,
+  );
+  const nextSource = selectedSource ?? firstCreateSourceSelection(templates, snapshots, vms);
 
-  if (!template) {
+  if (!nextSource) {
     return current;
   }
 
-  if (preserveInput && current.templateId) {
+  if (preserveInput && current.launchSource) {
     return current;
   }
 
-  return buildCreateDraft(template, current.name);
+  return buildCreateDraftFromSource(nextSource, current.name);
 }
 
-function buildCreateDraft(
+function buildCreateDraftFromSource(
+  source: CreateSourceSelection,
+  name = "",
+): CreateDraft {
+  if (source.kind === "snapshot" && source.snapshot) {
+    return buildCreateDraftFromSnapshot(source.snapshot, source.template, source.sourceVm, name);
+  }
+
+  if (source.kind === "vm" && source.sourceVm) {
+    return buildCreateDraftFromVm(source.sourceVm, source.template, name);
+  }
+
+  return buildCreateDraftFromTemplate(source.template, name);
+}
+
+function buildCreateDraftFromTemplate(
   template: EnvironmentTemplate,
   name = "",
 ): CreateDraft {
   return {
-    templateId: template.id,
+    launchSource: buildCreateSourceValue("template", template.id),
     name,
     cpu: String(template.defaultResources.cpu),
     ramGb: formatRamDraftValue(template.defaultResources.ramMb),
     diskGb: String(template.defaultResources.diskGb),
     networkMode: template.defaultNetworkMode ?? "default",
     initCommands: formatInitCommandsDraft(template.initCommands),
+    shutdownSourceBeforeClone: false,
+  };
+}
+
+function buildCreateDraftFromSnapshot(
+  snapshot: Snapshot,
+  template: EnvironmentTemplate,
+  sourceVm: VmInstance | null,
+  name = "",
+): CreateDraft {
+  return {
+    launchSource: buildCreateSourceValue("snapshot", snapshot.id),
+    name,
+    cpu: String(snapshot.resources.cpu),
+    ramGb: formatRamDraftValue(snapshot.resources.ramMb),
+    diskGb: String(snapshot.resources.diskGb),
+    networkMode: normalizeVmNetworkMode(sourceVm?.networkMode ?? template.defaultNetworkMode),
+    initCommands: "",
+    shutdownSourceBeforeClone: false,
+  };
+}
+
+function buildCreateDraftFromVm(
+  sourceVm: VmInstance,
+  template: EnvironmentTemplate,
+  name = "",
+): CreateDraft {
+  return {
+    launchSource: buildCreateSourceValue("vm", sourceVm.id),
+    name,
+    cpu: String(sourceVm.resources.cpu),
+    ramGb: formatRamDraftValue(sourceVm.resources.ramMb),
+    diskGb: String(sourceVm.resources.diskGb),
+    networkMode: normalizeVmNetworkMode(sourceVm.networkMode ?? template.defaultNetworkMode),
+    initCommands: "",
+    shutdownSourceBeforeClone: sourceVm.status === "running",
   };
 }
 
@@ -7572,26 +7951,252 @@ function describeVmNetworkMode(networkMode: VmNetworkMode): string {
   return "Default bridge keeps the VM on the normal network profile, including the usual host and LAN reachability.";
 }
 
-function buildCreateDiskValidationError(
-  template: EnvironmentTemplate | null,
+function buildCreateSourceValue(kind: CreateSourceKind, id: string): string {
+  return `${kind}:${id}`;
+}
+
+function parseCreateSourceValue(
+  value: string,
+): { id: string; kind: CreateSourceKind } | null {
+  const separatorIndex = value.indexOf(":");
+
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  const kind = value.slice(0, separatorIndex);
+  const id = value.slice(separatorIndex + 1);
+
+  if ((kind !== "template" && kind !== "snapshot" && kind !== "vm") || id.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    kind,
+  };
+}
+
+function firstCreateSourceSelection(
+  templates: EnvironmentTemplate[],
+  snapshots: Snapshot[],
+  vms: VmInstance[],
+): CreateSourceSelection | null {
+  return buildCreateSourceGroups(templates, snapshots, vms)[0]?.options[0] ?? null;
+}
+
+function buildCreateSourceGroups(
+  templates: EnvironmentTemplate[],
+  snapshots: Snapshot[],
+  vms: VmInstance[],
+): CreateSourceGroup[] {
+  const systemTemplates = templates
+    .filter((template) => isSystemTemplate(template))
+    .map((template) => buildTemplateCreateSourceSelection(template));
+  const myTemplates = templates
+    .filter((template) => !isSystemTemplate(template))
+    .map((template) => buildTemplateCreateSourceSelection(template));
+  const snapshotOptions = snapshots
+    .map((snapshot) => buildSnapshotCreateSourceSelection(snapshot, templates, vms));
+  const vmOptions = vms
+    .map((vm) => buildVmCreateSourceSelection(vm, templates));
+
+  return [
+    systemTemplates.length > 0
+      ? {
+          label: "System templates",
+          options: systemTemplates,
+        }
+      : null,
+    myTemplates.length > 0
+      ? {
+          label: "My templates",
+          options: myTemplates,
+        }
+      : null,
+    snapshotOptions.length > 0
+      ? {
+          label: "Snapshots",
+          options: snapshotOptions,
+        }
+      : null,
+    vmOptions.length > 0
+      ? {
+          label: "Clone existing VM",
+          options: vmOptions,
+        }
+      : null,
+  ].filter((group): group is CreateSourceGroup => group !== null);
+}
+
+function resolveCreateSourceSelection(
+  templates: EnvironmentTemplate[],
+  snapshots: Snapshot[],
+  vms: VmInstance[],
+  value: string,
+): CreateSourceSelection | null {
+  const parsed = parseCreateSourceValue(value);
+
+  if (!parsed) {
+    return null;
+  }
+
+  if (parsed.kind === "template") {
+    const template = templates.find((entry) => entry.id === parsed.id);
+    return template ? buildTemplateCreateSourceSelection(template) : null;
+  }
+
+  if (parsed.kind === "snapshot") {
+    const snapshot = snapshots.find((entry) => entry.id === parsed.id);
+    return snapshot ? buildSnapshotCreateSourceSelection(snapshot, templates, vms) : null;
+  }
+
+  const vm = vms.find((entry) => entry.id === parsed.id);
+  return vm ? buildVmCreateSourceSelection(vm, templates) : null;
+}
+
+function buildTemplateCreateSourceSelection(
+  template: EnvironmentTemplate,
+): CreateSourceSelection {
+  return {
+    category: isSystemTemplate(template) ? "system-templates" : "my-templates",
+    kind: "template",
+    label: template.name,
+    snapshot: null,
+    sourceVm: null,
+    template,
+    value: buildCreateSourceValue("template", template.id),
+  };
+}
+
+function buildSnapshotCreateSourceSelection(
+  snapshot: Snapshot,
+  templates: EnvironmentTemplate[],
+  vms: VmInstance[],
+): CreateSourceSelection {
+  const template = resolveCreateSourceTemplate(templates, snapshot);
+  const sourceVm = vms.find((entry) => entry.id === snapshot.vmId) ?? null;
+
+  return {
+    category: "snapshots",
+    kind: "snapshot",
+    label: `${snapshot.label} - ${sourceVm?.name ?? template.name}`,
+    snapshot,
+    sourceVm,
+    template,
+    value: buildCreateSourceValue("snapshot", snapshot.id),
+  };
+}
+
+function buildVmCreateSourceSelection(
+  vm: VmInstance,
+  templates: EnvironmentTemplate[],
+): CreateSourceSelection {
+  const template =
+    templates.find((entry) => entry.id === vm.templateId) ?? buildRecoveredCreateSourceTemplateFromVm(vm);
+
+  return {
+    category: "existing-vms",
+    kind: "vm",
+    label: `${vm.name} - ${vm.status}`,
+    snapshot: null,
+    sourceVm: vm,
+    template,
+    value: buildCreateSourceValue("vm", vm.id),
+  };
+}
+
+function resolveCreateSourceTemplate(
+  templates: EnvironmentTemplate[],
+  snapshot: Snapshot,
+): EnvironmentTemplate {
+  return (
+    templates.find((entry) => entry.id === snapshot.templateId) ??
+    buildRecoveredCreateSourceTemplate(snapshot)
+  );
+}
+
+function buildRecoveredCreateSourceTemplate(
+  snapshot: Snapshot,
+): EnvironmentTemplate {
+  return {
+    id: snapshot.templateId,
+    name: "Deleted template",
+    description: "Recovered from snapshot metadata after the template record was removed.",
+    launchSource: "images:ubuntu/noble/desktop",
+    defaultResources: { ...snapshot.resources },
+    defaultForwardedPorts: [],
+    defaultNetworkMode: "default",
+    initCommands: [],
+    tags: ["orphaned"],
+    notes: ["Recovered from snapshot metadata after template deletion."],
+    snapshotIds: [snapshot.id],
+    createdAt: snapshot.createdAt,
+    updatedAt: snapshot.createdAt,
+  };
+}
+
+function buildRecoveredCreateSourceTemplateFromVm(
+  vm: VmInstance,
+): EnvironmentTemplate {
+  return {
+    id: vm.templateId,
+    name: "Deleted template",
+    description: "Recovered from VM metadata after the template record was removed.",
+    launchSource: "images:ubuntu/noble/desktop",
+    defaultResources: { ...vm.resources },
+    defaultForwardedPorts: [],
+    defaultNetworkMode: normalizeVmNetworkMode(vm.networkMode),
+    initCommands: [],
+    tags: ["orphaned"],
+    notes: ["Recovered from VM metadata after template deletion."],
+    snapshotIds: [],
+    createdAt: vm.createdAt,
+    updatedAt: vm.updatedAt,
+  };
+}
+
+function isSystemTemplate(template: EnvironmentTemplate): boolean {
+  return template.provenance?.kind === "seed";
+}
+
+function buildCreateLaunchValidationError(
+  source: CreateSourceSelection | null,
   diskGbInput: string,
 ): string | null {
-  if (!template) {
+  if (!source) {
     return null;
   }
 
-  const minimumDiskGb = minimumCreateDiskGb(template);
   const requestedDiskGb = Number(diskGbInput);
 
-  if (
-    minimumDiskGb === null ||
-    !Number.isFinite(requestedDiskGb) ||
-    requestedDiskGb >= minimumDiskGb
-  ) {
+  if (!Number.isFinite(requestedDiskGb)) {
     return null;
   }
 
-  return `${template.name} was captured from a ${minimumDiskGb} GB workspace and needs at least ${minimumDiskGb} GB disk to launch cleanly.`;
+  if (source.kind === "snapshot" && source.snapshot) {
+    const minimumSnapshotDiskGb = source.snapshot.resources.diskGb;
+
+    if (requestedDiskGb < minimumSnapshotDiskGb) {
+      return `Snapshot ${source.snapshot.label} needs at least ${minimumSnapshotDiskGb} GB disk because shrinking a saved filesystem is not supported.`;
+    }
+  }
+
+  if (source.kind === "vm" && source.sourceVm) {
+    const minimumVmDiskGb = source.sourceVm.resources.diskGb;
+
+    if (requestedDiskGb < minimumVmDiskGb) {
+      return `${source.sourceVm.name} needs at least ${minimumVmDiskGb} GB disk because shrinking a cloned filesystem is not supported.`;
+    }
+  }
+
+  const minimumTemplateDiskGb = minimumCreateDiskGb(source.template);
+
+  if (minimumTemplateDiskGb === null || requestedDiskGb >= minimumTemplateDiskGb) {
+    return null;
+  }
+
+  return `${source.template.name} was captured from a ${minimumTemplateDiskGb} GB workspace and needs at least ${minimumTemplateDiskGb} GB disk to launch cleanly.`;
 }
 
 function formatRamDraftValue(ramMb: number): string {
@@ -8207,6 +8812,36 @@ function desktopFallbackBadge(detail: VmDetail): string {
   }
 
   return "Waiting for guest VNC";
+}
+
+function hasBrowserDesktopSession(session: VmInstance["session"] | null | undefined): boolean {
+  return session?.kind === "vnc" && Boolean(session.webSocketPath);
+}
+
+function shouldShowWorkspaceLogsSurface(detail: VmDetail): boolean {
+  return detail.provider.desktopTransport === "novnc" &&
+    detail.vm.status === "running" &&
+    !hasBrowserDesktopSession(detail.vm.session);
+}
+
+function workspaceLogsTitle(detail: VmDetail): string {
+  const failedBootJob = detail.recentJobs.find(
+    (job) => isDesktopBootJobKind(job.kind) && job.status === "failed",
+  );
+
+  return failedBootJob ? "Desktop bridge failed" : "Waiting for guest VNC";
+}
+
+function workspaceLogsMessage(detail: VmDetail): string {
+  const failedBootJob = detail.recentJobs.find(
+    (job) => isDesktopBootJobKind(job.kind) && job.status === "failed",
+  );
+
+  if (failedBootJob) {
+    return `${failedBootJob.message} Showing the latest guest logs while the running VM stays attached to the host.`;
+  }
+
+  return "This VM is running, but the browser VNC bridge is not ready yet. Showing the latest guest logs until the desktop attaches.";
 }
 
 function desktopFallbackMessage(detail: VmDetail): string {
