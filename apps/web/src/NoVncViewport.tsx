@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type JSX } from "react";
 
 import {
+  applySafeRfbEncodingPatch,
   buildRfbSocketUrls,
   clipboardPasteShortcutLabel,
   primeClipboardPasteCaptureTarget,
@@ -29,6 +30,7 @@ interface NoVncViewportProps {
   className?: string;
   hideConnectedOverlayStatus?: boolean;
   onResolutionChange?: (resolution: NoVncViewportResolution) => void;
+  reconnectDelayMs?: number;
   showHeader?: boolean;
   statusMode?: "header" | "overlay" | "hidden";
   surfaceClassName?: string;
@@ -41,12 +43,13 @@ interface NoVncViewportProps {
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 type ClipboardNoticeTone = "muted" | "success" | "warning";
 
-const reconnectDelayMs = 5_000;
+const defaultReconnectDelayMs = 1_000;
 const clipboardNoticeTimeoutMs = 4_500;
 export function NoVncViewport({
   className,
   hideConnectedOverlayStatus = false,
   onResolutionChange,
+  reconnectDelayMs = defaultReconnectDelayMs,
   showHeader = true,
   statusMode = showHeader ? "header" : "overlay",
   surfaceClassName,
@@ -499,6 +502,7 @@ export function NoVncViewport({
         rfb = new RFB(container, socketUrl, {
           shared: true,
         });
+        applySafeRfbEncodingPatch(rfb);
         rfbRef.current = rfb;
         const viewportSettings = viewportSettingsForMode(viewportMode);
         rfb.scaleViewport = viewportSettings.scaleViewport;

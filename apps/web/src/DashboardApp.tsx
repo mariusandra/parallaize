@@ -81,6 +81,15 @@ import {
   canUseDeferredIdentifiedCollection,
   orderIdentifiedCollectionByIds,
 } from "./deferredCollections.js";
+import {
+  hasBrowserVncSession,
+  mergeSelectedVmDetail,
+  resolveDisplayedDesktopSession,
+  resolveSelectedDesktopSession,
+  shouldRefreshSelectedVmDetail,
+  shouldShowLiveVmPreview,
+  type RetainedDesktopSession,
+} from "./desktopSession.js";
 import { parseAnsiText, resolveAnsiSegmentStyle } from "./ansi.js";
 import { NoVncViewport } from "./NoVncViewport.js";
 import {
@@ -88,6 +97,7 @@ import {
   classifyAvailableRelease,
   hasNewerReleaseAvailable,
 } from "./releaseVersion.js";
+import { buildRandomVmName } from "./vmNames.js";
 
 type CreateSourceKind = "template" | "snapshot" | "vm";
 type CreateSourceCategory =
@@ -483,6 +493,8 @@ export function DashboardApp(): JSX.Element {
     useState<ViewportBounds>(emptyViewportBounds);
   const [pendingManualResolutionSync, setPendingManualResolutionSync] =
     useState<PendingManualResolutionSync | null>(null);
+  const [retainedStageSession, setRetainedStageSession] =
+    useState<RetainedDesktopSession | null>(null);
 
   const deferredVms = useDeferredValue(summary?.vms ?? []);
   const deferredTemplates = useDeferredValue(summary?.templates ?? []);
@@ -514,13 +526,20 @@ export function DashboardApp(): JSX.Element {
   const effectiveSidePanelCollapsed =
     selectedVmId !== null ? sidePanelCollapsed : wideShellLayout && sidePanelCollapsed;
   const isBusy = busyLabel !== null || vmReorderBusy;
-  const currentDetail = selectedVm && detail?.vm.id === selectedVm.id ? detail : null;
+  const currentDetail = mergeSelectedVmDetail(selectedVm, detail);
+  const currentStageSession = resolveSelectedDesktopSession(selectedVm, currentDetail);
+  const currentStageVm = currentDetail?.vm ?? selectedVm ?? null;
+  const displayedStageSession = resolveDisplayedDesktopSession(
+    currentStageVm,
+    currentStageSession,
+    retainedStageSession,
+  );
   const showWorkspaceLogs =
     currentDetail !== null && shouldShowWorkspaceLogsSurface(currentDetail);
   const liveResolutionVmId =
-    currentDetail?.vm.status === "running" &&
-    hasBrowserDesktopSession(currentDetail.vm.session)
-      ? currentDetail.vm.id
+    currentStageVm?.status === "running" &&
+    hasBrowserVncSession(displayedStageSession)
+      ? currentStageVm.id
       : null;
   const ownsLiveResolutionControl =
     liveResolutionVmId !== null &&
@@ -961,6 +980,18 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
+    const selectedSummaryVm =
+      summary?.vms.find((entry) => entry.id === selectedVmId) ?? null;
+    const shouldFetchDetail =
+      !detail ||
+      detail.vm.id !== selectedVmId ||
+      (selectedSummaryVm &&
+        shouldRefreshSelectedVmDetail(selectedSummaryVm, detail, summary?.jobs));
+
+    if (!shouldFetchDetail) {
+      return;
+    }
+
     let cancelled = false;
 
     void (async () => {
@@ -988,7 +1019,7 @@ export function DashboardApp(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [selectedVmId, summary?.generatedAt]);
+  }, [selectedVmId, summary?.generatedAt, detail?.vm.id, detail?.generatedAt]);
 
   useEffect(() => {
     if (authState !== "ready" || !detail) {
@@ -1405,16 +1436,48 @@ export function DashboardApp(): JSX.Element {
   }, [desktopResolutionByVm]);
 
   useEffect(() => {
+    if (!currentStageVm || currentStageVm.status !== "running") {
+      setRetainedStageSession(null);
+      return;
+    }
+
+    const nextStageSession =
+      currentStageSession && hasBrowserVncSession(currentStageSession)
+        ? currentStageSession
+        : null;
+
+    if (!nextStageSession) {
+      return;
+    }
+
+    setRetainedStageSession((current) =>
+      current?.vmId === currentStageVm.id &&
+      current.session?.kind === nextStageSession.kind &&
+      current.session?.webSocketPath === nextStageSession.webSocketPath
+        ? current
+        : {
+            vmId: currentStageVm.id,
+            session: nextStageSession,
+          },
+    );
+  }, [
+    currentStageVm?.id,
+    currentStageVm?.status,
+    currentStageSession?.kind,
+    currentStageSession?.webSocketPath,
+  ]);
+
+  useEffect(() => {
     if (
-      !currentDetail ||
-      currentDetail.vm.session?.kind !== "vnc" ||
-      !currentDetail.vm.session.webSocketPath
+      !currentStageVm ||
+      displayedStageSession?.kind !== "vnc" ||
+      !displayedStageSession.webSocketPath
     ) {
       setDesktopResolution(emptyResolutionState);
       setAvailableViewportBounds(emptyViewportBounds);
       setObservedViewportBounds(emptyViewportBounds);
     }
-  }, [currentDetail?.vm.id, currentDetail?.vm.session?.kind, currentDetail?.vm.session?.webSocketPath]);
+  }, [currentStageVm?.id, displayedStageSession?.kind, displayedStageSession?.webSocketPath]);
 
   useEffect(() => {
     clearResolutionRetryTimer();
@@ -1456,9 +1519,9 @@ export function DashboardApp(): JSX.Element {
       setAvailableViewportBounds(emptyViewportBounds);
     };
   }, [
-    currentDetail?.vm.id,
-    currentDetail?.vm.session?.kind,
-    currentDetail?.vm.session?.webSocketPath,
+    currentStageVm?.id,
+    displayedStageSession?.kind,
+    displayedStageSession?.webSocketPath,
   ]);
 
   useEffect(() => {
@@ -1491,9 +1554,9 @@ export function DashboardApp(): JSX.Element {
       setObservedViewportBounds(emptyViewportBounds);
     };
   }, [
-    currentDetail?.vm.id,
-    currentDetail?.vm.session?.kind,
-    currentDetail?.vm.session?.webSocketPath,
+    currentStageVm?.id,
+    displayedStageSession?.kind,
+    displayedStageSession?.webSocketPath,
     desktopResolutionMode,
   ]);
 
@@ -2130,6 +2193,17 @@ export function DashboardApp(): JSX.Element {
   }
 
   function openCreateDialog(): void {
+    const nextSource = summary
+      ? resolveCreateSourceSelection(
+          summary.templates,
+          summary.snapshots,
+          summary.vms,
+          createDraft.launchSource,
+        ) ?? firstCreateSourceSelection(summary.templates, summary.snapshots, summary.vms)
+      : null;
+
+    setCreateDirty(false);
+    setCreateDraft(nextSource ? buildCreateDraftFromSource(nextSource) : emptyCreateDraft);
     setOpenTemplateMenuId(null);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
@@ -2872,7 +2946,7 @@ export function DashboardApp(): JSX.Element {
       sourceVmId: vm.id,
       sourceVmName: vm.name,
     });
-    setCloneVmDraft(`${vm.name}-clone`);
+    setCloneVmDraft(buildRandomVmName());
   }
 
   async function handleCloneVmSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -3337,7 +3411,7 @@ export function DashboardApp(): JSX.Element {
   ): Promise<void> {
     const name = window.prompt(
       "VM name",
-      defaultSnapshotLaunchName(vm, snapshot),
+      buildRandomVmName(),
     )?.trim();
 
     if (!name) {
@@ -3925,13 +3999,7 @@ export function DashboardApp(): JSX.Element {
               )}
             >
               {selectedVm ? (
-                !currentDetail ? (
-                  <div className="workspace-stage__placeholder">
-                    <div className="workspace-stage__placeholder-block skeleton-shell" />
-                  </div>
-                ) : getVmDesktopBootState(currentDetail, jobTimingNowMs) ? (
-                  <WorkspaceBootSurface state={getVmDesktopBootState(currentDetail, jobTimingNowMs)!} />
-                ) : hasBrowserDesktopSession(currentDetail.vm.session) ? (
+                hasBrowserVncSession(displayedStageSession) ? (
                   <div
                     ref={stageViewportShellRef}
                     className={joinClassNames(
@@ -3952,30 +4020,41 @@ export function DashboardApp(): JSX.Element {
                       style={stageViewportFrameStyle}
                     >
                       <NoVncViewport
+                        key={currentStageVm?.id ?? displayedStageSession!.webSocketPath!}
                         className="workspace-stage__viewport"
                         hideConnectedOverlayStatus
                         onResolutionChange={setDesktopResolution}
+                        reconnectDelayMs={500}
                         surfaceClassName="workspace-stage__canvas"
                         viewOnly={blocksLiveResolutionControl}
                         viewportMode={
                           desktopResolutionMode === "viewport" ? "scale" : "fit"
                         }
-                        webSocketPath={currentDetail.vm.session!.webSocketPath!}
+                        webSocketPath={displayedStageSession!.webSocketPath!}
                         showHeader={false}
                         statusMode="overlay"
                       />
-                      {blocksLiveResolutionControl && resolutionControlHeading && resolutionControlMessage ? (
+                      {currentStageVm &&
+                      blocksLiveResolutionControl &&
+                      resolutionControlHeading &&
+                      resolutionControlMessage ? (
                         <WorkspaceControlLockOverlay
                           disabled={isBusy || resolutionControlTakeoverBusy}
                           message={resolutionControlMessage}
                           takeOverLabel={resolutionControlTakeoverLabel}
                           takeoverBusy={resolutionControlTakeoverBusy}
                           title={resolutionControlHeading}
-                          onTakeOver={() => void handleTakeOverResolutionControl(currentDetail.vm)}
+                          onTakeOver={() => void handleTakeOverResolutionControl(currentStageVm)}
                         />
                       ) : null}
                     </div>
                   </div>
+                ) : !currentDetail ? (
+                  <div className="workspace-stage__placeholder">
+                    <div className="workspace-stage__placeholder-block skeleton-shell" />
+                  </div>
+                ) : getVmDesktopBootState(currentDetail, jobTimingNowMs) ? (
+                  <WorkspaceBootSurface state={getVmDesktopBootState(currentDetail, jobTimingNowMs)!} />
                 ) : showWorkspaceLogs ? (
                   <WorkspaceLogsSurface
                     detail={currentDetail}
@@ -4990,11 +5069,7 @@ function VmTile({
   onToggleMenu,
 }: VmTileProps): JSX.Element {
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
-  const canShowLivePreview =
-    showLivePreview &&
-    vm.status === "running" &&
-    vm.session?.kind === "vnc" &&
-    Boolean(vm.session.webSocketPath);
+  const canShowLivePreview = shouldShowLiveVmPreview(vm, showLivePreview);
   const previewLabel = vmTilePreviewLabel(vm, showLivePreview);
   const compactCpuPercent = compactVmCpuPercent(vm);
   const showMutedPreviewStatus =
@@ -7861,7 +7936,7 @@ function buildCreateDraftFromTemplate(
 ): CreateDraft {
   return {
     launchSource: buildCreateSourceValue("template", template.id),
-    name,
+    name: name || buildRandomVmName(),
     cpu: String(template.defaultResources.cpu),
     ramGb: formatRamDraftValue(template.defaultResources.ramMb),
     diskGb: String(template.defaultResources.diskGb),
@@ -7879,7 +7954,7 @@ function buildCreateDraftFromSnapshot(
 ): CreateDraft {
   return {
     launchSource: buildCreateSourceValue("snapshot", snapshot.id),
-    name,
+    name: name || buildRandomVmName(),
     cpu: String(snapshot.resources.cpu),
     ramGb: formatRamDraftValue(snapshot.resources.ramMb),
     diskGb: String(snapshot.resources.diskGb),
@@ -7896,7 +7971,7 @@ function buildCreateDraftFromVm(
 ): CreateDraft {
   return {
     launchSource: buildCreateSourceValue("vm", sourceVm.id),
-    name,
+    name: name || buildRandomVmName(),
     cpu: String(sourceVm.resources.cpu),
     ramGb: formatRamDraftValue(sourceVm.resources.ramMb),
     diskGb: String(sourceVm.resources.diskGb),
@@ -8814,14 +8889,10 @@ function desktopFallbackBadge(detail: VmDetail): string {
   return "Waiting for guest VNC";
 }
 
-function hasBrowserDesktopSession(session: VmInstance["session"] | null | undefined): boolean {
-  return session?.kind === "vnc" && Boolean(session.webSocketPath);
-}
-
 function shouldShowWorkspaceLogsSurface(detail: VmDetail): boolean {
   return detail.provider.desktopTransport === "novnc" &&
     detail.vm.status === "running" &&
-    !hasBrowserDesktopSession(detail.vm.session);
+    !hasBrowserVncSession(detail.vm.session);
 }
 
 function workspaceLogsTitle(detail: VmDetail): string {
@@ -9377,16 +9448,6 @@ function maxDisplayedSidepanelWidth(viewportWidth: number): number {
     sidepanelMinWidth,
     Math.min(sidepanelMaxWidth, viewportWidth - 640),
   );
-}
-
-function defaultSnapshotLaunchName(vm: VmInstance, snapshot: Snapshot): string {
-  const slug = snapshot.label
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 24);
-
-  return `${vm.name}-${slug || "snapshot"}`;
 }
 
 function formatCurrentResolution(state: DesktopResolutionState): string {

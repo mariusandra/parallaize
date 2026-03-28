@@ -26,3 +26,7 @@ Target slice: run agents against Git-backed codebases inside untrusted worker VM
 - [ ] Add a guest-side `Collect` action that packages the current repo state for handoff instead of attempting an in-guest push.
 - [ ] Build the trusted verification and sync-back path: queue submitted diffs, inspect and test them in a clean environment, approve or reject them, then push approved changes from the trusted side only.
 - [ ] Document fallback and recovery flows: manual patch or bundle export, abandoned-worker collection, upstream branch drift, conflicts, and collection-service outage handling.
+
+## Backlog
+
+- [ ] Try Selkies as an alternative browser desktop transport to the current VNC/noVNC path, with focus on latency, reliability, and deployment complexity.

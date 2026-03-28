@@ -109,6 +109,7 @@ Optional Incus tuning:
 - Set `PARALLAIZE_INCUS_STORAGE_POOL` if you want new VMs and clones to land on a faster `lvm`, `btrfs`, or `zfs` pool instead of a slow `dir` pool.
 - On Hetzner dedicated hosts, the cleanest way to get that `lvm` pool is to create the LVM-backed disk or volume group from the Hetzner rescue system before installing Ubuntu, then initialize Incus against it afterward.
 - Set `PARALLAIZE_INCUS_PROJECT` if you want Parallaize isolated inside a dedicated Incus project.
+- Set `PARALLAIZE_DEFAULT_TEMPLATE_LAUNCH_SOURCE` if you want the seeded Ubuntu template pinned to a known-good local alias, fingerprint, or explicit remote image instead of following the moving `images:ubuntu/noble/desktop` alias. Existing seeded templates are reconciled to that value on restart.
 
 ## Hostname-based forwarded services
 

@@ -59,11 +59,16 @@ const store = await createStateStore(
     kind: config.persistenceKind,
     dataFile: config.dataFile,
     databaseUrl: config.databaseUrl,
+    defaultTemplateLaunchSource: config.defaultTemplateLaunchSource,
   },
-  () => createSeedState(provider.state),
+  () =>
+    createSeedState(provider.state, {
+      defaultTemplateLaunchSource: config.defaultTemplateLaunchSource,
+    }),
 );
 const manager = new DesktopManager(store, provider, {
   forwardedServiceHostBase: config.forwardedServiceHostBase,
+  defaultTemplateLaunchSource: config.configuredDefaultTemplateLaunchSource,
 });
 const networkBridge = new VmNetworkBridge(manager);
 manager.start();

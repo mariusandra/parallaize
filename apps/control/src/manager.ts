@@ -48,8 +48,14 @@ import type {
   VmFileContent,
 } from "./providers.js";
 import type { StateStore } from "./store.js";
+import {
+  buildSeedTemplateSummary,
+  DEFAULT_TEMPLATE_ID,
+  FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
+  isAutoSeedTemplateSummary,
+  resolveDefaultTemplateLaunchSource,
+} from "./template-defaults.js";
 
-const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 const MAX_ACTIVITY_LINES = 8;
 const MAX_COMMAND_RESULTS = 6;
 const MAX_JOBS = 20;
@@ -61,6 +67,7 @@ type VmSessionRefreshMode = "none" | "missing" | "all";
 
 interface DesktopManagerOptions {
   forwardedServiceHostBase?: string | null;
+  defaultTemplateLaunchSource?: string | null;
 }
 
 export class DesktopManager {
@@ -71,6 +78,7 @@ export class DesktopManager {
   private readonly hostCpuCount = cpus().length;
   private readonly hostRamMb = Math.round(totalmem() / (1024 * 1024));
   private readonly hostDiskGb = detectHostDiskGb();
+  private readonly defaultTemplateLaunchSource: string;
   private sessionRefreshMode: VmSessionRefreshMode = "none";
   private sessionRefreshInFlight = false;
 
@@ -79,6 +87,10 @@ export class DesktopManager {
     private readonly provider: DesktopProvider,
     private readonly options: DesktopManagerOptions = {},
   ) {
+    this.defaultTemplateLaunchSource = resolveDefaultTemplateLaunchSource(
+      this.options.defaultTemplateLaunchSource,
+    );
+    this.reconcileDefaultTemplateLaunchSource();
     this.syncProviderState();
     this.reconcileInterruptedJobs();
     this.reconcileFailedProvisioningJobs();
@@ -193,7 +205,6 @@ export class DesktopManager {
   }
 
   getSummary(): DashboardSummary {
-    this.syncProviderState();
     const state = this.store.load();
     const metrics = collectMetrics(state.vms);
     metrics.hostCpuCount = this.hostCpuCount;
@@ -216,7 +227,6 @@ export class DesktopManager {
   }
 
   getVmDetail(vmId: string): VmDetail {
-    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
 
@@ -234,7 +244,6 @@ export class DesktopManager {
   }
 
   async getVmLogs(vmId: string): Promise<VmLogsSnapshot> {
-    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
     this.ensureActiveProvider(vm);
@@ -245,7 +254,6 @@ export class DesktopManager {
     vmId: string,
     requestedPath?: string | null,
   ): Promise<VmFileBrowserSnapshot> {
-    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
     this.ensureActiveProvider(vm);
@@ -256,7 +264,6 @@ export class DesktopManager {
   }
 
   async readVmFile(vmId: string, requestedPath: string): Promise<VmFileContent> {
-    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
     this.ensureActiveProvider(vm);
@@ -267,7 +274,6 @@ export class DesktopManager {
   }
 
   async getVmTouchedFiles(vmId: string): Promise<VmTouchedFilesSnapshot> {
-    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
     this.ensureActiveProvider(vm);
@@ -275,7 +281,6 @@ export class DesktopManager {
   }
 
   async getVmDiskUsage(vmId: string): Promise<VmDiskUsageSnapshot> {
-    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
 
@@ -313,7 +318,6 @@ export class DesktopManager {
   }
 
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {
-    this.syncProviderState();
     const state = this.store.load();
     const vm = this.requireVm(state, vmId);
     const template =
@@ -357,7 +361,11 @@ export class DesktopManager {
     this.store.update((draft) => {
       if (requestedSnapshotId) {
         const snapshot = requireSnapshot(draft, requestedSnapshotId);
-        const template = resolveTemplateForSnapshot(draft, snapshot);
+        const template = resolveTemplateForSnapshot(
+          draft,
+          snapshot,
+          this.defaultTemplateLaunchSource,
+        );
         const sourceVm = draft.vms.find((entry) => entry.id === snapshot.vmId) ?? null;
         const forwardedPorts =
           input.forwardedPorts ??
@@ -458,7 +466,13 @@ export class DesktopManager {
           await sleep(350);
           report("Cloning snapshot", 48);
           const snapshot = launchSnapshot;
-          const template = launchTemplate ?? resolveTemplateForSnapshot(this.store.load(), snapshot);
+          const template =
+            launchTemplate ??
+            resolveTemplateForSnapshot(
+              this.store.load(),
+              snapshot,
+              this.defaultTemplateLaunchSource,
+            );
           const mutation = await this.provider.launchVmFromSnapshot(
             snapshot,
             vmRecord,
@@ -764,7 +778,11 @@ export class DesktopManager {
       const source = this.requireVm(draft, vmId);
       this.ensureActiveProvider(source);
       const snapshot = requireVmSnapshot(draft, vmId, snapshotId);
-      const template = resolveTemplateForSnapshot(draft, snapshot);
+      const template = resolveTemplateForSnapshot(
+        draft,
+        snapshot,
+        this.defaultTemplateLaunchSource,
+      );
       const name =
         input.name?.trim() ||
         `${source.name}-${slugify(snapshot.label) || "snapshot"}-${String(draft.sequence).padStart(2, "0")}`;
@@ -815,7 +833,11 @@ export class DesktopManager {
         report("Cloning snapshot", 48);
         const detail = this.getVmDetail(vmId);
         const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
-        const template = resolveTemplateForSnapshot(this.store.load(), snapshot);
+        const template = resolveTemplateForSnapshot(
+          this.store.load(),
+          snapshot,
+          this.defaultTemplateLaunchSource,
+        );
 
         this.ensureActiveProvider(detail.vm);
 
@@ -924,7 +946,7 @@ export class DesktopManager {
       const launchSource =
         providerSnapshot.launchSource ??
         detail.template?.launchSource ??
-        DEFAULT_TEMPLATE_LAUNCH_SOURCE;
+        this.defaultTemplateLaunchSource;
       let updatedExistingTemplate = false;
 
       this.store.update((draft) => {
@@ -1469,6 +1491,82 @@ export class DesktopManager {
     });
   }
 
+  private reconcileDefaultTemplateLaunchSource(): void {
+    if (this.options.defaultTemplateLaunchSource == null) {
+      return;
+    }
+
+    this.store.update((draft) => {
+      const template = draft.templates.find((entry) => entry.id === DEFAULT_TEMPLATE_ID);
+
+      if (!template) {
+        return false;
+      }
+
+      let dirty = false;
+      const seededSummary = buildSeedTemplateSummary(this.defaultTemplateLaunchSource);
+      const provenance = template.provenance ?? {
+        kind: "seed",
+        summary: "",
+        sourceTemplateId: null,
+        sourceTemplateName: null,
+        sourceVmId: null,
+        sourceVmName: null,
+        sourceSnapshotId: null,
+        sourceSnapshotLabel: null,
+      };
+
+      if (!template.provenance) {
+        template.provenance = provenance;
+        dirty = true;
+      }
+
+      if (provenance.kind !== "seed") {
+        return false;
+      }
+
+      const history = template.history ?? [];
+
+      if (!template.history) {
+        template.history = history;
+        dirty = true;
+      }
+
+      if (template.launchSource !== this.defaultTemplateLaunchSource) {
+        template.launchSource = this.defaultTemplateLaunchSource;
+        dirty = true;
+      }
+
+      if (isAutoSeedTemplateSummary(provenance.summary)) {
+        if (provenance.summary !== seededSummary) {
+          provenance.summary = seededSummary;
+          dirty = true;
+        }
+      }
+
+      const createdHistoryEntry = history.find((entry) => entry.kind === "created");
+
+      if (!createdHistoryEntry) {
+        history.unshift(buildTemplateHistoryEntry("created", seededSummary, template.createdAt));
+        dirty = true;
+      }
+
+      if (createdHistoryEntry && isAutoSeedTemplateSummary(createdHistoryEntry.summary)) {
+        if (createdHistoryEntry.summary !== seededSummary) {
+          createdHistoryEntry.summary = seededSummary;
+          dirty = true;
+        }
+      }
+
+      if (!dirty) {
+        return false;
+      }
+
+      template.updatedAt = nowIso();
+      return true;
+    });
+  }
+
   private reconcileInterruptedJobs(): void {
     this.store.update((draft) => {
       let dirty = false;
@@ -1652,7 +1750,7 @@ export class DesktopManager {
     }
 
     const candidateVmIds = state.vms
-      .filter((vm) => shouldRefreshVmSession(vm, state.provider.kind, mode))
+      .filter((vm) => this.shouldRefreshVmSession(vm, state.provider.kind, mode))
       .map((vm) => vm.id);
 
     if (candidateVmIds.length === 0) {
@@ -1664,7 +1762,7 @@ export class DesktopManager {
     for (const vmId of candidateVmIds) {
       const current = this.store.load().vms.find((entry) => entry.id === vmId);
 
-      if (!current || !shouldRefreshVmSession(current, state.provider.kind, mode)) {
+      if (!current || !this.shouldRefreshVmSession(current, state.provider.kind, mode)) {
         continue;
       }
 
@@ -1673,10 +1771,11 @@ export class DesktopManager {
           vmId,
           await this.provider.refreshVmSession(current),
         );
+
         const result = this.store.update((draft) => {
           const vm = draft.vms.find((entry) => entry.id === vmId);
 
-          if (!vm || !shouldRefreshVmSession(vm, draft.provider.kind, mode)) {
+          if (!vm || !this.shouldRefreshVmSession(vm, draft.provider.kind, mode)) {
             return false;
           }
 
@@ -1699,6 +1798,22 @@ export class DesktopManager {
     if (changed) {
       this.publish();
     }
+  }
+
+  private shouldRefreshVmSession(
+    vm: VmInstance,
+    providerKind: ProviderState["kind"],
+    mode: Exclude<VmSessionRefreshMode, "none">,
+  ): boolean {
+    if (vm.status !== "running" || vm.provider !== providerKind) {
+      return false;
+    }
+
+    if (mode === "all") {
+      return true;
+    }
+
+    return !hasReachableVncSession(vm.session);
   }
 
   private publish(): void {
@@ -1905,22 +2020,6 @@ function appendManyActivity(vm: VmInstance, lines: string[]): void {
 function appendCommandResult(vm: VmInstance, entry: VmCommandResult): void {
   const history = [...(vm.commandHistory ?? []), entry];
   vm.commandHistory = history.slice(-MAX_COMMAND_RESULTS);
-}
-
-function shouldRefreshVmSession(
-  vm: VmInstance,
-  providerKind: ProviderState["kind"],
-  mode: Exclude<VmSessionRefreshMode, "none">,
-): boolean {
-  if (vm.status !== "running" || vm.provider !== providerKind) {
-    return false;
-  }
-
-  if (mode === "all") {
-    return true;
-  }
-
-  return !hasReachableVncSession(vm.session);
 }
 
 function hasReachableVncSession(session: VmInstance["session"]): boolean {
@@ -2159,10 +2258,11 @@ function requireTemplate(
 function resolveTemplateForSnapshot(
   state: AppState,
   snapshot: Snapshot,
+  defaultTemplateLaunchSource = FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
 ): EnvironmentTemplate {
   return (
     state.templates.find((entry) => entry.id === snapshot.templateId) ??
-    buildOrphanedSnapshotTemplate(snapshot)
+    buildOrphanedSnapshotTemplate(snapshot, defaultTemplateLaunchSource)
   );
 }
 
@@ -2206,14 +2306,17 @@ function isMissingCapturedTemplateLaunchSourceError(
   );
 }
 
-function buildOrphanedSnapshotTemplate(snapshot: Snapshot): EnvironmentTemplate {
+function buildOrphanedSnapshotTemplate(
+  snapshot: Snapshot,
+  defaultTemplateLaunchSource: string,
+): EnvironmentTemplate {
   const now = nowIso();
 
   return {
     id: snapshot.templateId,
     name: "Deleted template",
     description: "Recovered from snapshot metadata after the template record was removed.",
-    launchSource: DEFAULT_TEMPLATE_LAUNCH_SOURCE,
+    launchSource: defaultTemplateLaunchSource,
     defaultResources: { ...snapshot.resources },
     defaultForwardedPorts: [],
     initCommands: [],

@@ -3317,7 +3317,9 @@ export DISPLAY="$DISPLAY_NUMBER"
 export XAUTHORITY="$AUTH_FILE"
 export HOME="\${HOME:-/root}"
 xset r on || true
-exec /usr/bin/x11vnc -display "$DISPLAY_NUMBER" -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noshm -nopw -repeat -rfbport ${port} -o /var/log/x11vnc.log`;
+# GNOME Shell uses a compositor. x11vnc's X DAMAGE path can get stuck on a
+# stale black frame there, so disable it for the browser bridge.
+exec /usr/bin/x11vnc -display "$DISPLAY_NUMBER" -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noxdamage -noshm -nopw -repeat -rfbport ${port} -o /var/log/x11vnc.log`;
 }
 
 function buildGuestVncServiceUnit(): string {
@@ -3395,12 +3397,20 @@ X-GNOME-Autostart-enabled=true
 NoDisplay=true`;
 }
 
+function buildGuestRenderingEnvironmentConfig(): string {
+  return `# Force GNOME onto software rendering so the guest X11 framebuffer stays
+# readable to x11vnc on newer Ubuntu desktop images.
+LIBGL_ALWAYS_SOFTWARE=1
+GALLIUM_DRIVER=llvmpipe`;
+}
+
 function buildGuestDesktopBootstrapScript(port: number): string {
   return `#!/bin/sh
 set -eu
 GDM_FILE="/etc/gdm3/custom.conf"
 LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
 SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
+RENDERING_ENV_FILE="/etc/environment.d/90-parallaize-rendering.conf"
 SESSION_SETUP_FILE="/usr/local/bin/parallaize-desktop-session-setup"
 SESSION_AUTOSTART_FILE="/etc/xdg/autostart/parallaize-desktop-session-setup.desktop"
 WELCOME_STATE_DIR="${DEFAULT_GUEST_HOME}/.config"
@@ -3421,6 +3431,11 @@ CURRENT_SERVICE="$(cat "$SERVICE_FILE" 2>/dev/null || true)"
 DESIRED_SERVICE="$(cat <<'UNIT'
 ${buildGuestVncServiceUnit()}
 UNIT
+)"
+CURRENT_RENDERING_ENV="$(cat "$RENDERING_ENV_FILE" 2>/dev/null || true)"
+DESIRED_RENDERING_ENV="$(cat <<'ENV'
+${buildGuestRenderingEnvironmentConfig()}
+ENV
 )"
 CURRENT_SESSION_SETUP="$(cat "$SESSION_SETUP_FILE" 2>/dev/null || true)"
 DESIRED_SESSION_SETUP="$(cat <<'SCRIPT'
@@ -3480,6 +3495,13 @@ if [ "$CURRENT_SERVICE" != "$DESIRED_SERVICE" ]; then
 ${buildGuestVncServiceUnit()}
 UNIT
   RESTART_VNC=1
+fi
+if [ "$CURRENT_RENDERING_ENV" != "$DESIRED_RENDERING_ENV" ]; then
+  mkdir -p /etc/environment.d
+  cat > "$RENDERING_ENV_FILE" <<'ENV'
+${buildGuestRenderingEnvironmentConfig()}
+ENV
+  RESTART_GDM=1
 fi
 if [ "$CURRENT_SESSION_SETUP" != "$DESIRED_SESSION_SETUP" ]; then
   mkdir -p /usr/local/bin
@@ -3563,6 +3585,10 @@ ${indentBlock(buildGuestVncLauncherScript(port), "      ")}
     permissions: '0644'
     content: |
 ${indentBlock(buildGuestVncServiceUnit(), "      ")}
+  - path: /etc/environment.d/90-parallaize-rendering.conf
+    permissions: '0644'
+    content: |
+${indentBlock(buildGuestRenderingEnvironmentConfig(), "      ")}
   - path: /usr/local/bin/parallaize-desktop-bootstrap
     permissions: '0755'
     content: |

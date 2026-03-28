@@ -6,11 +6,20 @@ import {
   type VmInstance,
   type VmSession,
 } from "../../../packages/shared/src/types.js";
+import {
+  buildSeedTemplateSummary,
+  type DefaultTemplateLaunchSourceOptions,
+  resolveDefaultTemplateLaunchSource,
+} from "./template-defaults.js";
 
-const DEFAULT_UBUNTU_DESKTOP_IMAGE = "images:ubuntu/noble/desktop";
-
-export function createSeedState(provider: ProviderState): AppState {
+export function createSeedState(
+  provider: ProviderState,
+  options: DefaultTemplateLaunchSourceOptions = {},
+): AppState {
   const now = new Date().toISOString();
+  const defaultLaunchSource = resolveDefaultTemplateLaunchSource(
+    options.defaultTemplateLaunchSource,
+  );
 
   const templates: EnvironmentTemplate[] = [
     {
@@ -18,7 +27,7 @@ export function createSeedState(provider: ProviderState): AppState {
       name: "Ubuntu Agent Forge",
       description:
         "Balanced Ubuntu desktop for coding agents, shell tasks, and browser-based reviews.",
-      launchSource: DEFAULT_UBUNTU_DESKTOP_IMAGE,
+      launchSource: defaultLaunchSource,
       defaultResources: {
         cpu: 6,
         ramMb: 12288,
@@ -35,7 +44,7 @@ export function createSeedState(provider: ProviderState): AppState {
       snapshotIds: provider.kind === "mock" ? ["snap-0001"] : [],
       provenance: {
         kind: "seed",
-        summary: `Seeded from ${DEFAULT_UBUNTU_DESKTOP_IMAGE}.`,
+        summary: buildSeedTemplateSummary(defaultLaunchSource),
         sourceTemplateId: null,
         sourceTemplateName: null,
         sourceVmId: null,
@@ -46,7 +55,7 @@ export function createSeedState(provider: ProviderState): AppState {
       history: [
         {
           kind: "created",
-          summary: `Seeded from ${DEFAULT_UBUNTU_DESKTOP_IMAGE}.`,
+          summary: buildSeedTemplateSummary(defaultLaunchSource),
           createdAt: now,
         },
       ],

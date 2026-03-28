@@ -281,6 +281,8 @@ function buildConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     incusBinary: "incus",
     incusProject: null,
     incusStoragePool: "default",
+    configuredDefaultTemplateLaunchSource: null,
+    defaultTemplateLaunchSource: "images:ubuntu/noble/desktop",
     templateCompression: "none",
     guestVncPort: 5900,
     guestInotifyMaxUserWatches: 1_048_576,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applySafeRfbEncodingPatch,
   buildRfbSocketUrls,
   clipboardPasteShortcutLabel,
   primeClipboardPasteCaptureTarget,
@@ -75,6 +76,148 @@ test("buildRfbSocketUrls keeps an absolute websocket URL unchanged", () => {
   });
 
   assert.deepEqual(urls, ["ws://monster:3000/api/vms/vm-0003/vnc"]);
+});
+
+test("applySafeRfbEncodingPatch overrides noVNC's preferred encodings with a compressed-safe set", () => {
+  const writes: Array<{ kind: string; value?: number }> = [];
+  const rfb = {
+    _fbDepth: 24,
+    _sendEncodings() {
+      writes.push({
+        kind: "original",
+      });
+    },
+    _sock: {
+      flush() {
+        writes.push({
+          kind: "flush",
+        });
+      },
+      sQpush8(value: number) {
+        writes.push({
+          kind: "u8",
+          value,
+        });
+      },
+      sQpush16(value: number) {
+        writes.push({
+          kind: "u16",
+          value,
+        });
+      },
+      sQpush32(value: number) {
+        writes.push({
+          kind: "u32",
+          value,
+        });
+      },
+    },
+  };
+
+  assert.equal(applySafeRfbEncodingPatch(rfb), true);
+  rfb._sendEncodings();
+
+  assert.deepEqual(
+    writes,
+    [
+      {
+        kind: "u8",
+        value: 2,
+      },
+      {
+        kind: "u8",
+        value: 0,
+      },
+      {
+        kind: "u16",
+        value: 19,
+      },
+      {
+        kind: "u32",
+        value: 1,
+      },
+      {
+        kind: "u32",
+        value: 16,
+      },
+      {
+        kind: "u32",
+        value: 5,
+      },
+      {
+        kind: "u32",
+        value: 2,
+      },
+      {
+        kind: "u32",
+        value: 6,
+      },
+      {
+        kind: "u32",
+        value: 0,
+      },
+      {
+        kind: "u32",
+        value: -223,
+      },
+      {
+        kind: "u32",
+        value: -224,
+      },
+      {
+        kind: "u32",
+        value: -258,
+      },
+      {
+        kind: "u32",
+        value: -261,
+      },
+      {
+        kind: "u32",
+        value: -308,
+      },
+      {
+        kind: "u32",
+        value: -309,
+      },
+      {
+        kind: "u32",
+        value: -312,
+      },
+      {
+        kind: "u32",
+        value: -313,
+      },
+      {
+        kind: "u32",
+        value: -307,
+      },
+      {
+        kind: "u32",
+        value: 0xc0a1e5ce,
+      },
+      {
+        kind: "u32",
+        value: -316,
+      },
+      {
+        kind: "u32",
+        value: 0x574d5664,
+      },
+      {
+        kind: "u32",
+        value: -239,
+      },
+      {
+        kind: "flush",
+      },
+    ],
+  );
+});
+
+test("applySafeRfbEncodingPatch ignores unsupported shapes", () => {
+  assert.equal(applySafeRfbEncodingPatch(null), false);
+  assert.equal(applySafeRfbEncodingPatch({}), false);
 });
 
 test("clipboardPasteShortcutLabel prefers the Mac shortcut for Apple platforms", () => {

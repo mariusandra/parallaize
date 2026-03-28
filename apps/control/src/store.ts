@@ -23,8 +23,12 @@ import type {
   VmSession,
   VmPortForward,
 } from "../../../packages/shared/src/types.js";
+import {
+  type DefaultTemplateLaunchSourceOptions,
+  FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
+  resolveDefaultTemplateLaunchSource,
+} from "./template-defaults.js";
 
-const DEFAULT_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 export const POSTGRES_STORE_KEY = "singleton";
 
 type StateMutator = (state: AppState) => boolean | void;
@@ -64,6 +68,7 @@ export interface StateStoreConfig {
   kind: "json" | "postgres";
   dataFile: string;
   databaseUrl: string | null;
+  defaultTemplateLaunchSource?: string | null;
 }
 
 export async function createStateStore(
@@ -75,20 +80,30 @@ export async function createStateStore(
       throw new Error("PostgreSQL persistence requires a database URL.");
     }
 
-    return PostgresStateStore.create(config.databaseUrl, createSeed);
+    return PostgresStateStore.create(config.databaseUrl, createSeed, {
+      defaultTemplateLaunchSource: config.defaultTemplateLaunchSource,
+    });
   }
 
-  return new JsonStateStore(config.dataFile, createSeed);
+  return new JsonStateStore(config.dataFile, createSeed, {
+    defaultTemplateLaunchSource: config.defaultTemplateLaunchSource,
+  });
 }
 
 export class JsonStateStore implements StateStore {
   private lastPersistAttemptAt: string | null = null;
   private lastPersistedAt: string | null = null;
+  private readonly defaultTemplateLaunchSource: string;
 
   constructor(
     private readonly filePath: string,
     private readonly createSeed: () => AppState,
-  ) {}
+    options: DefaultTemplateLaunchSourceOptions = {},
+  ) {
+    this.defaultTemplateLaunchSource = resolveDefaultTemplateLaunchSource(
+      options.defaultTemplateLaunchSource,
+    );
+  }
 
   load(): AppState {
     if (!existsSync(this.filePath)) {
@@ -102,7 +117,7 @@ export class JsonStateStore implements StateStore {
     this.lastPersistAttemptAt = filePersistedAt;
     this.lastPersistedAt = filePersistedAt;
     const parsed = JSON.parse(raw) as LegacyAppState;
-    const normalized = normalizeState(parsed);
+    const normalized = normalizeState(parsed, this.defaultTemplateLaunchSource);
 
     if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
       this.save(normalized);
@@ -163,6 +178,7 @@ export class PostgresStateStore implements StateStore {
     pool: Pool,
     initialState: AppState,
     initialPersistedAt: string | null,
+    options: DefaultTemplateLaunchSourceOptions = {},
   ) {
     this.pool = pool;
     this.currentState = cloneState(initialState);
@@ -173,6 +189,7 @@ export class PostgresStateStore implements StateStore {
   static async create(
     databaseUrl: string,
     createSeed: () => AppState,
+    options: DefaultTemplateLaunchSourceOptions = {},
   ): Promise<PostgresStateStore> {
     const pool = new Pool({
       connectionString: databaseUrl,
@@ -186,8 +203,8 @@ export class PostgresStateStore implements StateStore {
       )
     `);
 
-    const initialState = await readOrInsertSeedState(pool, createSeed);
-    return new PostgresStateStore(pool, initialState, nowIso());
+    const initialState = await readOrInsertSeedState(pool, createSeed, options);
+    return new PostgresStateStore(pool, initialState, nowIso(), options);
   }
 
   load(): AppState {
@@ -274,14 +291,18 @@ export class PostgresStateStore implements StateStore {
 async function readOrInsertSeedState(
   pool: Pool,
   createSeed: () => AppState,
+  options: DefaultTemplateLaunchSourceOptions = {},
 ): Promise<AppState> {
+  const defaultTemplateLaunchSource = resolveDefaultTemplateLaunchSource(
+    options.defaultTemplateLaunchSource,
+  );
   const existing = await pool.query<{ state: LegacyAppState }>(
     "SELECT state FROM app_state WHERE store_key = $1",
     [POSTGRES_STORE_KEY],
   );
 
   if (existing.rowCount && existing.rows[0]?.state) {
-    return normalizeState(existing.rows[0].state);
+    return normalizeState(existing.rows[0].state, defaultTemplateLaunchSource);
   }
 
   const seed = createSeed();
@@ -304,18 +325,27 @@ async function readOrInsertSeedState(
     throw new Error("Failed to initialize PostgreSQL app state.");
   }
 
-  return normalizeState(seeded.rows[0].state);
+  return normalizeState(seeded.rows[0].state, defaultTemplateLaunchSource);
 }
 
 function cloneState<T>(value: T): T {
   return structuredClone(value);
 }
 
-export function normalizePersistedState(rawState: unknown): AppState {
-  return normalizeState((rawState ?? {}) as LegacyAppState);
+export function normalizePersistedState(
+  rawState: unknown,
+  options: DefaultTemplateLaunchSourceOptions = {},
+): AppState {
+  return normalizeState(
+    (rawState ?? {}) as LegacyAppState,
+    resolveDefaultTemplateLaunchSource(options.defaultTemplateLaunchSource),
+  );
 }
 
-function normalizeState(rawState: LegacyAppState): AppState {
+function normalizeState(
+  rawState: LegacyAppState,
+  defaultTemplateLaunchSource = FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
+): AppState {
   return {
     sequence:
       typeof rawState.sequence === "number" && Number.isFinite(rawState.sequence)
@@ -323,7 +353,9 @@ function normalizeState(rawState: LegacyAppState): AppState {
         : 1,
     provider: normalizeProviderState(rawState.provider),
     templates: Array.isArray(rawState.templates)
-      ? rawState.templates.map(normalizeTemplate)
+      ? rawState.templates.map((template) =>
+          normalizeTemplate(template, defaultTemplateLaunchSource),
+        )
       : [],
     vms: Array.isArray(rawState.vms) ? rawState.vms.map(normalizeVm) : [],
     snapshots: Array.isArray(rawState.snapshots)
@@ -390,7 +422,10 @@ function normalizeProviderState(
   };
 }
 
-function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
+function normalizeTemplate(
+  template: LegacyTemplate,
+  defaultTemplateLaunchSource: string,
+): EnvironmentTemplate {
   const notes = Array.isArray(template.notes) ? template.notes : [];
   const tags = Array.isArray(template.tags) ? template.tags : [];
   const createdAt = template.createdAt ?? nowIso();
@@ -401,7 +436,7 @@ function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
     name: template.name ?? "Recovered template",
     description: template.description ?? "Recovered from persisted state.",
     launchSource:
-      template.launchSource ?? template.baseImage ?? DEFAULT_LAUNCH_SOURCE,
+      template.launchSource ?? template.baseImage ?? defaultTemplateLaunchSource,
     defaultResources: {
       cpu: template.defaultResources?.cpu ?? 4,
       ramMb: template.defaultResources?.ramMb ?? 8192,
@@ -415,7 +450,12 @@ function normalizeTemplate(template: LegacyTemplate): EnvironmentTemplate {
     tags,
     notes,
     snapshotIds: Array.isArray(template.snapshotIds) ? template.snapshotIds : [],
-    provenance: normalizeTemplateProvenance(template, notes, tags),
+    provenance: normalizeTemplateProvenance(
+      template,
+      notes,
+      tags,
+      defaultTemplateLaunchSource,
+    ),
     history: normalizeTemplateHistory(template.history, createdAt),
     createdAt,
     updatedAt,
@@ -489,6 +529,7 @@ function normalizeTemplateProvenance(
   template: LegacyTemplate,
   notes: string[],
   tags: string[],
+  defaultTemplateLaunchSource: string,
 ): TemplateProvenance {
   const raw = template.provenance;
 
@@ -498,7 +539,12 @@ function normalizeTemplateProvenance(
       summary:
         typeof raw.summary === "string" && raw.summary.trim().length > 0
           ? raw.summary.trim()
-          : inferLegacyTemplateProvenanceSummary(template, notes, tags),
+          : inferLegacyTemplateProvenanceSummary(
+              template,
+              notes,
+              tags,
+              defaultTemplateLaunchSource,
+            ),
       sourceTemplateId:
         typeof raw.sourceTemplateId === "string" && raw.sourceTemplateId
           ? raw.sourceTemplateId
@@ -528,7 +574,12 @@ function normalizeTemplateProvenance(
 
   return {
     kind: normalizeTemplateProvenanceKind(undefined, tags),
-    summary: inferLegacyTemplateProvenanceSummary(template, notes, tags),
+    summary: inferLegacyTemplateProvenanceSummary(
+      template,
+      notes,
+      tags,
+      defaultTemplateLaunchSource,
+    ),
     sourceTemplateId: null,
     sourceTemplateName: null,
     sourceVmId: null,
@@ -565,6 +616,7 @@ function inferLegacyTemplateProvenanceSummary(
   template: LegacyTemplate,
   notes: string[],
   tags: string[],
+  defaultTemplateLaunchSource: string,
 ): string {
   if (notes[0]) {
     return notes[0];
@@ -575,14 +627,14 @@ function inferLegacyTemplateProvenanceSummary(
   }
 
   if (tags.includes("captured")) {
-    return `Captured template backed by ${template.launchSource ?? template.baseImage ?? DEFAULT_LAUNCH_SOURCE}.`;
+    return `Captured template backed by ${template.launchSource ?? template.baseImage ?? defaultTemplateLaunchSource}.`;
   }
 
   if (tags.includes("cloned")) {
     return "Cloned from another Parallaize template.";
   }
 
-  return `Seed template backed by ${template.launchSource ?? template.baseImage ?? DEFAULT_LAUNCH_SOURCE}.`;
+  return `Seed template backed by ${template.launchSource ?? template.baseImage ?? defaultTemplateLaunchSource}.`;
 }
 
 function normalizeTemplateHistory(

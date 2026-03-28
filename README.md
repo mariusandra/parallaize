@@ -75,6 +75,7 @@ Other useful env vars:
 - `PARALLAIZE_DATA_FILE`: JSON state file path
 - `PARALLAIZE_INCUS_PROJECT`: Incus project to target
 - `PARALLAIZE_INCUS_STORAGE_POOL`: storage pool for new VMs and clones
+- `PARALLAIZE_DEFAULT_TEMPLATE_LAUNCH_SOURCE`: pin the seeded Ubuntu template to a specific local alias, fingerprint, or remote image instead of following the moving default alias
 - `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE`: hostname suffix for forwarded services, defaults to `localhost`
 
 Forwarded guest HTTP and WebSocket services always get a path route such as

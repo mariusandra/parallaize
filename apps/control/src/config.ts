@@ -3,6 +3,7 @@ import process from "node:process";
 
 import type { ProviderKind } from "../../../packages/shared/src/types.js";
 import type { IncusImageCompression } from "./providers.js";
+import { resolveDefaultTemplateLaunchSource } from "./template-defaults.js";
 
 export type PersistenceKind = "json" | "postgres";
 
@@ -19,6 +20,8 @@ export interface AppConfig {
   incusBinary: string;
   incusProject: string | null;
   incusStoragePool: string | null;
+  configuredDefaultTemplateLaunchSource: string | null;
+  defaultTemplateLaunchSource: string;
   templateCompression: IncusImageCompression;
   guestVncPort: number;
   guestInotifyMaxUserWatches: number;
@@ -59,6 +62,9 @@ export function loadConfig(): AppConfig {
     process.env.PARALLAIZE_SESSION_ROTATION_SECONDS,
     60 * 60 * 6,
   );
+  const configuredDefaultTemplateLaunchSource = parseOptionalString(
+    process.env.PARALLAIZE_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
+  );
 
   if (sessionRotationSeconds >= sessionIdleTimeoutSeconds) {
     throw new Error(
@@ -86,6 +92,10 @@ export function loadConfig(): AppConfig {
     incusBinary: process.env.PARALLAIZE_INCUS_BIN ?? "incus",
     incusProject: parseOptionalString(process.env.PARALLAIZE_INCUS_PROJECT),
     incusStoragePool: parseOptionalString(process.env.PARALLAIZE_INCUS_STORAGE_POOL),
+    configuredDefaultTemplateLaunchSource,
+    defaultTemplateLaunchSource: resolveDefaultTemplateLaunchSource(
+      configuredDefaultTemplateLaunchSource,
+    ),
     templateCompression: parseTemplateCompression(process.env.PARALLAIZE_TEMPLATE_COMPRESSION),
     guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5900),
     guestInotifyMaxUserWatches: parsePositiveInteger(

@@ -11,6 +11,20 @@ export interface RfbLike extends EventTarget {
   disconnect(): void;
 }
 
+interface InternalRfbSocketLike {
+  flush(): void;
+  sQpush8(value: number): void;
+  sQpush16(value: number): void;
+  sQpush32(value: number): void;
+}
+
+interface InternalRfbLike extends RfbLike {
+  __parallaizeSafeEncodingsPatched?: boolean;
+  _fbDepth?: number;
+  _sendEncodings?: () => void;
+  _sock?: InternalRfbSocketLike;
+}
+
 export interface ClipboardLike {
   readText?(): Promise<string>;
   writeText?(text: string): Promise<void>;
@@ -86,6 +100,25 @@ const x11TabKeysym = 0xff09;
 const x11ControlLeftKeysym = 0xffe3;
 const x11ReturnKeysym = 0xff0d;
 const x11KeyVKeysym = 0x0076;
+const encodingRaw = 0;
+const encodingCopyRect = 1;
+const encodingRre = 2;
+const encodingHextile = 5;
+const encodingZlib = 6;
+const encodingZrle = 16;
+const pseudoEncodingDesktopSize = -223;
+const pseudoEncodingLastRect = -224;
+const pseudoEncodingCursor = -239;
+const pseudoEncodingQemulExtendedKeyEvent = -258;
+const pseudoEncodingQemuLedEvent = -261;
+const pseudoEncodingDesktopName = -307;
+const pseudoEncodingExtendedDesktopSize = -308;
+const pseudoEncodingXvp = -309;
+const pseudoEncodingFence = -312;
+const pseudoEncodingContinuousUpdates = -313;
+const pseudoEncodingExtendedMouseButtons = -316;
+const pseudoEncodingVmwareCursor = 0x574d5664;
+const pseudoEncodingExtendedClipboard = 0xc0a1e5ce;
 
 export function resolveRfbConstructor(module: {
   default?: unknown;
@@ -99,6 +132,37 @@ export function resolveRfbConstructor(module: {
   }
 
   return null;
+}
+
+export function applySafeRfbEncodingPatch(rfb: unknown): boolean {
+  if (!isInternalRfbLike(rfb) || typeof rfb._sendEncodings !== "function") {
+    return false;
+  }
+
+  if (rfb.__parallaizeSafeEncodingsPatched) {
+    return true;
+  }
+
+  rfb._sendEncodings = function sendSafeEncodings(this: InternalRfbLike): void {
+    const socket = this._sock;
+
+    if (!socket) {
+      return;
+    }
+
+    const encodings = buildSafeRfbEncodings(this._fbDepth);
+    socket.sQpush8(2);
+    socket.sQpush8(0);
+    socket.sQpush16(encodings.length);
+
+    for (const encoding of encodings) {
+      socket.sQpush32(encoding);
+    }
+
+    socket.flush();
+  };
+  rfb.__parallaizeSafeEncodingsPatched = true;
+  return true;
 }
 
 export function buildRfbSocketUrls(
@@ -309,6 +373,38 @@ export function readRfbFramebufferSize(rfb: unknown): {
 
 function isNestedModule(value: unknown): value is NestedNoVncModule {
   return typeof value === "object" && value !== null;
+}
+
+function isInternalRfbLike(value: unknown): value is InternalRfbLike {
+  return isNestedModule(value);
+}
+
+function buildSafeRfbEncodings(framebufferDepth: number | undefined): number[] {
+  const encodings = [
+    encodingCopyRect,
+    encodingZrle,
+    encodingHextile,
+    encodingRre,
+    encodingZlib,
+    encodingRaw,
+    pseudoEncodingDesktopSize,
+    pseudoEncodingLastRect,
+    pseudoEncodingQemulExtendedKeyEvent,
+    pseudoEncodingQemuLedEvent,
+    pseudoEncodingExtendedDesktopSize,
+    pseudoEncodingXvp,
+    pseudoEncodingFence,
+    pseudoEncodingContinuousUpdates,
+    pseudoEncodingDesktopName,
+    pseudoEncodingExtendedClipboard,
+    pseudoEncodingExtendedMouseButtons,
+  ];
+
+  if (framebufferDepth === 24) {
+    encodings.push(pseudoEncodingVmwareCursor, pseudoEncodingCursor);
+  }
+
+  return encodings;
 }
 
 function isApplePlatform(platform: string | null | undefined): boolean {

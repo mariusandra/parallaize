@@ -96,6 +96,107 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.ok((job?.progressPercent ?? 100) < 100);
 });
 
+test("manager reconciles the seeded template launch source to the configured default", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-source-reconcile-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider, {
+    defaultTemplateLaunchSource: "local:ubuntu-noble-desktop-20260320",
+  });
+
+  const template = manager.getSummary().templates.find((entry) => entry.id === "tpl-0001");
+  assert.ok(template);
+  assert.ok(template?.provenance);
+  assert.ok(template?.history);
+  assert.equal(template?.launchSource, "local:ubuntu-noble-desktop-20260320");
+  assert.equal(
+    template.provenance.summary,
+    "Seeded from local:ubuntu-noble-desktop-20260320.",
+  );
+  assert.equal(
+    template.history[0]?.summary,
+    "Seeded from local:ubuntu-noble-desktop-20260320.",
+  );
+});
+
+test("manager preserves a persisted seeded template launch source without an env pin", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-source-preserve-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+
+  store.update((draft) => {
+    const template = draft.templates.find((entry) => entry.id === "tpl-0001");
+
+    assert.ok(template);
+    assert.ok(template.provenance);
+    assert.ok(template.history);
+
+    template.launchSource = "local:ubuntu-noble-desktop-20260320";
+    template.provenance.summary = "Seeded from local:ubuntu-noble-desktop-20260320.";
+    template.history[0] = {
+      ...template.history[0],
+      summary: "Seeded from local:ubuntu-noble-desktop-20260320.",
+    };
+    template.updatedAt = new Date().toISOString();
+    return true;
+  });
+
+  const manager = new DesktopManager(store, provider);
+  const template = manager.getSummary().templates.find((entry) => entry.id === "tpl-0001");
+
+  assert.ok(template);
+  assert.ok(template.provenance);
+  assert.ok(template.history);
+  assert.equal(template.launchSource, "local:ubuntu-noble-desktop-20260320");
+  assert.equal(
+    template.provenance.summary,
+    "Seeded from local:ubuntu-noble-desktop-20260320.",
+  );
+  assert.equal(
+    template.history[0]?.summary,
+    "Seeded from local:ubuntu-noble-desktop-20260320.",
+  );
+});
+
+test("manager hot read paths reuse cached provider state", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-cached-read-state-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const originalRefreshState = provider.refreshState.bind(provider);
+  let refreshStateCalls = 0;
+
+  provider.refreshState = () => {
+    refreshStateCalls += 1;
+    return originalRefreshState();
+  };
+
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const callsAfterConstruction = refreshStateCalls;
+
+  manager.getSummary();
+  manager.getVmDetail("vm-0001");
+
+  assert.equal(refreshStateCalls, callsAfterConstruction);
+});
+
 test("create can launch a new VM from a template snapshot", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-create-snapshot-"));
   context.after(() => {
@@ -297,6 +398,7 @@ test("manager marks a running VM stopped after the provider reports an external 
 
   assert.equal(store.load().vms[0]?.status, "running");
 
+  manager.getProviderState();
   const detail = manager.getVmDetail("vm-0103");
 
   assert.equal(detail.vm.status, "stopped");
@@ -396,6 +498,7 @@ test("manager marks a stopped VM running after the provider reports an external 
 
   await wait(80);
 
+  manager.getProviderState();
   const runningDetail = manager.getVmDetail("vm-0104");
 
   assert.equal(runningDetail.vm.status, "running");
@@ -407,6 +510,7 @@ test("manager marks a stopped VM running after the provider reports an external 
 
   await wait(80);
 
+  manager.getProviderState();
   const detail = manager.getVmDetail("vm-0104");
 
   assert.equal(detail.vm.session?.display, "10.55.0.104:5900");
@@ -1738,6 +1842,10 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-desktop-bootstrap/);
   assert.match(
     configSetCall?.[4] ?? "",
+    /\/etc\/environment\.d\/90-parallaize-rendering\.conf/,
+  );
+  assert.match(
+    configSetCall?.[4] ?? "",
     /\/usr\/local\/bin\/parallaize-desktop-session-setup/,
   );
   assert.match(configSetCall?.[4] ?? "", /parallaize-desktop-bootstrap\.service/);
@@ -1753,6 +1861,9 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /\.mutter-Xwaylandauth\.\*/);
   assert.match(configSetCall?.[4] ?? "", /\/var\/run\/gdm3\/auth-for-\*\/database/);
   assert.match(configSetCall?.[4] ?? "", /Acquire::ForceIPv4=true/);
+  assert.match(configSetCall?.[4] ?? "", /LIBGL_ALWAYS_SOFTWARE=1/);
+  assert.match(configSetCall?.[4] ?? "", /GALLIUM_DRIVER=llvmpipe/);
+  assert.match(configSetCall?.[4] ?? "", /-noxdamage/);
   assert.match(configSetCall?.[4] ?? "", /indicator-multiload/);
   assert.match(configSetCall?.[4] ?? "", /dock-position RIGHT/);
   assert.match(configSetCall?.[4] ?? "", /dash-max-icon-size 32/);
@@ -2694,6 +2805,10 @@ test("incus provider applies guest display resolution through xrandr", async () 
   );
   assert.match(
     execCall?.[5] ?? "",
+    /RENDERING_ENV_FILE="\/etc\/environment\.d\/90-parallaize-rendering\.conf"/,
+  );
+  assert.match(
+    execCall?.[5] ?? "",
     /SESSION_AUTOSTART_FILE="\/etc\/xdg\/autostart\/parallaize-desktop-session-setup\.desktop"/,
   );
   assert.match(execCall?.[5] ?? "", /parallaize-x11vnc\.service/);
@@ -2704,6 +2819,8 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /ps -C x11vnc -o args=/);
   assert.match(execCall?.[5] ?? "", /ps -C Xwayland -o args=/);
   assert.match(execCall?.[5] ?? "", /Acquire::ForceIPv4=true/);
+  assert.match(execCall?.[5] ?? "", /LIBGL_ALWAYS_SOFTWARE=1/);
+  assert.match(execCall?.[5] ?? "", /GALLIUM_DRIVER=llvmpipe/);
   assert.match(execCall?.[5] ?? "", /indicator-multiload/);
   assert.match(execCall?.[5] ?? "", /dock-position RIGHT/);
   assert.match(execCall?.[5] ?? "", /dash-max-icon-size 32/);
@@ -2716,6 +2833,7 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /ATTEMPT=0/);
   assert.match(execCall?.[5] ?? "", /sleep 2/);
   assert.match(execCall?.[5] ?? "", /-xrandr newfbsize/);
+  assert.match(execCall?.[5] ?? "", /-noxdamage/);
   assert.match(execCall?.[5] ?? "", /-noshm/);
   assert.match(execCall?.[5] ?? "", /xset r on \|\| true/);
   assert.match(execCall?.[5] ?? "", /-repeat/);
