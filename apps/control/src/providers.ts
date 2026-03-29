@@ -27,12 +27,14 @@ import {
   buildGuestDisplayDiscoveryScript,
   buildGuestVncCloudInit,
   DEFAULT_GUEST_HOME,
+  type GuestDesktopBootstrapRepairProfile,
 } from "./ubuntu-guest-init.js";
 
 const DEFAULT_GUEST_VNC_PORT = 5900;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
 const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 const DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 30_000;
+const REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 5_000;
 const DEFAULT_GUEST_AGENT_RETRY_MS = 5_000;
 const DEFAULT_GUEST_AGENT_RETRY_TIMEOUT_MS = 60_000;
 const DEFAULT_GUEST_WORKSPACE = "/root";
@@ -45,6 +47,12 @@ const VM_CREATE_GUEST_AGENT_PERCENT = 70;
 const VM_CREATE_BOOT_START_PERCENT = 76;
 const VM_CREATE_DESKTOP_WAIT_START_PERCENT = 84;
 const VM_CREATE_READY_PERCENT = 96;
+const VM_CLONE_COPY_START_PERCENT = 52;
+const VM_CLONE_CONFIGURE_PERCENT = 60;
+const VM_CLONE_NETWORK_PERCENT = 68;
+const SNAPSHOT_LAUNCH_COPY_START_PERCENT = 48;
+const SNAPSHOT_LAUNCH_CONFIGURE_PERCENT = 58;
+const SNAPSHOT_LAUNCH_NETWORK_PERCENT = 68;
 const DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS = 4000;
 const TEMPLATE_PUBLISH_START_PERCENT = 58;
 const TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT = 78;
@@ -99,6 +107,16 @@ export type ProviderProgressReporter = (
   progressPercent: number | null,
 ) => void;
 
+export interface VmLogsStreamListeners {
+  onAppend?(chunk: string): void;
+  onClose?(): void;
+  onError?(error: Error): void;
+}
+
+export interface VmLogsStreamHandle {
+  close(): void;
+}
+
 export interface VmFileContent {
   content: Buffer;
   name: string;
@@ -130,6 +148,7 @@ export interface DesktopProvider {
     sourceVm: VmInstance,
     targetVm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation>;
   startVm(vm: VmInstance): Promise<ProviderMutation>;
   stopVm(vm: VmInstance): Promise<ProviderMutation>;
@@ -142,6 +161,7 @@ export interface DesktopProvider {
     snapshot: Snapshot,
     targetVm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation>;
   restoreVmToSnapshot(
     vm: VmInstance,
@@ -154,6 +174,10 @@ export interface DesktopProvider {
   ): Promise<ProviderSnapshot>;
   injectCommand(vm: VmInstance, command: string): Promise<ProviderMutation>;
   readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot>;
+  streamVmLogs?(
+    vm: VmInstance,
+    listeners: VmLogsStreamListeners,
+  ): VmLogsStreamHandle;
   readVmDiskUsage?(vm: VmInstance): Promise<VmDiskUsageSnapshot>;
   browseVmFiles(vm: VmInstance, path?: string | null): Promise<VmFileBrowserSnapshot>;
   readVmFile(vm: VmInstance, path: string): Promise<VmFileContent>;
@@ -204,6 +228,8 @@ export interface ProviderVmPowerState {
 interface ResolveSessionOptions {
   requireBootstrapRepairBeforeReady?: boolean;
   guestWallpaperName?: string;
+  bootstrapRepairProfile?: GuestDesktopBootstrapRepairProfile;
+  bootstrapRepairRetryMs?: number;
 }
 
 interface IncusCommandRunner {
@@ -212,6 +238,10 @@ interface IncusCommandRunner {
     args: string[],
     listeners?: CommandStreamListeners,
   ): Promise<CommandResult>;
+  startStreaming?(
+    args: string[],
+    listeners?: CommandStreamListeners,
+  ): CommandStreamHandle;
 }
 
 interface CommandResult {
@@ -229,6 +259,11 @@ interface CommandExecutionOptions {
 interface CommandStreamListeners {
   onStdout?(chunk: string): void;
   onStderr?(chunk: string): void;
+}
+
+interface CommandStreamHandle {
+  close(): void;
+  completed: Promise<CommandResult>;
 }
 
 interface GuestPortProbe {
@@ -444,7 +479,14 @@ class MockProvider implements DesktopProvider {
     vm: VmInstance,
     targetVm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation> {
+    report?.("Cloning disks", VM_CLONE_COPY_START_PERCENT);
+    await sleep(40);
+    report?.("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
+    await sleep(40);
+    report?.("Waiting for desktop", VM_CREATE_READY_PERCENT);
+
     return {
       lastAction: `Cloned from ${vm.name}`,
       activity: [
@@ -539,7 +581,14 @@ class MockProvider implements DesktopProvider {
     snapshot: Snapshot,
     targetVm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation> {
+    report?.("Cloning snapshot", SNAPSHOT_LAUNCH_COPY_START_PERCENT);
+    await sleep(40);
+    report?.("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
+    await sleep(40);
+    report?.("Waiting for desktop", VM_CREATE_READY_PERCENT);
+
     return {
       lastAction: `Launched from snapshot ${snapshot.label}`,
       activity: [
@@ -974,9 +1023,16 @@ class IncusProvider implements DesktopProvider {
     emitCreateProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await this.runAsync(["start", vm.providerRef]);
 
+    const requireBootstrapRepairBeforeReady = shouldRequireGuestBootstrapRepairBeforeReady(template);
     const session = await this.resolveSession(vm.providerRef, emitCreateProgress, {
       guestWallpaperName: resolveGuestWallpaperName(vm),
-      requireBootstrapRepairBeforeReady: shouldRequireGuestBootstrapRepairBeforeReady(template),
+      requireBootstrapRepairBeforeReady,
+      ...(requireBootstrapRepairBeforeReady
+        ? {
+            bootstrapRepairProfile: "aggressive" as const,
+            bootstrapRepairRetryMs: REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
+          }
+        : {}),
     });
     await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
 
@@ -1010,8 +1066,10 @@ class IncusProvider implements DesktopProvider {
     sourceVm: VmInstance,
     targetVm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation> {
     this.assertAvailable();
+    const emitProgress = buildProgressEmitter(report);
 
     const copyArgs = [
       "copy",
@@ -1031,20 +1089,26 @@ class IncusProvider implements DesktopProvider {
       `limits.memory=${formatMemoryLimit(targetVm.resources.ramMb)}`,
     );
 
+    emitProgress("Cloning disks", VM_CLONE_COPY_START_PERCENT);
     await this.runAsync(copyArgs);
+    emitProgress("Configuring clone", VM_CLONE_CONFIGURE_PERCENT);
     await this.setRootDiskSizeAsync(targetVm.providerRef, targetVm.resources.diskGb);
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
+    emitProgress("Applying network", VM_CLONE_NETWORK_PERCENT);
     const networkMode = normalizeVmNetworkMode(targetVm.networkMode);
     const networkActivity =
       networkMode === "dmz"
         ? await this.ensureInstanceNetworkModeAsync(targetVm.providerRef, networkMode)
         : `network: ${describeVmNetworkMode(networkMode)}`;
+    emitProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await this.runAsync(["start", targetVm.providerRef]);
 
-    const session = await this.resolveSession(targetVm.providerRef, undefined, {
+    const session = await this.resolveSession(targetVm.providerRef, emitProgress, {
       guestWallpaperName: resolveGuestWallpaperName(targetVm),
       // Clones boot from an existing disk image, so cloud-init will not rewrite stale guest services.
       requireBootstrapRepairBeforeReady: true,
+      bootstrapRepairProfile: "aggressive",
+      bootstrapRepairRetryMs: REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
     });
     await this.syncGuestDnsProfileAsync(targetVm.providerRef, networkMode);
 
@@ -1250,9 +1314,11 @@ class IncusProvider implements DesktopProvider {
     snapshot: Snapshot,
     targetVm: VmInstance,
     template: EnvironmentTemplate,
+    report?: ProviderProgressReporter,
   ): Promise<ProviderMutation> {
     this.assertAvailable();
     this.assertLaunchSource(template);
+    const emitProgress = buildProgressEmitter(report);
 
     const copyArgs = [
       "copy",
@@ -1271,20 +1337,26 @@ class IncusProvider implements DesktopProvider {
       `limits.memory=${formatMemoryLimit(targetVm.resources.ramMb)}`,
     );
 
+    emitProgress("Cloning snapshot", SNAPSHOT_LAUNCH_COPY_START_PERCENT);
     await this.runAsync(copyArgs);
+    emitProgress("Configuring snapshot launch", SNAPSHOT_LAUNCH_CONFIGURE_PERCENT);
     await this.setRootDiskSizeAsync(targetVm.providerRef, targetVm.resources.diskGb);
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
+    emitProgress("Applying network", SNAPSHOT_LAUNCH_NETWORK_PERCENT);
     const networkMode = normalizeVmNetworkMode(targetVm.networkMode);
     const networkActivity =
       networkMode === "dmz"
         ? await this.ensureInstanceNetworkModeAsync(targetVm.providerRef, networkMode)
         : `network: ${describeVmNetworkMode(networkMode)}`;
+    emitProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await this.runAsync(["start", targetVm.providerRef]);
 
-    const session = await this.resolveSession(targetVm.providerRef, undefined, {
+    const session = await this.resolveSession(targetVm.providerRef, emitProgress, {
       guestWallpaperName: resolveGuestWallpaperName(targetVm),
       // Snapshot launches also reuse an existing filesystem and need an in-guest bootstrap repair.
       requireBootstrapRepairBeforeReady: true,
+      bootstrapRepairProfile: "aggressive",
+      bootstrapRepairRetryMs: REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
     });
     await this.syncGuestDnsProfileAsync(targetVm.providerRef, networkMode);
 
@@ -1607,6 +1679,63 @@ class IncusProvider implements DesktopProvider {
         formatCommandFailure(infoArgs, infoResult),
       ].filter(Boolean).join("\n"),
     );
+  }
+
+  streamVmLogs(
+    vm: VmInstance,
+    listeners: VmLogsStreamListeners,
+  ): VmLogsStreamHandle {
+    this.assertAvailable();
+
+    if (!this.runner.startStreaming) {
+      queueMicrotask(() => {
+        listeners.onError?.(
+          new Error("Live VM log streaming is unavailable for the configured Incus runner."),
+        );
+      });
+
+      return {
+        close() {},
+      };
+    }
+
+    const args = ["console", vm.providerRef];
+    let closed = false;
+    const stream = this.runner.startStreaming(args, {
+      onStdout: (chunk) => {
+        const normalizedChunk = normalizeVmLogContent(chunk);
+
+        if (closed || normalizedChunk.length === 0) {
+          return;
+        }
+
+        listeners.onAppend?.(normalizedChunk);
+      },
+    });
+
+    void stream.completed.then((result) => {
+      if (closed) {
+        return;
+      }
+
+      if (result.status !== 0) {
+        listeners.onError?.(new Error(formatCommandFailure(args, result)));
+        return;
+      }
+
+      listeners.onClose?.();
+    });
+
+    return {
+      close() {
+        if (closed) {
+          return;
+        }
+
+        closed = true;
+        stream.close();
+      },
+    };
   }
 
   async readVmDiskUsage(vm: VmInstance): Promise<VmDiskUsageSnapshot> {
@@ -2144,10 +2273,14 @@ class IncusProvider implements DesktopProvider {
     report?: ProviderProgressReporter,
     options?: ResolveSessionOptions,
   ): Promise<VmSession | null> {
+    this.guestDesktopBootstrapAttemptAt.delete(instanceName);
     let address: string | null = null;
     const waitStartedAt = Date.now();
     const emitProgress = report;
     let bootstrapConfirmed = !options?.requireBootstrapRepairBeforeReady;
+    const bootstrapRepairProfile = options?.bootstrapRepairProfile ?? "standard";
+    const bootstrapRepairRetryMs =
+      options?.bootstrapRepairRetryMs ?? this.guestDesktopBootstrapRetryMs;
 
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const info = await this.inspectInstanceAsync(instanceName);
@@ -2158,6 +2291,7 @@ class IncusProvider implements DesktopProvider {
         bootstrapConfirmed = await this.ensureGuestDesktopBootstrapAsync(
           instanceName,
           options?.guestWallpaperName,
+          bootstrapRepairProfile,
         );
       }
 
@@ -2173,6 +2307,8 @@ class IncusProvider implements DesktopProvider {
         await this.maybeEnsureGuestDesktopBootstrapAsync(
           instanceName,
           options?.guestWallpaperName,
+          bootstrapRepairProfile,
+          bootstrapRepairRetryMs,
         );
       }
 
@@ -2197,21 +2333,28 @@ class IncusProvider implements DesktopProvider {
   private async maybeEnsureGuestDesktopBootstrapAsync(
     instanceName: string,
     guestWallpaperName?: string,
+    bootstrapRepairProfile: GuestDesktopBootstrapRepairProfile = "standard",
+    bootstrapRetryMs: number = this.guestDesktopBootstrapRetryMs,
   ): Promise<boolean> {
     const now = Date.now();
     const lastAttemptAt = this.guestDesktopBootstrapAttemptAt.get(instanceName) ?? 0;
 
-    if (now - lastAttemptAt < this.guestDesktopBootstrapRetryMs) {
+    if (now - lastAttemptAt < bootstrapRetryMs) {
       return false;
     }
 
     this.guestDesktopBootstrapAttemptAt.set(instanceName, now);
-    return this.ensureGuestDesktopBootstrapAsync(instanceName, guestWallpaperName);
+    return this.ensureGuestDesktopBootstrapAsync(
+      instanceName,
+      guestWallpaperName,
+      bootstrapRepairProfile,
+    );
   }
 
   private async ensureGuestDesktopBootstrapAsync(
     instanceName: string,
     guestWallpaperName?: string,
+    bootstrapRepairProfile: GuestDesktopBootstrapRepairProfile = "standard",
   ): Promise<boolean> {
     const args = [
       "exec",
@@ -2223,6 +2366,7 @@ class IncusProvider implements DesktopProvider {
         this.guestVncPort,
         false,
         guestWallpaperName,
+        bootstrapRepairProfile,
       ),
     ];
     const result = await this.executeGuestExecWithRetryAsync(args);
@@ -2576,17 +2720,23 @@ class SpawnIncusCommandRunner implements IncusCommandRunner {
     args: string[],
     listeners: CommandStreamListeners = {},
   ): Promise<CommandResult> {
+    return this.startStreaming(args, listeners).completed;
+  }
+
+  startStreaming(
+    args: string[],
+    listeners: CommandStreamListeners = {},
+  ): CommandStreamHandle {
     const fullArgs = this.project
       ? ["--project", this.project, ...args]
       : args;
-
-    return new Promise((resolve) => {
-      const child = spawn(this.incusBinary, fullArgs, {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
+    const child = spawn(this.incusBinary, fullArgs, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const completed = new Promise<CommandResult>((resolve) => {
       const finish = (result: CommandResult) => {
         if (settled) {
           return;
@@ -2627,6 +2777,17 @@ class SpawnIncusCommandRunner implements IncusCommandRunner {
         });
       });
     });
+
+    return {
+      close() {
+        if (child.killed) {
+          return;
+        }
+
+        child.kill();
+      },
+      completed,
+    };
   }
 }
 

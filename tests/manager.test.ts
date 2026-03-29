@@ -96,6 +96,100 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.ok((job?.progressPercent ?? 100) < 100);
 });
 
+test("clone jobs surface provider boot progress instead of a stale copy label", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-clone-progress-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  provider.cloneVm = async (sourceVm, targetVm, template, report) => {
+    report?.("Cloning disks", 52);
+    await wait(80);
+    report?.("Starting workspace", 76);
+    await wait(200);
+
+    return {
+      lastAction: `Cloned from ${sourceVm.name}`,
+      activity: [
+        `clone: copied disks and metadata from ${sourceVm.name}`,
+        `template: ${template.name}`,
+      ],
+      activeWindow: sourceVm.activeWindow,
+      workspacePath: `/srv/workspaces/${targetVm.name}`,
+      session: null,
+    };
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.cloneVm({
+    sourceVmId: "vm-0001",
+    name: "clone-progress-lab",
+  });
+
+  await wait(700);
+
+  const job = manager.getVmDetail(vm.id).recentJobs[0];
+  assert.ok(job);
+  assert.equal(job?.kind, "clone");
+  assert.equal(job?.status, "running");
+  assert.equal(job?.message, "Starting workspace");
+  assert.equal(job?.progressPercent, 76);
+});
+
+test("snapshot launch jobs surface provider boot progress instead of a stale copy label", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-snapshot-progress-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  provider.launchVmFromSnapshot = async (snapshot, targetVm, template, report) => {
+    report?.("Cloning snapshot", 48);
+    await wait(80);
+    report?.("Starting workspace", 76);
+    await wait(200);
+
+    return {
+      lastAction: `Launched from snapshot ${snapshot.label}`,
+      activity: [
+        `snapshot launch: ${snapshot.label}`,
+        `template: ${template.name}`,
+      ],
+      activeWindow: "terminal",
+      workspacePath: `/srv/workspaces/${targetVm.name}`,
+      session: null,
+    };
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  manager.snapshotVm("vm-0001", { label: "checkpoint" });
+  await wait(550);
+
+  const snapshot = manager.getVmDetail("vm-0001").snapshots[0];
+  assert.ok(snapshot);
+
+  const vm = manager.launchVmFromSnapshot("vm-0001", snapshot!.id, {
+    sourceVmId: "vm-0001",
+    name: "snapshot-progress-lab",
+  });
+
+  await wait(520);
+
+  const job = manager.getVmDetail(vm.id).recentJobs[0];
+  assert.ok(job);
+  assert.equal(job?.kind, "launch-snapshot");
+  assert.equal(job?.status, "running");
+  assert.equal(job?.message, "Starting workspace");
+  assert.equal(job?.progressPercent, 76);
+});
+
 test("manager preserves the generated wallpaper name across later renames", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-wallpaper-name-"));
   context.after(() => {
@@ -1880,6 +1974,10 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   );
   assert.match(
     configSetCall?.[4] ?? "",
+    /\/usr\/local\/bin\/parallaize-desktop-health-check/,
+  );
+  assert.match(
+    configSetCall?.[4] ?? "",
     /\/usr\/local\/bin\/parallaize-desktop-session-setup/,
   );
   assert.match(configSetCall?.[4] ?? "", /parallaize-desktop-bootstrap\.service/);
@@ -1889,7 +1987,14 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   );
   assert.match(configSetCall?.[4] ?? "", /find_guest_auth_file\(\)/);
   assert.match(configSetCall?.[4] ?? "", /find_guest_display_number\(\)/);
+  assert.match(configSetCall?.[4] ?? "", /guest_desktop_has_visible_stage\(\)/);
+  assert.match(configSetCall?.[4] ?? "", /guest_desktop_session_ready\(\)/);
+  assert.match(configSetCall?.[4] ?? "", /pgrep -u ubuntu -x gnome-shell/);
+  assert.match(configSetCall?.[4] ?? "", /\/usr\/libexec\/gnome-session-binary/);
+  assert.match(configSetCall?.[4] ?? "", /xwininfo -root -tree/);
+  assert.match(configSetCall?.[4] ?? "", /mutter guard window/);
   assert.match(configSetCall?.[4] ?? "", /loginctl list-sessions --no-legend/);
+  assert.match(configSetCall?.[4] ?? "", /-p Class --value/);
   assert.match(configSetCall?.[4] ?? "", /ps -C x11vnc -o args=/);
   assert.match(configSetCall?.[4] ?? "", /ps -C Xwayland -o args=/);
   assert.match(configSetCall?.[4] ?? "", /\.mutter-Xwaylandauth\.\*/);
@@ -1914,8 +2019,17 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /resolve_first_boot_wallpaper_uri\(\)/);
   assert.match(configSetCall?.[4] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
   assert.match(configSetCall?.[4] ?? "", /desktop-wallpaper-initialized/);
+  assert.match(configSetCall?.[4] ?? "", /desktop-wallpaper-source/);
+  assert.match(configSetCall?.[4] ?? "", /current_wallpaper_state/);
+  assert.match(configSetCall?.[4] ?? "", /desired_wallpaper_state/);
   assert.match(configSetCall?.[4] ?? "", /picture-uri-dark/);
   assert.doesNotMatch(configSetCall?.[4] ?? "", /shuf -n 1/);
+  assert.match(configSetCall?.[4] ?? "", /desktop-session-unhealthy-at/);
+  assert.match(configSetCall?.[4] ?? "", /desktop-session-last-gdm-restart/);
+  assert.match(configSetCall?.[4] ?? "", /DESKTOP_HEALTH_GRACE_SECONDS=30/);
+  assert.match(configSetCall?.[4] ?? "", /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=30/);
+  assert.match(configSetCall?.[4] ?? "", /repair_guest_desktop_if_unhealthy\(\)/);
+  assert.match(configSetCall?.[4] ?? "", /systemctl restart gdm3 \|\| true/);
   assert.match(configSetCall?.[4] ?? "", /gnome-initial-setup-done/);
   assert.match(
     configSetCall?.[4] ?? "",
@@ -2399,6 +2513,8 @@ test("incus provider repairs captured-template desktops before trusting guest VN
     }).status,
     0,
   );
+  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_HEALTH_GRACE_SECONDS=10/);
+  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
   assert.equal(mutation.session?.display, "10.55.0.44:5900");
 });
 
@@ -2847,6 +2963,10 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /LAUNCHER_FILE="\/usr\/local\/bin\/parallaize-x11vnc"/);
   assert.match(
     execCall?.[5] ?? "",
+    /SESSION_HEALTH_FILE="\/usr\/local\/bin\/parallaize-desktop-health-check"/,
+  );
+  assert.match(
+    execCall?.[5] ?? "",
     /SESSION_SETUP_FILE="\/usr\/local\/bin\/parallaize-desktop-session-setup"/,
   );
   assert.match(
@@ -2861,7 +2981,14 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /parallaize-desktop-bootstrap\.service/);
   assert.match(execCall?.[5] ?? "", /find_guest_auth_file\(\)/);
   assert.match(execCall?.[5] ?? "", /find_guest_display_number\(\)/);
+  assert.match(execCall?.[5] ?? "", /guest_desktop_has_visible_stage\(\)/);
+  assert.match(execCall?.[5] ?? "", /guest_desktop_session_ready\(\)/);
+  assert.match(execCall?.[5] ?? "", /pgrep -u ubuntu -x gnome-shell/);
+  assert.match(execCall?.[5] ?? "", /\/usr\/libexec\/gnome-session-binary/);
+  assert.match(execCall?.[5] ?? "", /xwininfo -root -tree/);
+  assert.match(execCall?.[5] ?? "", /mutter guard window/);
   assert.match(execCall?.[5] ?? "", /loginctl list-sessions --no-legend/);
+  assert.match(execCall?.[5] ?? "", /-p Class --value/);
   assert.match(execCall?.[5] ?? "", /ps -C x11vnc -o args=/);
   assert.match(execCall?.[5] ?? "", /ps -C Xwayland -o args=/);
   assert.match(execCall?.[5] ?? "", /Acquire::ForceIPv4=true/);
@@ -2883,8 +3010,14 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /resolve_first_boot_wallpaper_uri\(\)/);
   assert.match(execCall?.[5] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
   assert.match(execCall?.[5] ?? "", /desktop-wallpaper-initialized/);
+  assert.match(execCall?.[5] ?? "", /desktop-wallpaper-source/);
+  assert.match(execCall?.[5] ?? "", /current_wallpaper_state/);
+  assert.match(execCall?.[5] ?? "", /desired_wallpaper_state/);
   assert.match(execCall?.[5] ?? "", /picture-uri-dark/);
   assert.doesNotMatch(execCall?.[5] ?? "", /shuf -n 1/);
+  assert.match(execCall?.[5] ?? "", /desktop-session-unhealthy-at/);
+  assert.match(execCall?.[5] ?? "", /desktop-session-last-gdm-restart/);
+  assert.match(execCall?.[5] ?? "", /repair_guest_desktop_if_unhealthy\(\)/);
   assert.match(execCall?.[5] ?? "", /gnome-initial-setup-done/);
   assert.match(execCall?.[5] ?? "", /gnome-initial-setup-first-login\.desktop/);
   assert.match(execCall?.[5] ?? "", /ATTEMPT=0/);
@@ -2966,6 +3099,88 @@ test("incus provider reads VM logs from the console stream and falls back to inf
   assert.equal(fallbackLogs.source, "incus info --show-log");
   assert.match(fallbackLogs.content, /Fallback info log/);
   assert.match(fallbackLogs.content, /Agent connected/);
+});
+
+test("incus provider streams live VM log chunks from the console", async () => {
+  const instanceName = "parallaize-vm-0201-live-log-reader";
+  let closeCalled = false;
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+      startStreaming(args: string[], listeners = {}) {
+        assert.deepEqual(args, ["console", instanceName]);
+        listeners.onStdout?.("Booting\r\nReady\r\n");
+
+        return {
+          close() {
+            closeCalled = true;
+          },
+          completed: Promise.resolve(ok("", args)),
+        };
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0201",
+    name: "live-log-reader",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 201,
+    activeWindow: "logs",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const chunks: string[] = [];
+  const errors: string[] = [];
+  let closed = false;
+
+  if (!provider.streamVmLogs) {
+    throw new Error("Expected the Incus provider to expose a live log stream.");
+  }
+
+  const handle = provider.streamVmLogs(vm, {
+    onAppend(chunk) {
+      chunks.push(chunk);
+    },
+    onClose() {
+      closed = true;
+    },
+    onError(error) {
+      errors.push(error.message);
+    },
+  });
+
+  await Promise.resolve();
+
+  assert.deepEqual(chunks, ["Booting\nReady\n"]);
+  assert.deepEqual(errors, []);
+  assert.equal(closed, true);
+
+  handle.close();
+  assert.equal(closeCalled, true);
 });
 
 test("incus provider parses guest disk usage snapshots and flags low free space", async () => {
@@ -3771,6 +3986,7 @@ test("incus provider launches and restores snapshots with VM commands", async ()
   const targetVm: VmInstance = {
     id: "vm-0110",
     name: "snap-launch",
+    wallpaperName: "silver-falcon",
     templateId: template.id,
     provider: "incus",
     providerRef: targetInstanceName,
@@ -3803,12 +4019,26 @@ test("incus provider launches and restores snapshots with VM commands", async ()
 
   const launchMutation = await provider.launchVmFromSnapshot(snapshot, targetVm, template);
   assert.equal(launchMutation.session?.display, "10.55.0.22:5901");
+  const bootstrapExecCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === targetInstanceName &&
+      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
+  );
   const copyCall = calls.find(
     (args) =>
       args[0] === "copy" &&
       args[1] === snapshot.providerRef &&
       args[2] === targetInstanceName,
   );
+  assert.ok(bootstrapExecCall);
+  assert.match(
+    bootstrapExecCall?.[5] ?? "",
+    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/silver-falcon\.jpg/,
+  );
+  assert.match(bootstrapExecCall?.[5] ?? "", /desktop-wallpaper-source/);
+  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_HEALTH_GRACE_SECONDS=10/);
+  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
   assert.ok(copyCall);
   assert.ok(!copyCall?.includes("--instance-only"));
   assert.ok(
@@ -4497,6 +4727,7 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
   const clone = manager.cloneVm({
     sourceVmId: "vm-0055",
     name: "origin-clone",
+    wallpaperName: "silver-falcon",
   });
 
   assert.equal(clone.id, "vm-0056");
@@ -4506,10 +4737,25 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
   await wait(700);
 
   const detail = manager.getVmDetail(clone.id);
+  const bootstrapExecCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === cloneInstanceName &&
+      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
+  );
   assert.equal(detail.vm.status, "running");
+  assert.equal(detail.vm.wallpaperName, "silver-falcon");
   assert.equal(detail.vm.session?.host, "10.55.0.13");
   assert.equal(detail.vm.session?.webSocketPath, `/api/vms/${clone.id}/vnc`);
   assert.equal(detail.vm.session?.browserPath, `/?vm=${clone.id}`);
+  assert.ok(bootstrapExecCall);
+  assert.match(
+    bootstrapExecCall?.[5] ?? "",
+    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/silver-falcon\.jpg/,
+  );
+  assert.match(bootstrapExecCall?.[5] ?? "", /desktop-wallpaper-source/);
+  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_HEALTH_GRACE_SECONDS=10/);
+  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
   assert.ok(
     calls.some(
       (args) =>
@@ -5321,6 +5567,103 @@ test("incus provider refresh reruns guest desktop bootstrap when VNC is still mi
     /https:\/\/wallpapers\.parallaize\.com\/24\.04\/angry-puffin\.jpg/,
   );
   assert.equal(session?.display, "10.55.0.202:5900");
+});
+
+test("incus provider refresh accepts a reachable VNC session without waiting for guest desktop health", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0203-refresh-health";
+  const provider = createProvider("incus", "incus", {
+    guestVncPort: 5900,
+    commandRunner: {
+      execute(args: string[]) {
+        calls.push(args);
+
+        if (
+          args[0] === "list" &&
+          ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+        ) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "10.55.0.203",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        return ok("", args);
+      },
+    },
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+
+  const session = await provider.refreshVmSession({
+    id: "vm-0203",
+    name: "refresh-health",
+    wallpaperName: "golden-fox",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Workspace resumed",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 203,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+    commandHistory: [],
+  });
+
+  assert.equal(
+    calls.some(
+      (args) =>
+        args[0] === "exec" &&
+        args[1] === instanceName &&
+        args[5] === "/usr/local/bin/parallaize-desktop-health-check",
+    ),
+    false,
+  );
+  assert.equal(
+    calls.some(
+      (args) =>
+        args[0] === "exec" &&
+        args[1] === instanceName &&
+        (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
+    ),
+    false,
+  );
+  assert.equal(session?.display, "10.55.0.203:5900");
 });
 
 test("incus provider prefers the primary guest NIC over bridge interfaces for VNC", async () => {

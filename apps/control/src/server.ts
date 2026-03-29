@@ -41,7 +41,7 @@ import { loadConfig } from "./config.js";
 import { collectIncusStorageDiagnostics, runIncusStorageAction } from "./incus-storage.js";
 import { DesktopManager } from "./manager.js";
 import { VmNetworkBridge } from "./network.js";
-import { createProvider } from "./providers.js";
+import { createProvider, type VmLogsStreamHandle } from "./providers.js";
 import { createSeedState } from "./seed.js";
 import { createStateStore } from "./store.js";
 
@@ -81,8 +81,10 @@ const resolutionControlLeaseTtlMs = 5_000;
 const maxAdminSessions = 32;
 const activeSockets = new Set<Socket>();
 const activeEventStreams = new Set<ServerResponse>();
+const activeVmLogTailSessions = new Map<string, VmLogTailSession>();
 const resolutionControlLeases = new Map<string, ResolutionControlLeaseRecord>();
 const latestReleaseCacheTtlMs = 10 * 60 * 1000;
+const vmLogTailReconnectDelayMs = 1_000;
 let latestReleaseCache: {
   expiresAtMs: number;
   value: LatestReleaseMetadata | null;
@@ -94,6 +96,31 @@ interface ResolutionControlLeaseRecord {
   claimedAtMs: number;
   heartbeatAtMs: number;
   vmId: string;
+}
+
+interface ActiveVmLogStream {
+  closed: boolean;
+  handle: VmLogsStreamHandle;
+  providerRef: string;
+}
+
+interface VmLogTailSession {
+  closed: boolean;
+  lastSnapshot: VmLogsSnapshot | null;
+  liveStream: ActiveVmLogStream | null;
+  readyPromise: Promise<void> | null;
+  refreshPromise: Promise<void> | null;
+  restartTimer: NodeJS.Timeout | null;
+  stateKey: string | null;
+  subscribers: Set<ServerResponse>;
+  summaryUnsubscribe: (() => void) | null;
+  vmId: string;
+}
+
+interface VmLogsAppendEvent {
+  chunk: string;
+  fetchedAt: string;
+  source: string;
 }
 
 interface ParsedSessionCookie {
@@ -224,6 +251,11 @@ const server = createServer(async (request, response) => {
         ok: true,
         data: manager.getVmDetail(vmMatch[1]),
       });
+    }
+
+    const vmLogsLiveMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/logs\/live$/);
+    if (method === "GET" && vmLogsLiveMatch) {
+      return handleVmLogEvents(response, vmLogsLiveMatch[1]);
     }
 
     const vmLogsMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/logs$/);
@@ -535,6 +567,399 @@ function handleEvents(response: ServerResponse): void {
     clearInterval(heartbeat);
     unsubscribe();
   });
+}
+
+async function handleVmLogEvents(
+  response: ServerResponse,
+  vmId: string,
+): Promise<void> {
+  const session = await getOrCreateVmLogTailSession(vmId);
+  const initialSnapshot = session.lastSnapshot;
+
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+  });
+  response.write("retry: 1000\n\n");
+
+  if (initialSnapshot) {
+    writeSseEvent(response, "snapshot", JSON.stringify(initialSnapshot));
+  }
+
+  session.subscribers.add(response);
+
+  if (
+    initialSnapshot &&
+    session.lastSnapshot &&
+    !sameVmLogsSnapshot(initialSnapshot, session.lastSnapshot)
+  ) {
+    writeSseEvent(response, "snapshot", JSON.stringify(session.lastSnapshot));
+  }
+
+  const heartbeat = setInterval(() => {
+    writeSseEvent(response, "heartbeat", String(Date.now()));
+  }, 15000);
+
+  response.on("close", () => {
+    clearInterval(heartbeat);
+    detachVmLogTailSubscriber(session, response);
+  });
+
+  void syncVmLogTailSession(session);
+}
+
+async function getOrCreateVmLogTailSession(vmId: string): Promise<VmLogTailSession> {
+  const existing = activeVmLogTailSessions.get(vmId);
+
+  if (existing) {
+    await existing.readyPromise;
+    return existing;
+  }
+
+  const session: VmLogTailSession = {
+    closed: false,
+    lastSnapshot: null,
+    liveStream: null,
+    readyPromise: null,
+    refreshPromise: null,
+    restartTimer: null,
+    stateKey: null,
+    subscribers: new Set<ServerResponse>(),
+    summaryUnsubscribe: null,
+    vmId,
+  };
+
+  activeVmLogTailSessions.set(vmId, session);
+  session.readyPromise = initializeVmLogTailSession(session);
+
+  try {
+    await session.readyPromise;
+    return session;
+  } catch (error) {
+    destroyVmLogTailSession(session, false);
+    throw error;
+  }
+}
+
+async function initializeVmLogTailSession(session: VmLogTailSession): Promise<void> {
+  await refreshVmLogTailSnapshot(session, false);
+
+  if (session.closed) {
+    return;
+  }
+
+  const vm = manager.getVmDetail(session.vmId).vm;
+  session.stateKey = buildVmLogTailStateKey(vm);
+  session.summaryUnsubscribe = manager.subscribe((summary) => {
+    void handleVmLogTailSummary(session, summary);
+  });
+}
+
+async function handleVmLogTailSummary(
+  session: VmLogTailSession,
+  summary: DashboardSummary,
+): Promise<void> {
+  if (session.closed) {
+    return;
+  }
+
+  const vm = summary.vms.find((entry) => entry.id === session.vmId);
+
+  if (!vm) {
+    broadcastVmLogTailError(session, "Workspace no longer exists.");
+    destroyVmLogTailSession(session);
+    return;
+  }
+
+  const nextStateKey = buildVmLogTailStateKey(vm);
+
+  if (nextStateKey === session.stateKey) {
+    return;
+  }
+
+  session.stateKey = nextStateKey;
+  syncVmLogTailStream(session, vm);
+
+  try {
+    await refreshVmLogTailSnapshot(session);
+  } catch (error) {
+    if (!session.closed) {
+      broadcastVmLogTailError(session, resolveErrorMessage(error));
+    }
+  }
+}
+
+async function refreshVmLogTailSnapshot(
+  session: VmLogTailSession,
+  broadcastChanges = true,
+): Promise<void> {
+  if (session.refreshPromise) {
+    await session.refreshPromise;
+    return;
+  }
+
+  session.refreshPromise = (async () => {
+    const snapshot = await manager.getVmLogs(session.vmId);
+
+    if (session.closed) {
+      return;
+    }
+
+    const changed = !sameVmLogsSnapshot(session.lastSnapshot, snapshot);
+    session.lastSnapshot = snapshot;
+
+    if (broadcastChanges && changed) {
+      broadcastVmLogTailSnapshot(session, snapshot);
+    }
+  })().finally(() => {
+    session.refreshPromise = null;
+  });
+
+  await session.refreshPromise;
+}
+
+function buildVmLogTailStateKey(vm: DashboardSummary["vms"][number]): string {
+  if (typeof provider.streamVmLogs === "function") {
+    return `${vm.providerRef}|${vm.status}`;
+  }
+
+  return `${vm.providerRef}|${vm.status}|${vm.updatedAt}`;
+}
+
+async function syncVmLogTailSession(session: VmLogTailSession): Promise<void> {
+  if (session.closed) {
+    return;
+  }
+
+  try {
+    syncVmLogTailStream(session, manager.getVmDetail(session.vmId).vm);
+  } catch (error) {
+    broadcastVmLogTailError(session, resolveErrorMessage(error));
+  }
+}
+
+function syncVmLogTailStream(
+  session: VmLogTailSession,
+  vm: DashboardSummary["vms"][number],
+): void {
+  if (typeof provider.streamVmLogs !== "function") {
+    return;
+  }
+
+  if (session.closed || session.subscribers.size === 0 || vm.status !== "running") {
+    clearVmLogTailRestartTimer(session);
+    stopVmLogTailStream(session);
+    return;
+  }
+
+  if (session.liveStream?.providerRef === vm.providerRef) {
+    return;
+  }
+
+  clearVmLogTailRestartTimer(session);
+  stopVmLogTailStream(session);
+
+  const activeStream: ActiveVmLogStream = {
+    closed: false,
+    handle: {
+      close() {},
+    },
+    providerRef: vm.providerRef,
+  };
+
+  activeStream.handle = provider.streamVmLogs(vm, {
+    onAppend: (chunk) => {
+      if (session.closed || activeStream.closed || session.liveStream !== activeStream) {
+        return;
+      }
+
+      const fetchedAt = new Date().toISOString();
+      const source = "incus console live tail";
+      const currentSnapshot = session.lastSnapshot ?? {
+        provider: vm.provider,
+        providerRef: vm.providerRef,
+        source,
+        content: "",
+        fetchedAt,
+      };
+
+      session.lastSnapshot = {
+        ...currentSnapshot,
+        provider: vm.provider,
+        providerRef: vm.providerRef,
+        source,
+        content: `${currentSnapshot.content}${chunk}`,
+        fetchedAt,
+      };
+
+      broadcastVmLogTailAppend(session, {
+        chunk,
+        fetchedAt,
+        source,
+      });
+    },
+    onClose: () => {
+      if (session.closed || activeStream.closed || session.liveStream !== activeStream) {
+        return;
+      }
+
+      session.liveStream = null;
+      scheduleVmLogTailRestart(session);
+    },
+    onError: (error) => {
+      if (session.closed || activeStream.closed || session.liveStream !== activeStream) {
+        return;
+      }
+
+      session.liveStream = null;
+      broadcastVmLogTailError(session, resolveErrorMessage(error));
+      scheduleVmLogTailRestart(session);
+    },
+  });
+
+  session.liveStream = activeStream;
+}
+
+function stopVmLogTailStream(session: VmLogTailSession): void {
+  const activeStream = session.liveStream;
+
+  if (!activeStream) {
+    return;
+  }
+
+  session.liveStream = null;
+  activeStream.closed = true;
+  activeStream.handle.close();
+}
+
+function scheduleVmLogTailRestart(session: VmLogTailSession): void {
+  if (
+    session.closed ||
+    session.restartTimer !== null ||
+    session.subscribers.size === 0 ||
+    typeof provider.streamVmLogs !== "function"
+  ) {
+    return;
+  }
+
+  session.restartTimer = setTimeout(() => {
+    session.restartTimer = null;
+    void (async () => {
+      if (session.closed) {
+        return;
+      }
+
+      try {
+        await refreshVmLogTailSnapshot(session);
+      } catch (error) {
+        if (!session.closed) {
+          broadcastVmLogTailError(session, resolveErrorMessage(error));
+        }
+      }
+
+      await syncVmLogTailSession(session);
+    })();
+  }, vmLogTailReconnectDelayMs);
+}
+
+function clearVmLogTailRestartTimer(session: VmLogTailSession): void {
+  if (session.restartTimer === null) {
+    return;
+  }
+
+  clearTimeout(session.restartTimer);
+  session.restartTimer = null;
+}
+
+function detachVmLogTailSubscriber(
+  session: VmLogTailSession,
+  response: ServerResponse,
+): void {
+  session.subscribers.delete(response);
+
+  if (session.subscribers.size === 0) {
+    destroyVmLogTailSession(session, false);
+  }
+}
+
+function destroyVmLogTailSession(
+  session: VmLogTailSession,
+  closeSubscribers = true,
+): void {
+  if (session.closed) {
+    return;
+  }
+
+  session.closed = true;
+  activeVmLogTailSessions.delete(session.vmId);
+  clearVmLogTailRestartTimer(session);
+  stopVmLogTailStream(session);
+  session.summaryUnsubscribe?.();
+  session.summaryUnsubscribe = null;
+
+  const subscribers = [...session.subscribers];
+  session.subscribers.clear();
+
+  if (!closeSubscribers) {
+    return;
+  }
+
+  for (const subscriber of subscribers) {
+    if (subscriber.destroyed || subscriber.writableEnded) {
+      continue;
+    }
+
+    subscriber.end();
+    subscriber.socket?.end();
+  }
+}
+
+function broadcastVmLogTailSnapshot(
+  session: VmLogTailSession,
+  snapshot: VmLogsSnapshot,
+): void {
+  const payload = JSON.stringify(snapshot);
+
+  for (const subscriber of session.subscribers) {
+    writeSseEvent(subscriber, "snapshot", payload);
+  }
+}
+
+function broadcastVmLogTailAppend(
+  session: VmLogTailSession,
+  appendEvent: VmLogsAppendEvent,
+): void {
+  const payload = JSON.stringify(appendEvent);
+
+  for (const subscriber of session.subscribers) {
+    writeSseEvent(subscriber, "append", payload);
+  }
+}
+
+function broadcastVmLogTailError(
+  session: VmLogTailSession,
+  message: string,
+): void {
+  const payload = JSON.stringify({
+    message,
+  });
+
+  for (const subscriber of session.subscribers) {
+    writeSseEvent(subscriber, "stream-error", payload);
+  }
+}
+
+function sameVmLogsSnapshot(
+  left: VmLogsSnapshot | null,
+  right: VmLogsSnapshot | null,
+): boolean {
+  return (
+    left?.provider === right?.provider &&
+    left?.providerRef === right?.providerRef &&
+    left?.source === right?.source &&
+    left?.content === right?.content
+  );
 }
 
 async function getLatestReleaseMetadata(): Promise<LatestReleaseMetadata | null> {
@@ -1340,6 +1765,7 @@ function registerShutdownHandlers(): void {
     process.stdout.write(`received ${signal}, shutting down parallaize\n`);
     manager.stop();
     closeActiveEventStreams();
+    closeActiveVmLogTailSessions();
     networkBridge.close();
 
     await new Promise<void>((resolve) => {
@@ -1386,6 +1812,10 @@ function writeSseEvent(
   response.write(`event: ${event}\ndata: ${data}\n\n`);
 }
 
+function resolveErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Unknown error";
+}
+
 function broadcastResolutionControlSnapshot(
   snapshot: VmResolutionControlSnapshot,
 ): void {
@@ -1404,5 +1834,11 @@ function closeActiveEventStreams(): void {
 
     response.end();
     response.socket?.end();
+  }
+}
+
+function closeActiveVmLogTailSessions(): void {
+  for (const session of activeVmLogTailSessions.values()) {
+    destroyVmLogTailSession(session);
   }
 }

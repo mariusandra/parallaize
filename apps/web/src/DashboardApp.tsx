@@ -258,6 +258,16 @@ interface VmLogsViewState {
   refreshing: boolean;
 }
 
+interface VmLogsAppendEvent {
+  chunk: string;
+  fetchedAt: string;
+  source: string;
+}
+
+interface VmLogsStreamErrorEvent {
+  message: string;
+}
+
 interface CloneVmDialogState {
   sourceVmId: string;
   sourceVmName: string;
@@ -355,7 +365,6 @@ const sidepanelMinWidth = 320;
 const sidepanelMaxWidth = 560;
 const sidepanelCollapseSnapWidth = Math.round(sidepanelMinWidth / 2);
 const sidepanelCompactBreakpoint = 1120;
-const vmLogsPollIntervalMs = 4000;
 const vmDiskUsagePollIntervalMs = 30_000;
 
 const defaultDesktopResolutionPreference: DesktopResolutionPreference = {
@@ -469,12 +478,16 @@ export function DashboardApp(): JSX.Element {
   const shellMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
   const railResizeRef = useRef<{ panelLeft: number } | null>(null);
+  const railResizeFrameRef = useRef<number | null>(null);
+  const pendingRailWidthRef = useRef<number | null>(null);
   const sidepanelRef = useRef<HTMLElement | null>(null);
   const sidepanelResizeRef = useRef<{
     anchorClientX: number;
     anchorWidth: number;
     pendingClosedOpen: boolean;
   } | null>(null);
+  const sidepanelResizeFrameRef = useRef<number | null>(null);
+  const pendingSidepanelWidthRef = useRef<number | null>(null);
   const stageViewportShellRef = useRef<HTMLDivElement | null>(null);
   const stageViewportFrameRef = useRef<HTMLDivElement | null>(null);
   const lastResolutionRequestKeyRef = useRef<string | null>(null);
@@ -655,6 +668,70 @@ export function DashboardApp(): JSX.Element {
         gridTemplateColumns: `${railWidth}px minmax(0, 1fr) ${displayedSidepanelWidth}px`,
       } satisfies CSSProperties)
     : undefined;
+
+  function flushQueuedRailWidthPreference(): void {
+    if (railResizeFrameRef.current !== null) {
+      window.cancelAnimationFrame(railResizeFrameRef.current);
+      railResizeFrameRef.current = null;
+    }
+
+    const pendingWidth = pendingRailWidthRef.current;
+    pendingRailWidthRef.current = null;
+
+    if (pendingWidth !== null) {
+      setRailWidthPreference(pendingWidth);
+    }
+  }
+
+  function queueRailWidthPreference(nextWidth: number): void {
+    pendingRailWidthRef.current = nextWidth;
+
+    if (railResizeFrameRef.current !== null) {
+      return;
+    }
+
+    railResizeFrameRef.current = window.requestAnimationFrame(() => {
+      railResizeFrameRef.current = null;
+      const pendingWidth = pendingRailWidthRef.current;
+      pendingRailWidthRef.current = null;
+
+      if (pendingWidth !== null) {
+        setRailWidthPreference(pendingWidth);
+      }
+    });
+  }
+
+  function flushQueuedSidepanelWidthPreference(): void {
+    if (sidepanelResizeFrameRef.current !== null) {
+      window.cancelAnimationFrame(sidepanelResizeFrameRef.current);
+      sidepanelResizeFrameRef.current = null;
+    }
+
+    const pendingWidth = pendingSidepanelWidthRef.current;
+    pendingSidepanelWidthRef.current = null;
+
+    if (pendingWidth !== null) {
+      setSidepanelWidthPreference(pendingWidth);
+    }
+  }
+
+  function queueSidepanelWidthPreference(nextWidth: number): void {
+    pendingSidepanelWidthRef.current = nextWidth;
+
+    if (sidepanelResizeFrameRef.current !== null) {
+      return;
+    }
+
+    sidepanelResizeFrameRef.current = window.requestAnimationFrame(() => {
+      sidepanelResizeFrameRef.current = null;
+      const pendingWidth = pendingSidepanelWidthRef.current;
+      pendingSidepanelWidthRef.current = null;
+
+      if (pendingWidth !== null) {
+        setSidepanelWidthPreference(pendingWidth);
+      }
+    });
+  }
 
   useEffect(() => {
     selectedVmIdRef.current = selectedVmId;
@@ -1152,30 +1229,20 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
-    let cancelled = false;
-    let refreshTimer: number | null = null;
     const vmId = vmLogsDialog.vmId;
+    setVmLogsDialog((current) =>
+      current && current.vmId === vmId
+        ? {
+            ...current,
+            error: null,
+            loading: current.logs === null,
+            refreshing: current.logs !== null,
+          }
+        : current,
+    );
 
-    const loadLogs = async (mode: "initial" | "refresh"): Promise<void> => {
-      setVmLogsDialog((current) => {
-        if (!current || current.vmId !== vmId) {
-          return current;
-        }
-
-        return {
-          ...current,
-          loading: mode === "initial" && current.logs === null,
-          refreshing: mode === "refresh" && current.logs !== null,
-        };
-      });
-
-      try {
-        const logs = await fetchJson<VmLogsSnapshot>(`/api/vms/${vmId}/logs`);
-
-        if (cancelled) {
-          return;
-        }
-
+    return openVmLogsEventSource(vmId, {
+      onSnapshot: (logs) => {
         setVmLogsDialog((current) =>
           current && current.vmId === vmId
             ? {
@@ -1187,44 +1254,45 @@ export function DashboardApp(): JSX.Element {
               }
             : current,
         );
-      } catch (error) {
-        if (error instanceof AuthRequiredError) {
-          requireLogin();
-          return;
-        }
-
-        if (cancelled) {
-          return;
-        }
-
+      },
+      onAppend: (appendEvent) => {
         setVmLogsDialog((current) =>
           current && current.vmId === vmId
             ? {
                 ...current,
-                error: errorMessage(error),
+                error: null,
+                loading: false,
+                logs: applyVmLogsAppend(current.logs, appendEvent),
+                refreshing: false,
+              }
+            : current,
+        );
+      },
+      onStreamError: (message) => {
+        setVmLogsDialog((current) =>
+          current && current.vmId === vmId
+            ? {
+                ...current,
+                error: message,
                 loading: false,
                 refreshing: false,
               }
             : current,
         );
-      }
-
-      if (!cancelled) {
-        refreshTimer = window.setTimeout(() => {
-          void loadLogs("refresh");
-        }, vmLogsPollIntervalMs);
-      }
-    };
-
-    void loadLogs(vmLogsDialog.logs ? "refresh" : "initial");
-
-    return () => {
-      cancelled = true;
-
-      if (refreshTimer !== null) {
-        window.clearTimeout(refreshTimer);
-      }
-    };
+      },
+      onConnectionError: () => {
+        setVmLogsDialog((current) =>
+          current && current.vmId === vmId
+            ? {
+                ...current,
+                error: current.logs ? "Live log stream disconnected. Retrying." : current.error,
+                loading: current.logs === null,
+                refreshing: current.logs !== null,
+              }
+            : current,
+        );
+      },
+    });
   }, [authState, vmLogsDialog?.vmId, vmLogsRefreshTick]);
 
   useEffect(() => {
@@ -1254,66 +1322,49 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
-    let cancelled = false;
-    let refreshTimer: number | null = null;
     const vmId = currentDetail.vm.id;
 
-    setWorkspaceLogs(emptyVmLogsViewState);
+    setWorkspaceLogs({
+      error: null,
+      loading: true,
+      logs: null,
+      refreshing: false,
+    });
 
-    const loadLogs = async (mode: "initial" | "refresh"): Promise<void> => {
-      setWorkspaceLogs((current) => ({
-        ...current,
-        loading: mode === "initial" && current.logs === null,
-        refreshing: mode === "refresh" && current.logs !== null,
-      }));
-
-      try {
-        const logs = await fetchJson<VmLogsSnapshot>(`/api/vms/${vmId}/logs`);
-
-        if (cancelled) {
-          return;
-        }
-
+    return openVmLogsEventSource(vmId, {
+      onSnapshot: (logs) => {
         setWorkspaceLogs({
           error: null,
           loading: false,
           logs,
           refreshing: false,
         });
-      } catch (error) {
-        if (error instanceof AuthRequiredError) {
-          requireLogin();
-          return;
-        }
-
-        if (cancelled) {
-          return;
-        }
-
+      },
+      onAppend: (appendEvent) => {
+        setWorkspaceLogs((current) => ({
+          error: null,
+          loading: false,
+          logs: applyVmLogsAppend(current.logs, appendEvent),
+          refreshing: false,
+        }));
+      },
+      onStreamError: (message) => {
         setWorkspaceLogs((current) => ({
           ...current,
-          error: errorMessage(error),
+          error: message,
           loading: false,
           refreshing: false,
         }));
-      }
-
-      if (!cancelled) {
-        refreshTimer = window.setTimeout(() => {
-          void loadLogs("refresh");
-        }, vmLogsPollIntervalMs);
-      }
-    };
-
-    void loadLogs("initial");
-
-    return () => {
-      cancelled = true;
-
-      if (refreshTimer !== null) {
-        window.clearTimeout(refreshTimer);
-      }
-    };
+      },
+      onConnectionError: () => {
+        setWorkspaceLogs((current) => ({
+          ...current,
+          error: current.logs ? "Live log stream disconnected. Retrying." : current.error,
+          loading: current.logs === null,
+          refreshing: current.logs !== null,
+        }));
+      },
+    });
   }, [authState, currentDetail?.vm.id, showWorkspaceLogs]);
 
   useEffect(() => {
@@ -1504,10 +1555,13 @@ export function DashboardApp(): JSX.Element {
 
     function reportAvailableBounds(): void {
       const bounds = observedShellNode.getBoundingClientRect();
-      setAvailableViewportBounds({
+      const nextBounds = {
         height: bounds.height > 0 ? Math.round(bounds.height) : null,
         width: bounds.width > 0 ? Math.round(bounds.width) : null,
-      });
+      };
+      setAvailableViewportBounds((current) =>
+        sameViewportBounds(current, nextBounds) ? current : nextBounds,
+      );
     }
 
     reportAvailableBounds();
@@ -1519,7 +1573,9 @@ export function DashboardApp(): JSX.Element {
 
     return () => {
       observer.disconnect();
-      setAvailableViewportBounds(emptyViewportBounds);
+      setAvailableViewportBounds((current) =>
+        sameViewportBounds(current, emptyViewportBounds) ? current : emptyViewportBounds,
+      );
     };
   }, [
     currentStageVm?.id,
@@ -1539,10 +1595,13 @@ export function DashboardApp(): JSX.Element {
 
     function reportBounds(): void {
       const bounds = observedFrameNode.getBoundingClientRect();
-      setObservedViewportBounds({
+      const nextBounds = {
         height: bounds.height > 0 ? Math.round(bounds.height) : null,
         width: bounds.width > 0 ? Math.round(bounds.width) : null,
-      });
+      };
+      setObservedViewportBounds((current) =>
+        sameViewportBounds(current, nextBounds) ? current : nextBounds,
+      );
     }
 
     reportBounds();
@@ -1554,7 +1613,9 @@ export function DashboardApp(): JSX.Element {
 
     return () => {
       observer.disconnect();
-      setObservedViewportBounds(emptyViewportBounds);
+      setObservedViewportBounds((current) =>
+        sameViewportBounds(current, emptyViewportBounds) ? current : emptyViewportBounds,
+      );
     };
   }, [
     currentStageVm?.id,
@@ -1756,6 +1817,7 @@ export function DashboardApp(): JSX.Element {
     }
 
     function stopResize(): void {
+      flushQueuedRailWidthPreference();
       railResizeRef.current = null;
       setRailResizeActive(false);
     }
@@ -1767,9 +1829,7 @@ export function DashboardApp(): JSX.Element {
         return;
       }
 
-      setRailWidthPreference(
-        clampRailWidthPreference(event.clientX - panelLeft),
-      );
+      queueRailWidthPreference(clampRailWidthPreference(event.clientX - panelLeft));
     }
 
     function handleKeyDown(event: KeyboardEvent): void {
@@ -1806,6 +1866,7 @@ export function DashboardApp(): JSX.Element {
     }
 
     function stopResize(): void {
+      flushQueuedSidepanelWidthPreference();
       sidepanelResizeRef.current = null;
       setSidepanelResizeActive(false);
     }
@@ -1830,7 +1891,7 @@ export function DashboardApp(): JSX.Element {
         resizeState.anchorWidth = activatedWidth;
         resizeState.pendingClosedOpen = false;
         setCurrentSidepanelCollapsed(false);
-        setSidepanelWidthPreference(activatedWidth);
+        queueSidepanelWidthPreference(activatedWidth);
         return;
       }
 
@@ -1849,7 +1910,7 @@ export function DashboardApp(): JSX.Element {
       }
 
       setCurrentSidepanelCollapsed(false);
-      setSidepanelWidthPreference(nextWidth);
+      queueSidepanelWidthPreference(nextWidth);
     }
 
     function handleKeyDown(event: KeyboardEvent): void {
@@ -1879,6 +1940,13 @@ export function DashboardApp(): JSX.Element {
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [sidepanelResizeActive, viewportWidth]);
+
+  useEffect(() => {
+    return () => {
+      flushQueuedRailWidthPreference();
+      flushQueuedSidepanelWidthPreference();
+    };
+  }, []);
 
   async function refreshSummary(): Promise<DashboardSummary> {
     const nextSummary = await fetchJson<DashboardSummary>("/api/summary");
@@ -4468,8 +4536,7 @@ function VmLogsDialog({
             <p className="workspace-shell__eyebrow">Workspace logs</p>
             <h2 className="dialog-panel__title">Logs for {vmName}</h2>
             <p className="dialog-panel__copy">
-              Polls {logs?.source ?? "the VM log stream"} every {vmLogsPollIntervalMs / 1000}s
-              while this modal stays open.
+              Streams {logs?.source ?? "the VM log stream"} live while this modal stays open.
             </p>
           </div>
           <div className="chip-row">
@@ -4479,7 +4546,7 @@ function VmLogsDialog({
               onClick={onRefresh}
               disabled={loading || refreshing}
             >
-              {loading || refreshing ? "Refreshing..." : "Refresh"}
+              {loading || refreshing ? "Connecting..." : "Reconnect"}
             </button>
             <button className="button button--ghost" type="button" onClick={onClose}>
               Close
@@ -4495,7 +4562,7 @@ function VmLogsDialog({
           ) : null}
         </div>
 
-        {error ? <p className="empty-copy">Last refresh failed: {error}</p> : null}
+        {error ? <p className="empty-copy">Live stream issue: {error}</p> : null}
 
         {loading && !logs ? <p className="empty-copy">Loading logs...</p> : null}
 
@@ -7159,7 +7226,7 @@ function WorkspaceLogsSurface({
       </div>
 
       {logsState.error ? (
-        <p className="empty-copy">Last refresh failed: {logsState.error}</p>
+        <p className="empty-copy">Live stream issue: {logsState.error}</p>
       ) : null}
 
       {logsState.loading && !logsState.logs ? (
@@ -9016,6 +9083,10 @@ function buildPatternStyle(seed: number): CSSProperties {
   } as CSSProperties;
 }
 
+function sameViewportBounds(left: ViewportBounds, right: ViewportBounds): boolean {
+  return left.width === right.width && left.height === right.height;
+}
+
 function statusClassName(status: VmStatus): string {
   switch (status) {
     case "running":
@@ -9602,6 +9673,60 @@ function buildLatestReleaseTagUrl(version: string): string {
 
 function isNearScrollBottom(element: HTMLElement): boolean {
   return element.scrollHeight - (element.scrollTop + element.clientHeight) <= 24;
+}
+
+function openVmLogsEventSource(
+  vmId: string,
+  handlers: {
+    onSnapshot(logs: VmLogsSnapshot): void;
+    onAppend(appendEvent: VmLogsAppendEvent): void;
+    onStreamError(message: string): void;
+    onConnectionError(): void;
+  },
+): () => void {
+  const eventSource = new EventSource(`/api/vms/${encodeURIComponent(vmId)}/logs/live`);
+
+  eventSource.addEventListener("snapshot", (event) => {
+    handlers.onSnapshot(parseEventSourceData<VmLogsSnapshot>(event));
+  });
+
+  eventSource.addEventListener("append", (event) => {
+    handlers.onAppend(parseEventSourceData<VmLogsAppendEvent>(event));
+  });
+
+  eventSource.addEventListener("stream-error", (event) => {
+    handlers.onStreamError(
+      parseEventSourceData<VmLogsStreamErrorEvent>(event).message,
+    );
+  });
+
+  eventSource.addEventListener("error", () => {
+    handlers.onConnectionError();
+  });
+
+  return () => {
+    eventSource.close();
+  };
+}
+
+function parseEventSourceData<T>(event: Event): T {
+  return JSON.parse((event as MessageEvent<string>).data) as T;
+}
+
+function applyVmLogsAppend(
+  logs: VmLogsSnapshot | null,
+  appendEvent: VmLogsAppendEvent,
+): VmLogsSnapshot | null {
+  if (!logs) {
+    return logs;
+  }
+
+  return {
+    ...logs,
+    source: appendEvent.source,
+    content: `${logs.content}${appendEvent.chunk}`,
+    fetchedAt: appendEvent.fetchedAt,
+  };
 }
 
 async function fetchJson<T>(path: string): Promise<T> {

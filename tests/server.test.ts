@@ -10,7 +10,10 @@ import process from "node:process";
 import type { Readable } from "node:stream";
 import test from "node:test";
 
-import type { VmResolutionControlSnapshot } from "../packages/shared/src/types.js";
+import type {
+  VmLogsSnapshot,
+  VmResolutionControlSnapshot,
+} from "../packages/shared/src/types.js";
 
 type SpawnedServerProcess = ChildProcessByStdio<null, Readable, Readable>;
 
@@ -237,7 +240,7 @@ test("protected APIs and event streams require a session cookie when admin auth 
     tempDirPrefix: "parallaize-server-session-required-",
   });
 
-  for (const path of ["/api/summary", "/api/health", "/events"]) {
+  for (const path of ["/api/summary", "/api/health", "/events", "/api/vms/vm-0001/logs/live"]) {
     const response = await sendRequest(port, {
       path,
       method: "GET",
@@ -317,6 +320,46 @@ test("login issues a session cookie that unlocks protected APIs and event stream
   assert.equal(eventsResponse.statusCode, 200);
   assert.match(String(eventsResponse.headers["content-type"] ?? ""), /^text\/event-stream;/);
   eventsResponse.destroy();
+});
+
+test("live VM log streams push updated snapshots after commands land", async (context) => {
+  const { port } = await startServer(context, {
+    adminPassword: "",
+    tempDirPrefix: "parallaize-server-live-logs-",
+  });
+
+  const logsResponse = await openEventStream(
+    port,
+    {
+      accept: "text/event-stream",
+    },
+    "/api/vms/vm-0001/logs/live",
+  );
+
+  context.after(() => {
+    logsResponse.destroy();
+  });
+
+  const initialSnapshot = await readSseEvent<VmLogsSnapshot>(logsResponse, "snapshot");
+  assert.equal(initialSnapshot.providerRef, "alpha-workbench");
+  assert.match(initialSnapshot.content, /provider: mock/);
+
+  const commandResponse = await sendRequest(port, {
+    path: "/api/vms/vm-0001/input",
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      command: "pwd",
+    }),
+  });
+  assert.equal(commandResponse.statusCode, 202);
+
+  const pushedSnapshot = await readSseEvent<VmLogsSnapshot>(logsResponse, "snapshot");
+  assert.match(pushedSnapshot.content, /\$ pwd/);
+  assert.match(pushedSnapshot.content, /cwd:/);
 });
 
 test("auth status rotates persisted sessions and invalidates the previous cookie", async (context) => {
@@ -864,19 +907,20 @@ async function startServer(
 async function openEventStream(
   port: number,
   headers: Record<string, string> = {},
+  path = "/events",
 ): Promise<IncomingMessage> {
   return await new Promise<IncomingMessage>((resolve, reject) => {
     const req = request(
       {
         host: "127.0.0.1",
         port,
-        path: "/events",
+        path,
         method: "GET",
         headers,
       },
       (response) => {
         if (response.statusCode !== 200) {
-          reject(new Error(`Expected 200 from /events, got ${response.statusCode ?? "unknown"}.`));
+          reject(new Error(`Expected 200 from ${path}, got ${response.statusCode ?? "unknown"}.`));
           response.resume();
           return;
         }

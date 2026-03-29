@@ -467,7 +467,6 @@ export class DesktopManager {
         if (launchSnapshot) {
           report("Preparing snapshot launch", 18);
           await sleep(350);
-          report("Cloning snapshot", 48);
           const snapshot = launchSnapshot;
           const template =
             launchTemplate ??
@@ -480,8 +479,8 @@ export class DesktopManager {
             snapshot,
             vmRecord,
             template,
+            report,
           );
-          report("Booting desktop", 86);
 
           this.store.update((draft) => {
             const vm = this.requireVm(draft, vmRecord.id);
@@ -598,9 +597,7 @@ export class DesktopManager {
           this.markVmStopped(source.id, stopMutation);
         }
 
-        report("Cloning disks", 52);
-        const mutation = await this.provider.cloneVm(source, target, template);
-        report("Booting desktop", 86);
+        const mutation = await this.provider.cloneVm(source, target, template, report);
 
         this.store.update((draft) => {
           const vm = this.requireVm(draft, vmRecord.id);
@@ -837,7 +834,6 @@ export class DesktopManager {
       try {
         report("Preparing snapshot launch", 18);
         await sleep(350);
-        report("Cloning snapshot", 48);
         const detail = this.getVmDetail(vmId);
         const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
         const template = resolveTemplateForSnapshot(
@@ -852,8 +848,8 @@ export class DesktopManager {
           snapshot,
           vmRecord,
           template,
+          report,
         );
-        report("Booting desktop", 86);
 
         this.store.update((draft) => {
           const current = this.requireVm(draft, vmRecord.id);

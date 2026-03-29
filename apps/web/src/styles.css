@@ -566,6 +566,7 @@ textarea {
 
 .vm-tile__preview {
   min-height: 108px;
+  contain: layout paint;
 }
 
 .vm-tile__preview > *,
@@ -2419,6 +2420,7 @@ section.workspace-shell {
   overflow: hidden;
   border-radius: inherit;
   background: #040608;
+  contain: layout paint;
 }
 
 .vm-tile__compact-preview > *,

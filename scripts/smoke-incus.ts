@@ -8,6 +8,7 @@ import {
   type FramebufferVisibilityStats,
   type VncPixelFormat,
 } from "../packages/shared/src/vnc-framebuffer.js";
+import { DEFAULT_GUEST_DESKTOP_HEALTH_CHECK } from "../apps/control/src/ubuntu-guest-init.js";
 import WebSocket from "ws";
 
 const CONTROL_URL = process.env.PARALLAIZE_SMOKE_CONTROL_URL ?? "http://127.0.0.1:3000";
@@ -95,6 +96,9 @@ async function main() {
     await waitForVncHandshake(vmId);
     logStep("Browser VNC bridge answered through Caddy");
 
+    await waitForGuestDesktopHealth(detail.vm.providerRef);
+    logStep("Guest GNOME session reported healthy");
+
     const firstDesktopSample = await waitForVisibleDesktop(detail.vm.session);
     logStep(`Guest desktop rendered visible content (${formatVisibilityStats(firstDesktopSample.stats)})`);
 
@@ -111,6 +115,9 @@ async function main() {
 
     await waitForVncHandshake(vmId);
     logStep("Browser VNC bridge recovered after restart");
+
+    await waitForGuestDesktopHealth(detail.vm.providerRef);
+    logStep("Guest GNOME session recovered after restart");
 
     const restartedDesktopSample = await waitForVisibleDesktop(detail.vm.session);
     logStep(
@@ -335,6 +342,35 @@ async function waitForVisibleDesktop(session: SmokeVmSession | null) {
       } catch {
         return null;
       }
+    },
+  );
+}
+
+async function waitForGuestDesktopHealth(providerRef: string) {
+  return waitFor(
+    `healthy guest desktop on ${providerRef}`,
+    VNC_TIMEOUT_MS,
+    6_000,
+    async () => {
+      const result = runCommand(
+        "flox",
+        [
+          "activate",
+          "-d",
+          ".",
+          "--",
+          INCUS_BIN,
+          "exec",
+          providerRef,
+          "--",
+          "sh",
+          "-lc",
+          DEFAULT_GUEST_DESKTOP_HEALTH_CHECK,
+        ],
+        false,
+      );
+
+      return result.status === 0 ? true : null;
     },
   );
 }

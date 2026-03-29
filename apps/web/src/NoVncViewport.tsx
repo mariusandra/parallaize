@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type JSX } from "react";
+import { memo, useEffect, useRef, useState, type JSX } from "react";
 
 import {
   applySafeRfbEncodingPatch,
@@ -45,7 +45,11 @@ type ClipboardNoticeTone = "muted" | "success" | "warning";
 
 const defaultReconnectDelayMs = 1_000;
 const clipboardNoticeTimeoutMs = 4_500;
-export function NoVncViewport({
+let rfbModulePromise: Promise<{
+  default?: unknown;
+}> | null = null;
+
+export const NoVncViewport = memo(function NoVncViewport({
   className,
   hideConnectedOverlayStatus = false,
   onResolutionChange,
@@ -216,6 +220,20 @@ export function NoVncViewport({
     setPendingGuestClipboardText(null);
     lastGuestClipboardTextRef.current = null;
   }, [viewOnly, webSocketPath]);
+
+  useEffect(() => {
+    const rfb = rfbRef.current;
+
+    if (!rfb) {
+      return;
+    }
+
+    const viewportSettings = viewportSettingsForMode(viewportMode);
+    rfb.scaleViewport = viewportSettings.scaleViewport;
+    rfb.resizeSession = viewportSettings.resizeSession;
+    rfb.clipViewport = viewportSettings.clipViewport;
+    rfb.viewOnly = viewOnly;
+  }, [viewportMode, viewOnly]);
 
   useEffect(() => {
     if (!onResolutionChange) {
@@ -480,10 +498,9 @@ export function NoVncViewport({
       try {
         clearRetryTimer();
         disposeRfb(false);
-        const modulePath = "/assets/vendor/novnc/rfb.js";
-        const imported = (await import(modulePath)) as {
-          default?: unknown;
-        };
+        setConnectionState("connecting");
+        setStatusMessage("Connecting to the guest desktop...");
+        const imported = await loadRfbModule();
 
         if (cancelled) {
           return;
@@ -609,7 +626,7 @@ export function NoVncViewport({
       clearRetryTimer();
       disposeRfb(true);
     };
-  }, [viewportMode, viewOnly, webSocketPath]);
+  }, [webSocketPath]);
 
   return (
     <div
@@ -738,7 +755,9 @@ export function NoVncViewport({
       ) : null}
     </div>
   );
-}
+});
+
+NoVncViewport.displayName = "NoVncViewport";
 
 function connectionStateClassName(state: ConnectionState): string {
   switch (state) {
@@ -781,4 +800,17 @@ function copyTextWithSelection(text: string): boolean {
   } finally {
     textarea.remove();
   }
+}
+
+async function loadRfbModule(): Promise<{
+  default?: unknown;
+}> {
+  if (!rfbModulePromise) {
+    const modulePath = "/assets/vendor/novnc/rfb.js";
+    rfbModulePromise = import(modulePath) as Promise<{
+      default?: unknown;
+    }>;
+  }
+
+  return rfbModulePromise;
 }

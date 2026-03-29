@@ -2,8 +2,15 @@ import { slugify } from "../../../packages/shared/src/helpers.js";
 
 const DEFAULT_GUEST_USERNAME = "ubuntu";
 export const DEFAULT_GUEST_HOME = `/home/${DEFAULT_GUEST_USERNAME}`;
+export const DEFAULT_GUEST_DESKTOP_HEALTH_CHECK =
+  "/usr/local/bin/parallaize-desktop-health-check";
+export type GuestDesktopBootstrapRepairProfile = "standard" | "aggressive";
 const DEFAULT_GUEST_WALLPAPER = "Monument_valley_by_orbitelambda.jpg";
 const DEFAULT_GUEST_WALLPAPER_BASE_URL = "https://wallpapers.parallaize.com/24.04";
+const DEFAULT_GUEST_DESKTOP_HEALTH_GRACE_SECONDS = 30;
+const DEFAULT_GUEST_DESKTOP_GDM_RESTART_COOLDOWN_SECONDS = 30;
+const AGGRESSIVE_GUEST_DESKTOP_HEALTH_GRACE_SECONDS = 10;
+const AGGRESSIVE_GUEST_DESKTOP_GDM_RESTART_COOLDOWN_SECONDS = 15;
 
 export interface GuestInotifySettings {
   maxUserWatches: number;
@@ -21,12 +28,13 @@ export function buildEnsureGuestDesktopBootstrapScript(
   port: number,
   strictStart: boolean,
   vmName?: string,
+  repairProfile: GuestDesktopBootstrapRepairProfile = "standard",
 ): string {
   return `BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"
 BOOTSTRAP_SERVICE_FILE="/etc/systemd/system/parallaize-desktop-bootstrap.service"
 CURRENT_BOOTSTRAP="$(cat "$BOOTSTRAP_FILE" 2>/dev/null || true)"
 DESIRED_BOOTSTRAP="$(cat <<'PARALLAIZE_BOOTSTRAP_SCRIPT'
-${buildGuestDesktopBootstrapScript(port, vmName)}
+${buildGuestDesktopBootstrapScript(port, vmName, repairProfile)}
 PARALLAIZE_BOOTSTRAP_SCRIPT
 )"
 CURRENT_BOOTSTRAP_SERVICE="$(cat "$BOOTSTRAP_SERVICE_FILE" 2>/dev/null || true)"
@@ -37,7 +45,7 @@ PARALLAIZE_BOOTSTRAP_UNIT
 if [ "$CURRENT_BOOTSTRAP" != "$DESIRED_BOOTSTRAP" ] || [ "$CURRENT_BOOTSTRAP_SERVICE" != "$DESIRED_BOOTSTRAP_SERVICE" ]; then
   mkdir -p /usr/local/bin /etc/systemd/system
   cat > "$BOOTSTRAP_FILE" <<'PARALLAIZE_BOOTSTRAP_SCRIPT'
-${buildGuestDesktopBootstrapScript(port, vmName)}
+${buildGuestDesktopBootstrapScript(port, vmName, repairProfile)}
 PARALLAIZE_BOOTSTRAP_SCRIPT
   chmod 0755 "$BOOTSTRAP_FILE"
   cat > "$BOOTSTRAP_SERVICE_FILE" <<'PARALLAIZE_BOOTSTRAP_UNIT'
@@ -126,10 +134,86 @@ find_guest_auth_file() {
 }`;
 }
 
+function buildGuestDesktopHealthFunctions(): string {
+  return `guest_desktop_has_visible_stage() {
+  if ! command -v xwininfo >/dev/null 2>&1; then
+    return 0
+  fi
+  DISPLAY_NUMBER="$(find_guest_display_number)"
+  AUTH_FILE="$(find_guest_auth_file || true)"
+  if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
+    return 1
+  fi
+  DISPLAY="$DISPLAY_NUMBER" XAUTHORITY="$AUTH_FILE" xwininfo -root -tree 2>/dev/null | awk '
+    /mutter guard window/ { next }
+    {
+      for (i = 1; i <= NF; i += 1) {
+        if ($i ~ /^[0-9]+x[0-9]+[+][+-]?[0-9]+[+][+-]?[0-9]+$/) {
+          split($i, dims, /[x+]/)
+          if ((dims[1] + 0) >= 200 && (dims[2] + 0) >= 200) {
+            found = 1
+          }
+        }
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+guest_desktop_session_ready() {
+  if ! id ${DEFAULT_GUEST_USERNAME} >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! pgrep -u ${DEFAULT_GUEST_USERNAME} -x gnome-shell >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! ps -u ${DEFAULT_GUEST_USERNAME} -o args= | grep -F "/usr/libexec/gnome-session-binary" >/dev/null 2>&1; then
+    return 1
+  fi
+  if command -v loginctl >/dev/null 2>&1; then
+    for CURRENT_SESSION in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+      CURRENT_UID="$(loginctl show-session "$CURRENT_SESSION" -p User --value 2>/dev/null || true)"
+      CURRENT_NAME="$(loginctl show-session "$CURRENT_SESSION" -p Name --value 2>/dev/null || true)"
+      CURRENT_TYPE="$(loginctl show-session "$CURRENT_SESSION" -p Type --value 2>/dev/null || true)"
+      CURRENT_CLASS="$(loginctl show-session "$CURRENT_SESSION" -p Class --value 2>/dev/null || true)"
+      CURRENT_STATE="$(loginctl show-session "$CURRENT_SESSION" -p State --value 2>/dev/null || true)"
+      CURRENT_REMOTE="$(loginctl show-session "$CURRENT_SESSION" -p Remote --value 2>/dev/null || true)"
+      if [ -z "$CURRENT_UID" ] || [ "$CURRENT_REMOTE" = "yes" ]; then
+        continue
+      fi
+      if [ "$CURRENT_NAME" != "${DEFAULT_GUEST_USERNAME}" ]; then
+        continue
+      fi
+      if [ "$CURRENT_CLASS" != "user" ] || [ "$CURRENT_STATE" != "active" ]; then
+        continue
+      fi
+      if [ "$CURRENT_TYPE" = "x11" ] || [ "$CURRENT_TYPE" = "wayland" ]; then
+        guest_desktop_has_visible_stage
+        return $?
+      fi
+    done
+    return 1
+  fi
+  guest_desktop_has_visible_stage
+}`;
+}
+
+export function buildGuestDesktopHealthCheckScript(): string {
+  return `#!/bin/sh
+set -eu
+${buildGuestDisplayDiscoveryScript()}
+${buildGuestDesktopHealthFunctions()}
+if guest_desktop_session_ready; then
+  exit 0
+fi
+exit 1`;
+}
+
 function buildGuestVncLauncherScript(port: number): string {
   return `#!/bin/sh
 set -eu
 ${buildGuestDisplayDiscoveryScript()}
+${buildGuestDesktopHealthFunctions()}
 ATTEMPT=0
 AUTH_FILE=""
 DISPLAY_NUMBER=":0"
@@ -188,6 +272,9 @@ WALLPAPER_DOWNLOAD_DIR="$PARALLAIZE_CONFIG_DIR/wallpapers"
 WALLPAPER_DOWNLOAD_FILE="$WALLPAPER_DOWNLOAD_DIR/initial-wallpaper.jpg"
 WALLPAPER_DOWNLOAD_TEMP="$WALLPAPER_DOWNLOAD_DIR/initial-wallpaper.jpg.tmp"
 WALLPAPER_MARKER_FILE="$PARALLAIZE_CONFIG_DIR/desktop-wallpaper-initialized"
+WALLPAPER_STATE_FILE="$PARALLAIZE_CONFIG_DIR/desktop-wallpaper-source"
+RESOLVED_WALLPAPER_URI=""
+RESOLVED_WALLPAPER_STATE=""
 set_dash_to_dock_defaults() {
   gsettings set "$DASH_TO_DOCK_SCHEMA" dock-position RIGHT >/dev/null 2>&1 || true
   gsettings set "$DASH_TO_DOCK_SCHEMA" dash-max-icon-size 32 >/dev/null 2>&1 || true
@@ -229,26 +316,37 @@ download_remote_wallpaper() {
 resolve_first_boot_wallpaper_uri() {
   downloaded_wallpaper="$(download_remote_wallpaper || true)"
   if [ -n "$downloaded_wallpaper" ] && [ -f "$downloaded_wallpaper" ]; then
-    printf 'file://%s\\n' "$downloaded_wallpaper"
+    RESOLVED_WALLPAPER_URI="file://$downloaded_wallpaper"
+    RESOLVED_WALLPAPER_STATE="remote:$WALLPAPER_REMOTE_URL"
     return 0
   fi
   fallback_wallpaper="$(find_named_wallpaper || true)"
   if [ -n "$fallback_wallpaper" ]; then
-    printf 'file://%s\\n' "$fallback_wallpaper"
+    RESOLVED_WALLPAPER_URI="file://$fallback_wallpaper"
+    RESOLVED_WALLPAPER_STATE="named:$WALLPAPER_NAME"
     return 0
   fi
+
+  RESOLVED_WALLPAPER_URI=""
+  RESOLVED_WALLPAPER_STATE=""
   return 1
 }
 apply_first_boot_wallpaper() {
-  if [ -f "$WALLPAPER_MARKER_FILE" ]; then
+  desired_wallpaper_state="named:$WALLPAPER_NAME"
+  if [ -n "$WALLPAPER_REMOTE_URL" ]; then
+    desired_wallpaper_state="remote:$WALLPAPER_REMOTE_URL"
+  fi
+  current_wallpaper_state="$(cat "$WALLPAPER_STATE_FILE" 2>/dev/null || true)"
+  if [ -f "$WALLPAPER_MARKER_FILE" ] && [ "$current_wallpaper_state" = "$desired_wallpaper_state" ]; then
     return 0
   fi
   mkdir -p "$PARALLAIZE_CONFIG_DIR"
-  wallpaper_uri="$(resolve_first_boot_wallpaper_uri || true)"
-  if [ -n "$wallpaper_uri" ]; then
-    gsettings set "$BACKGROUND_SCHEMA" picture-uri "$wallpaper_uri" >/dev/null 2>&1 || true
-    gsettings set "$BACKGROUND_SCHEMA" picture-uri-dark "$wallpaper_uri" >/dev/null 2>&1 || true
+  resolve_first_boot_wallpaper_uri || true
+  if [ -n "$RESOLVED_WALLPAPER_URI" ]; then
+    gsettings set "$BACKGROUND_SCHEMA" picture-uri "$RESOLVED_WALLPAPER_URI" >/dev/null 2>&1 || true
+    gsettings set "$BACKGROUND_SCHEMA" picture-uri-dark "$RESOLVED_WALLPAPER_URI" >/dev/null 2>&1 || true
     gsettings set "$BACKGROUND_SCHEMA" picture-options zoom >/dev/null 2>&1 || true
+    printf '%s\\n' "$RESOLVED_WALLPAPER_STATE" > "$WALLPAPER_STATE_FILE"
   fi
   : > "$WALLPAPER_MARKER_FILE"
 }
@@ -286,6 +384,22 @@ LIBGL_ALWAYS_SOFTWARE=1
 GALLIUM_DRIVER=llvmpipe`;
 }
 
+function resolveGuestDesktopBootstrapRepairTimings(
+  repairProfile: GuestDesktopBootstrapRepairProfile,
+): { healthGraceSeconds: number; gdmRestartCooldownSeconds: number } {
+  if (repairProfile === "aggressive") {
+    return {
+      healthGraceSeconds: AGGRESSIVE_GUEST_DESKTOP_HEALTH_GRACE_SECONDS,
+      gdmRestartCooldownSeconds: AGGRESSIVE_GUEST_DESKTOP_GDM_RESTART_COOLDOWN_SECONDS,
+    };
+  }
+
+  return {
+    healthGraceSeconds: DEFAULT_GUEST_DESKTOP_HEALTH_GRACE_SECONDS,
+    gdmRestartCooldownSeconds: DEFAULT_GUEST_DESKTOP_GDM_RESTART_COOLDOWN_SECONDS,
+  };
+}
+
 export function buildGuestWallpaperUrl(vmName?: string): string | null {
   const slug = typeof vmName === "string" ? slugify(vmName) : "";
 
@@ -296,15 +410,27 @@ export function buildGuestWallpaperUrl(vmName?: string): string | null {
   return `${DEFAULT_GUEST_WALLPAPER_BASE_URL}/${slug}.jpg`;
 }
 
-function buildGuestDesktopBootstrapScript(port: number, vmName?: string): string {
+function buildGuestDesktopBootstrapScript(
+  port: number,
+  vmName?: string,
+  repairProfile: GuestDesktopBootstrapRepairProfile = "standard",
+): string {
+  const repairTimings = resolveGuestDesktopBootstrapRepairTimings(repairProfile);
+
   return `#!/bin/sh
 set -eu
 GDM_FILE="/etc/gdm3/custom.conf"
 LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
 SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
 RENDERING_ENV_FILE="/etc/environment.d/90-parallaize-rendering.conf"
+SESSION_HEALTH_FILE="${DEFAULT_GUEST_DESKTOP_HEALTH_CHECK}"
 SESSION_SETUP_FILE="/usr/local/bin/parallaize-desktop-session-setup"
 SESSION_AUTOSTART_FILE="/etc/xdg/autostart/parallaize-desktop-session-setup.desktop"
+REPAIR_STATE_DIR="/var/lib/parallaize"
+DESKTOP_HEALTH_PENDING_FILE="$REPAIR_STATE_DIR/desktop-session-unhealthy-at"
+DESKTOP_GDM_RESTART_FILE="$REPAIR_STATE_DIR/desktop-session-last-gdm-restart"
+DESKTOP_HEALTH_GRACE_SECONDS=${repairTimings.healthGraceSeconds}
+DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=${repairTimings.gdmRestartCooldownSeconds}
 WELCOME_STATE_DIR="${DEFAULT_GUEST_HOME}/.config"
 WELCOME_DONE_FILE="$WELCOME_STATE_DIR/gnome-initial-setup-done"
 WELCOME_AUTOSTART_DIR="$WELCOME_STATE_DIR/autostart"
@@ -329,6 +455,11 @@ DESIRED_RENDERING_ENV="$(cat <<'ENV'
 ${buildGuestRenderingEnvironmentConfig()}
 ENV
 )"
+CURRENT_SESSION_HEALTH="$(cat "$SESSION_HEALTH_FILE" 2>/dev/null || true)"
+DESIRED_SESSION_HEALTH="$(cat <<'SCRIPT'
+${buildGuestDesktopHealthCheckScript()}
+SCRIPT
+)"
 CURRENT_SESSION_SETUP="$(cat "$SESSION_SETUP_FILE" 2>/dev/null || true)"
 DESIRED_SESSION_SETUP="$(cat <<'SCRIPT'
 ${buildGuestDesktopSessionSetupScript(vmName)}
@@ -350,6 +481,43 @@ DESKTOP
 RESTART_GDM=0
 RESTART_VNC=0
 MISSING_PACKAGES=""
+repair_guest_desktop_if_unhealthy() {
+  if [ ! -x "$SESSION_HEALTH_FILE" ]; then
+    return 0
+  fi
+  if "$SESSION_HEALTH_FILE"; then
+    rm -f "$DESKTOP_HEALTH_PENDING_FILE" "$DESKTOP_GDM_RESTART_FILE"
+    return 0
+  fi
+  mkdir -p "$REPAIR_STATE_DIR"
+  NOW_EPOCH="$(date +%s)"
+  PENDING_AT="$(cat "$DESKTOP_HEALTH_PENDING_FILE" 2>/dev/null || true)"
+  case "$PENDING_AT" in
+    ''|*[!0-9]*)
+      PENDING_AT=0
+      ;;
+  esac
+  if [ "$PENDING_AT" -eq 0 ]; then
+    printf '%s\\n' "$NOW_EPOCH" > "$DESKTOP_HEALTH_PENDING_FILE"
+    return 0
+  fi
+  if [ $((NOW_EPOCH - PENDING_AT)) -lt "$DESKTOP_HEALTH_GRACE_SECONDS" ]; then
+    return 0
+  fi
+  LAST_GDM_RESTART_AT="$(cat "$DESKTOP_GDM_RESTART_FILE" 2>/dev/null || true)"
+  case "$LAST_GDM_RESTART_AT" in
+    ''|*[!0-9]*)
+      LAST_GDM_RESTART_AT=0
+      ;;
+  esac
+  if [ $((NOW_EPOCH - LAST_GDM_RESTART_AT)) -lt "$DESKTOP_GDM_RESTART_COOLDOWN_SECONDS" ]; then
+    return 0
+  fi
+  printf '%s\\n' "$NOW_EPOCH" > "$DESKTOP_GDM_RESTART_FILE"
+  systemctl restart gdm3 || true
+  RESTART_VNC=1
+  sleep 2
+}
 if id ${DEFAULT_GUEST_USERNAME} >/dev/null 2>&1 && [ -d "${DEFAULT_GUEST_HOME}" ]; then
   install -d -m 0755 -o ${DEFAULT_GUEST_USERNAME} -g ${DEFAULT_GUEST_USERNAME} "$WELCOME_STATE_DIR" "$WELCOME_AUTOSTART_DIR"
   touch "$WELCOME_DONE_FILE"
@@ -395,6 +563,13 @@ ${buildGuestRenderingEnvironmentConfig()}
 ENV
   RESTART_GDM=1
 fi
+if [ "$CURRENT_SESSION_HEALTH" != "$DESIRED_SESSION_HEALTH" ]; then
+  mkdir -p /usr/local/bin
+  cat > "$SESSION_HEALTH_FILE" <<'SCRIPT'
+${buildGuestDesktopHealthCheckScript()}
+SCRIPT
+  chmod 0755 "$SESSION_HEALTH_FILE"
+fi
 if [ "$CURRENT_SESSION_SETUP" != "$DESIRED_SESSION_SETUP" ]; then
   mkdir -p /usr/local/bin
   cat > "$SESSION_SETUP_FILE" <<'SCRIPT'
@@ -426,6 +601,7 @@ if [ "$RESTART_GDM" -eq 1 ]; then
   systemctl restart gdm3 || true
   sleep 2
 fi
+repair_guest_desktop_if_unhealthy
 if [ "$RESTART_VNC" -eq 1 ] || ! systemctl is-active --quiet parallaize-x11vnc.service; then
   systemctl restart --no-block parallaize-x11vnc.service
 fi`;
@@ -477,6 +653,10 @@ ${indentBlock(buildGuestVncServiceUnit(), "      ")}
     permissions: '0644'
     content: |
 ${indentBlock(buildGuestRenderingEnvironmentConfig(), "      ")}
+  - path: ${DEFAULT_GUEST_DESKTOP_HEALTH_CHECK}
+    permissions: '0755'
+    content: |
+${indentBlock(buildGuestDesktopHealthCheckScript(), "      ")}
   - path: /usr/local/bin/parallaize-desktop-bootstrap
     permissions: '0755'
     content: |
