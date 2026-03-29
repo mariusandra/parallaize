@@ -173,6 +173,8 @@ function buildGuestDesktopSessionSetupScript(): string {
 set -eu
 DASH_TO_DOCK_SCHEMA="org.gnome.shell.extensions.dash-to-dock"
 BACKGROUND_SCHEMA="org.gnome.desktop.background"
+SESSION_SCHEMA="org.gnome.desktop.session"
+POWER_SCHEMA="org.gnome.settings-daemon.plugins.power"
 WALLPAPER_NAME="${DEFAULT_GUEST_WALLPAPER}"
 WALLPAPER_ROOTS="/usr/share/backgrounds /usr/share/gnome-background-properties"
 PARALLAIZE_CONFIG_DIR="\${XDG_CONFIG_HOME:-$HOME/.config}/parallaize"
@@ -180,6 +182,13 @@ WALLPAPER_MARKER_FILE="$PARALLAIZE_CONFIG_DIR/desktop-wallpaper-initialized"
 set_dash_to_dock_defaults() {
   gsettings set "$DASH_TO_DOCK_SCHEMA" dock-position RIGHT >/dev/null 2>&1 || true
   gsettings set "$DASH_TO_DOCK_SCHEMA" dash-max-icon-size 32 >/dev/null 2>&1 || true
+}
+set_power_defaults() {
+  gsettings set "$SESSION_SCHEMA" idle-delay 'uint32 0' >/dev/null 2>&1 || true
+  gsettings set "$POWER_SCHEMA" sleep-inactive-ac-type 'nothing' >/dev/null 2>&1 || true
+  gsettings set "$POWER_SCHEMA" sleep-inactive-ac-timeout 'uint32 0' >/dev/null 2>&1 || true
+  gsettings set "$POWER_SCHEMA" sleep-inactive-battery-type 'nothing' >/dev/null 2>&1 || true
+  gsettings set "$POWER_SCHEMA" sleep-inactive-battery-timeout 'uint32 0' >/dev/null 2>&1 || true
 }
 find_named_wallpaper() {
   find $WALLPAPER_ROOTS -type f -name "$WALLPAPER_NAME" 2>/dev/null \
@@ -210,6 +219,7 @@ ensure_indicator_multiload() {
   nohup indicator-multiload >/dev/null 2>&1 &
 }
 set_dash_to_dock_defaults
+set_power_defaults
 apply_first_boot_wallpaper
 ensure_indicator_multiload`;
 }

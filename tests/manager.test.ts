@@ -1867,6 +1867,11 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /indicator-multiload/);
   assert.match(configSetCall?.[4] ?? "", /dock-position RIGHT/);
   assert.match(configSetCall?.[4] ?? "", /dash-max-icon-size 32/);
+  assert.match(configSetCall?.[4] ?? "", /idle-delay 'uint32 0'/);
+  assert.match(configSetCall?.[4] ?? "", /sleep-inactive-ac-type 'nothing'/);
+  assert.match(configSetCall?.[4] ?? "", /sleep-inactive-ac-timeout 'uint32 0'/);
+  assert.match(configSetCall?.[4] ?? "", /sleep-inactive-battery-type 'nothing'/);
+  assert.match(configSetCall?.[4] ?? "", /sleep-inactive-battery-timeout 'uint32 0'/);
   assert.match(configSetCall?.[4] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
   assert.match(configSetCall?.[4] ?? "", /desktop-wallpaper-initialized/);
   assert.match(configSetCall?.[4] ?? "", /picture-uri-dark/);
@@ -2824,6 +2829,11 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /indicator-multiload/);
   assert.match(execCall?.[5] ?? "", /dock-position RIGHT/);
   assert.match(execCall?.[5] ?? "", /dash-max-icon-size 32/);
+  assert.match(execCall?.[5] ?? "", /idle-delay 'uint32 0'/);
+  assert.match(execCall?.[5] ?? "", /sleep-inactive-ac-type 'nothing'/);
+  assert.match(execCall?.[5] ?? "", /sleep-inactive-ac-timeout 'uint32 0'/);
+  assert.match(execCall?.[5] ?? "", /sleep-inactive-battery-type 'nothing'/);
+  assert.match(execCall?.[5] ?? "", /sleep-inactive-battery-timeout 'uint32 0'/);
   assert.match(execCall?.[5] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
   assert.match(execCall?.[5] ?? "", /desktop-wallpaper-initialized/);
   assert.match(execCall?.[5] ?? "", /picture-uri-dark/);
