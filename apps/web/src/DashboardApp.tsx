@@ -26,7 +26,6 @@ import {
 } from "../../../packages/shared/src/helpers.js";
 import type {
   AuthStatus,
-  ApiResponse,
   CaptureTemplateInput,
   CreateTemplateInput,
   CreateVmInput,
@@ -176,6 +175,19 @@ import {
   StaticPatternPreview,
   StatusBadge,
 } from "./dashboardPrimitives.js";
+import {
+  readFullscreenActive,
+  releaseFullscreenKeyboardLock,
+  syncFullscreenKeyboardLock,
+} from "./dashboardFullscreen.js";
+import {
+  AuthRequiredError,
+  applyVmLogsAppend,
+  errorMessage,
+  fetchJson,
+  openVmLogsEventSource,
+  postJson,
+} from "./dashboardTransport.js";
 
 interface ResourceDraft {
   cpu: string;
@@ -279,16 +291,6 @@ interface VmLogsViewState {
   loading: boolean;
   logs: VmLogsSnapshot | null;
   refreshing: boolean;
-}
-
-interface VmLogsAppendEvent {
-  chunk: string;
-  fetchedAt: string;
-  source: string;
-}
-
-interface VmLogsStreamErrorEvent {
-  message: string;
 }
 
 interface CloneVmDialogState {
@@ -7825,66 +7827,6 @@ function readThemeMode(): ThemeMode {
   return "light";
 }
 
-function readFullscreenActive(): boolean {
-  return typeof document !== "undefined" && document.fullscreenElement !== null;
-}
-
-function fullscreenKeyboardLock():
-  | {
-      lock: (keyCodes?: string[]) => Promise<void>;
-      unlock: () => void;
-    }
-  | null {
-  if (typeof navigator === "undefined") {
-    return null;
-  }
-
-  const keyboard = (
-    navigator as Navigator & {
-      keyboard?: {
-        lock?: (keyCodes?: string[]) => Promise<void>;
-        unlock?: () => void;
-      };
-    }
-  ).keyboard;
-
-  if (!keyboard || typeof keyboard.lock !== "function" || typeof keyboard.unlock !== "function") {
-    return null;
-  }
-
-  return {
-    lock: keyboard.lock.bind(keyboard),
-    unlock: keyboard.unlock.bind(keyboard),
-  };
-}
-
-async function syncFullscreenKeyboardLock(): Promise<void> {
-  if (typeof document === "undefined") {
-    return;
-  }
-
-  const keyboard = fullscreenKeyboardLock();
-
-  if (!keyboard) {
-    return;
-  }
-
-  if (!document.fullscreenElement) {
-    keyboard.unlock();
-    return;
-  }
-
-  try {
-    await keyboard.lock(["Escape"]);
-  } catch {
-    keyboard.unlock();
-  }
-}
-
-function releaseFullscreenKeyboardLock(): void {
-  fullscreenKeyboardLock()?.unlock();
-}
-
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   const stored = readStoredString(key);
 
@@ -8369,114 +8311,4 @@ function buildLatestReleaseTagUrl(version: string): string {
 
 function isNearScrollBottom(element: HTMLElement): boolean {
   return element.scrollHeight - (element.scrollTop + element.clientHeight) <= 24;
-}
-
-function openVmLogsEventSource(
-  vmId: string,
-  handlers: {
-    onSnapshot(logs: VmLogsSnapshot): void;
-    onAppend(appendEvent: VmLogsAppendEvent): void;
-    onStreamError(message: string): void;
-    onConnectionError(): void;
-  },
-): () => void {
-  const eventSource = new EventSource(`/api/vms/${encodeURIComponent(vmId)}/logs/live`);
-
-  eventSource.addEventListener("snapshot", (event) => {
-    handlers.onSnapshot(parseEventSourceData<VmLogsSnapshot>(event));
-  });
-
-  eventSource.addEventListener("append", (event) => {
-    handlers.onAppend(parseEventSourceData<VmLogsAppendEvent>(event));
-  });
-
-  eventSource.addEventListener("stream-error", (event) => {
-    handlers.onStreamError(
-      parseEventSourceData<VmLogsStreamErrorEvent>(event).message,
-    );
-  });
-
-  eventSource.addEventListener("error", () => {
-    handlers.onConnectionError();
-  });
-
-  return () => {
-    eventSource.close();
-  };
-}
-
-function parseEventSourceData<T>(event: Event): T {
-  return JSON.parse((event as MessageEvent<string>).data) as T;
-}
-
-function applyVmLogsAppend(
-  logs: VmLogsSnapshot | null,
-  appendEvent: VmLogsAppendEvent,
-): VmLogsSnapshot | null {
-  if (!logs) {
-    return logs;
-  }
-
-  return {
-    ...logs,
-    source: appendEvent.source,
-    content: `${logs.content}${appendEvent.chunk}`,
-    fetchedAt: appendEvent.fetchedAt,
-  };
-}
-
-async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, {
-    headers: {
-      accept: "application/json",
-    },
-  });
-
-  const payload = (await response.json()) as ApiResponse<T>;
-
-  if (response.status === 401) {
-    throw new AuthRequiredError();
-  }
-
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload.ok ? `Request failed with ${response.status}` : payload.error);
-  }
-
-  return payload.data;
-}
-
-async function postJson<T = unknown, Body = unknown>(path: string, body: Body): Promise<T> {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  const payload = (await response.json()) as ApiResponse<T>;
-
-  if (response.status === 401) {
-    throw new AuthRequiredError(
-      payload.ok ? "Authentication required." : payload.error,
-    );
-  }
-
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload.ok ? `Request failed with ${response.status}` : payload.error);
-  }
-
-  return payload.data;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error";
-}
-
-class AuthRequiredError extends Error {
-  constructor(message = "Authentication required.") {
-    super(message);
-    this.name = "AuthRequiredError";
-  }
 }

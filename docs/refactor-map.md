@@ -21,12 +21,13 @@ Target direction:
 Current enforcement:
 
 - `tests/layering.test.ts` blocks web-to-control imports, control-to-web imports, and Node/React imports from `packages/shared`.
+- `tests/layering.test.ts` also keeps `dashboardTransport.ts` and `dashboardFullscreen.ts` React-free, keeps `store-normalize.ts` free of Node/pg adapters, and prevents cross-pollination between the JSON and PostgreSQL persistence backends.
 
 ## Entrypoints And Runtime Flows
 
 Entrypoints:
 
-- `apps/control/src/server.ts`: loads config, builds the provider and state store, starts `DesktopManager`, attaches the forwarded-service bridge, serves the dashboard shell, and exposes the JSON/SSE/WebSocket control surface.
+- `apps/control/src/server.ts`: composition root that loads config, builds the provider/store/manager, wires `server-events.ts`, attaches the forwarded-service bridge, and delegates grouped HTTP handling to `server-routes-*.ts`.
 - `apps/web/src/main.tsx`: mounts `DashboardApp`.
 - `apps/control/src/persistence-cli.ts`: admin persistence tooling.
 - `scripts/*.ts|*.mjs`: build, smoke, packaging, and release entrypoints.
@@ -41,15 +42,15 @@ Main runtime flows:
 
 Top dependency chains today:
 
-- `DashboardApp.tsx` -> browser APIs, fetch/SSE, desktop helpers, noVNC adapter, and shared contracts.
-- `server.ts` -> config/store/provider/manager/network bridge plus direct auth/session, SSE, log-tail, release-cache, and static-file code.
+- `DashboardApp.tsx` -> browser APIs, dashboard transport/fullscreen services, desktop helpers, noVNC adapter, and shared contracts.
+- `server.ts` -> config/store/provider/manager/network bridge plus auth/session, route modules, event-stream service, and release-cache wiring.
 - `manager.ts` -> shared helpers/contracts, provider interface, state store, and template-default helpers.
 - `providers.ts` -> shared helpers/contracts, guest bootstrap scripts, Incus CLI, sockets, and host probes.
-- `store.ts` -> shared contracts/helpers plus JSON/PostgreSQL persistence and state normalization.
+- `store.ts` -> store composition and re-exports over `store-types.ts`, `store-normalize.ts`, `store-json.ts`, and `store-postgres.ts`.
 
 ## HTTP Surface Inventory
 
-`apps/control/src/server.ts` currently owns these route groups:
+HTTP route groups are now split across `apps/control/src/server-routes-public.ts`, `apps/control/src/server-routes-system.ts`, `apps/control/src/server-routes-vms.ts`, and `apps/control/src/server-routes-templates.ts`:
 
 - Auth:
   - `POST /api/auth/login`
@@ -206,9 +207,11 @@ Incus-specific internals still span networking ACLs, guest DNS profile sync, Inc
 
 ## Ownership Boundaries To Keep
 
-- Persisted state normalization belongs in `apps/control/src/store.ts` and future persistence-focused helpers. Callers should consume normalized state, not replicate migration rules.
+- Persisted state normalization belongs in `apps/control/src/store-normalize.ts` and future persistence-focused helpers. Callers should consume normalized state, not replicate migration rules.
+- Persistence adapters belong in `apps/control/src/store-json.ts` and `apps/control/src/store-postgres.ts`. Callers should stay on the `StateStore` interface exported by `apps/control/src/store.ts`.
 - Raw Incus CLI details belong in `apps/control/src/providers.ts` and future Incus-only submodules. `manager.ts`, `server.ts`, and `packages/shared` should only depend on provider contracts and provider state.
 - Browser-only storage, DOM, fullscreen, and visibility APIs belong in the web app only. Shared contracts and control-plane code should not know about them.
+- Browser fetch/SSE transport details belong in `apps/web/src/dashboardTransport.ts`, and fullscreen coordination belongs in `apps/web/src/dashboardFullscreen.ts`, not in shared contracts or control-plane code.
 
 ## Current Characterization Coverage
 
@@ -216,6 +219,9 @@ High-risk behavior is already pinned by tests before major extractions:
 
 - Auth login/logout, session rotation, summary gating, release metadata, SSE shutdown, and resolution-control claims:
   - `tests/server.test.ts`
+- VM log append shaping and store/backend boundary enforcement for the new seams:
+  - `tests/dashboard-transport.test.ts`
+  - `tests/layering.test.ts`
 - VM create/clone/start/stop/delete, snapshot flows, template capture, forwarded services, provider mutations, and noVNC route derivation:
   - `tests/manager.test.ts`
 - noVNC adapter behavior:
@@ -240,15 +246,17 @@ High-risk behavior is already pinned by tests before major extractions:
 ## Split Notes For First Hotspots
 
 - `apps/control/src/server.ts`
-  - Target seam: composition root + route modules + auth/session service + event-stream service + log-tail service + release-cache service.
+  - Landed seam: composition root + route modules + auth/session service + event-stream service + release-cache service.
+  - Next extraction target: shutdown/socket lifecycle helpers if `server.ts` grows again.
 - `apps/control/src/manager.ts`
   - Target seam: dashboard read models, VM lifecycle commands, template/snapshot lifecycle, job orchestration, and session-refresh workers.
 - `apps/control/src/providers.ts`
   - Target seam: provider interface, mock provider, Incus lifecycle, Incus guest inspection, Incus network/ACL management, and command/streaming helpers.
 - `apps/control/src/store.ts`
-  - Target seam: store interface, JSON backend, PostgreSQL backend, and normalization/migration helpers.
+  - Landed seam: `store.ts` facade over store interface, JSON backend, PostgreSQL backend, and normalization/migration helpers.
 - `apps/web/src/DashboardApp.tsx`
-  - Target seam: app-shell state, API client/hooks, workspace stage, dialogs, sidepanel features, and browser-persistence hooks.
+  - Landed seam: dashboard transport/fullscreen services extracted.
+  - Next extraction target: app-shell state, workspace stage, dialogs, sidepanel features, and browser-persistence/resolution-control hooks.
 - `apps/web/src/NoVncViewport.tsx`
   - Target seam: noVNC loader, connection-state reducer, clipboard helpers, and viewport observers.
 - `apps/web/src/styles.css`
