@@ -12,7 +12,7 @@ Target direction:
 2. Pure feature logic inside each runtime: selectors, formatters, validation, and state-shaping helpers that should only depend on shared contracts plus same-runtime pure modules.
 3. Runtime adapters at the edge:
    - `apps/control/src/providers.ts`, `apps/control/src/store.ts`, `apps/control/src/network.ts`, `apps/control/src/config.ts`
-   - browser-only hooks and transport adapters such as `apps/web/src/NoVncViewport.tsx`, `apps/web/src/desktopResolution.ts`, and storage/document helpers inside the dashboard
+   - browser-only hooks and transport adapters such as `apps/web/src/NoVncViewport.tsx`, `apps/web/src/desktopResolution.ts`, `apps/web/src/dashboardPersistence.ts`, and `apps/web/src/dashboardResolutionControl.ts`
 4. Composition roots and entrypoints only:
    - `apps/control/src/server.ts`
    - `apps/web/src/main.tsx`
@@ -21,7 +21,7 @@ Target direction:
 Current enforcement:
 
 - `tests/layering.test.ts` blocks web-to-control imports, control-to-web imports, and Node/React imports from `packages/shared`.
-- `tests/layering.test.ts` also keeps `dashboardTransport.ts` and `dashboardFullscreen.ts` React-free, keeps `store-normalize.ts` free of Node/pg adapters, and prevents cross-pollination between the JSON and PostgreSQL persistence backends.
+- `tests/layering.test.ts` also keeps `dashboardTransport.ts`, `dashboardFullscreen.ts`, `dashboardPersistence.ts`, and `dashboardResolutionControl.ts` React-free, keeps `store-normalize.ts` free of Node/pg adapters, and prevents cross-pollination between the JSON and PostgreSQL persistence backends.
 
 ## Entrypoints And Runtime Flows
 
@@ -42,9 +42,9 @@ Main runtime flows:
 
 Top dependency chains today:
 
-- `DashboardApp.tsx` -> browser APIs, dashboard transport/fullscreen services, desktop helpers, noVNC adapter, and shared contracts.
+- `DashboardApp.tsx` -> browser APIs, dashboard transport/fullscreen/persistence/resolution-control services, desktop helpers, noVNC adapter, and shared contracts.
 - `server.ts` -> config/store/provider/manager/network bridge plus auth/session, route modules, event-stream service, and release-cache wiring.
-- `manager.ts` -> shared helpers/contracts, provider interface, state store, and template-default helpers.
+- `manager.ts` -> composition root over `manager-core.ts`, `manager-read-models.ts`, `manager-commands.ts`, and `manager-workers.ts`.
 - `providers.ts` -> shared helpers/contracts, guest bootstrap scripts, Incus CLI, sockets, and host probes.
 - `store.ts` -> store composition and re-exports over `store-types.ts`, `store-normalize.ts`, `store-json.ts`, and `store-postgres.ts`.
 
@@ -95,49 +95,25 @@ HTTP route groups are now split across `apps/control/src/server-routes-public.ts
 
 ## Manager Surface Inventory
 
-`apps/control/src/manager.ts` currently mixes these groups:
+`DesktopManager` is now a thin coordinator over these files:
 
-- Dashboard reads:
+- `apps/control/src/manager-core.ts`
+  - shared state helpers, validation, ID builders, telemetry/session shapers, and template/snapshot utility logic
+- `apps/control/src/manager-read-models.ts`
   - `getProviderState()`
   - `getSummary()`
   - `getVmDetail()`
   - `getVmFrame()`
-- Guest inspection reads:
-  - `getVmLogs()`
-  - `browseVmFiles()`
-  - `readVmFile()`
-  - `getVmTouchedFiles()`
-  - `getVmDiskUsage()`
-- VM lifecycle:
-  - `createVm()`
-  - `cloneVm()`
-  - `startVm()`
-  - `stopVm()`
-  - `restartVm()`
-  - `deleteVm()`
-  - `resizeVm()`
-  - `updateVm()`
-  - `reorderVms()`
-- Snapshot lifecycle:
-  - `snapshotVm()`
-  - `launchVmFromSnapshot()`
-  - `restoreVmSnapshot()`
-- Template lifecycle:
-  - `captureTemplate()`
-  - `createTemplate()`
-  - `updateTemplate()`
-  - `deleteTemplate()`
-- Commands, networking, and resolution:
-  - `injectCommand()`
-  - `setVmResolution()`
-  - `setVmNetworkMode()`
-  - `updateVmForwardedPorts()`
-- Background orchestration:
-  - job queueing and reporting
-  - failed/interrupted job recovery
+  - guest inspection reads such as logs, files, touched files, and disk usage
+- `apps/control/src/manager-commands.ts`
+  - VM lifecycle, snapshot lifecycle, template lifecycle, commands, networking, and forwarded-port mutations
+- `apps/control/src/manager-workers.ts`
   - provider-state sync
+  - failed/interrupted job recovery
   - session refresh loop
   - host and VM telemetry sampling
+- `apps/control/src/manager.ts`
+  - composition, listener fan-out, and the small private helpers that still bind store/provider side effects together
 
 ## Provider Surface Inventory
 
@@ -199,7 +175,8 @@ Incus-specific internals still span networking ACLs, guest DNS profile sync, Inc
 - Dialogs:
   - create, clone VM, rename, template clone, template edit, VM logs
 - Browser-only persistence:
-  - localStorage-backed rail width, sidepanel width, live preview preference, overview collapse, CPU thresholds, and resolution preferences
+  - `apps/web/src/dashboardPersistence.ts` now owns localStorage-backed rail width, sidepanel width, live preview preference, overview collapse, CPU thresholds, and resolution preferences
+  - `apps/web/src/dashboardResolutionControl.ts` now owns browser-tab client IDs plus lease claim/release coordination
 - Browser-only event plumbing:
   - summary SSE stream
   - live VM log SSE stream
@@ -212,6 +189,7 @@ Incus-specific internals still span networking ACLs, guest DNS profile sync, Inc
 - Raw Incus CLI details belong in `apps/control/src/providers.ts` and future Incus-only submodules. `manager.ts`, `server.ts`, and `packages/shared` should only depend on provider contracts and provider state.
 - Browser-only storage, DOM, fullscreen, and visibility APIs belong in the web app only. Shared contracts and control-plane code should not know about them.
 - Browser fetch/SSE transport details belong in `apps/web/src/dashboardTransport.ts`, and fullscreen coordination belongs in `apps/web/src/dashboardFullscreen.ts`, not in shared contracts or control-plane code.
+- Browser-local storage/document helpers belong in `apps/web/src/dashboardPersistence.ts`, and resolution-control lease storage belongs in `apps/web/src/dashboardResolutionControl.ts`, not inline in `DashboardApp.tsx`.
 
 ## Current Characterization Coverage
 
@@ -230,6 +208,9 @@ High-risk behavior is already pinned by tests before major extractions:
   - `tests/desktop-session.test.ts`
 - Resolution-control queueing and lease parsing:
   - `tests/desktop-resolution.test.ts`
+- Browser storage and browser lease coordination:
+  - `tests/dashboard-persistence.test.ts`
+  - `tests/dashboard-resolution-control.test.ts`
 
 ## Success Metrics
 
@@ -249,14 +230,15 @@ High-risk behavior is already pinned by tests before major extractions:
   - Landed seam: composition root + route modules + auth/session service + event-stream service + release-cache service.
   - Next extraction target: shutdown/socket lifecycle helpers if `server.ts` grows again.
 - `apps/control/src/manager.ts`
-  - Target seam: dashboard read models, VM lifecycle commands, template/snapshot lifecycle, job orchestration, and session-refresh workers.
+  - Landed seam: `manager.ts` now composes `manager-core.ts`, `manager-read-models.ts`, `manager-commands.ts`, and `manager-workers.ts`.
+  - Next extraction target: pull the remaining private job/publish glue out if the coordinator starts growing again.
 - `apps/control/src/providers.ts`
   - Target seam: provider interface, mock provider, Incus lifecycle, Incus guest inspection, Incus network/ACL management, and command/streaming helpers.
 - `apps/control/src/store.ts`
   - Landed seam: `store.ts` facade over store interface, JSON backend, PostgreSQL backend, and normalization/migration helpers.
 - `apps/web/src/DashboardApp.tsx`
-  - Landed seam: dashboard transport/fullscreen services extracted.
-  - Next extraction target: app-shell state, workspace stage, dialogs, sidepanel features, and browser-persistence/resolution-control hooks.
+  - Landed seam: dashboard transport/fullscreen/persistence/resolution-control services extracted.
+  - Next extraction target: app-shell state, workspace stage, dialogs, and sidepanel feature components.
 - `apps/web/src/NoVncViewport.tsx`
   - Target seam: noVNC loader, connection-state reducer, clipboard helpers, and viewport observers.
 - `apps/web/src/styles.css`

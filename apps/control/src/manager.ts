@@ -1,74 +1,95 @@
-import {
-  collectMetrics,
-  minimumCreateDiskGb,
-  slugify,
-} from "../../../packages/shared/src/helpers.js";
-import { statfsSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
-import { posix as pathPosix } from "node:path";
+
 import type {
   ActionJob,
-  AppState,
   CaptureTemplateInput,
   CloneVmInput,
   CreateTemplateInput,
   CreateVmInput,
   DashboardSummary,
   EnvironmentTemplate,
-  JobKind,
   ProviderState,
   ReorderVmsInput,
   ResizeVmInput,
   ResourceTelemetry,
   SetVmResolutionInput,
-  Snapshot,
   SnapshotInput,
-  TemplatePortForward,
-  TemplateHistoryEntry,
-  TemplateProvenance,
   UpdateTemplateInput,
-  UpdateVmInput,
   UpdateVmForwardedPortsInput,
+  UpdateVmInput,
   UpdateVmNetworkInput,
   VmDetail,
   VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
-  VmCommandResult,
   VmInstance,
   VmLogsSnapshot,
-  VmNetworkMode,
-  VmPortForward,
   VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
 import type {
-  CaptureTemplateTarget,
   DesktopProvider,
-  ProviderTelemetrySample,
   ProviderMutation,
   VmFileContent,
 } from "./providers.js";
 import type { StateStore } from "./store.js";
 import {
-  buildSeedTemplateSummary,
-  DEFAULT_TEMPLATE_ID,
-  FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
-  isAutoSeedTemplateSummary,
-  resolveDefaultTemplateLaunchSource,
-} from "./template-defaults.js";
-
-const MAX_ACTIVITY_LINES = 8;
-const MAX_COMMAND_RESULTS = 6;
-const MAX_JOBS = 20;
-const MAX_TELEMETRY_SAMPLES = 72;
-const QUEUED_PROGRESS_PERCENT = 6;
-const RUNNING_PROGRESS_PERCENT = 14;
-
-type VmSessionRefreshMode = "none" | "missing" | "all";
-
-interface DesktopManagerOptions {
-  forwardedServiceHostBase?: string | null;
-  defaultTemplateLaunchSource?: string | null;
-}
+  appendActivity,
+  appendTelemetrySample,
+  applyProviderMutation,
+  detectHostDiskGb,
+  emptyResourceTelemetry,
+  errorMessage,
+  nowIso,
+  requireVm,
+  normalizeProgressPercent,
+  resolveTemplateCreateFallbackSnapshot,
+  type DesktopManagerOptions,
+  type DesktopManagerRuntime,
+  type JobProgressReporter,
+  type VmSessionRefreshMode,
+} from "./manager-core.js";
+import {
+  captureTemplate,
+  cloneVm,
+  createTemplate,
+  createVm,
+  deleteTemplate,
+  deleteVm,
+  injectCommand,
+  launchVmFromSnapshot,
+  reorderVms,
+  resizeVm,
+  restartVm,
+  restoreVmSnapshot,
+  setVmNetworkMode,
+  setVmResolution,
+  snapshotVm,
+  startVm,
+  stopVm,
+  updateTemplate,
+  updateVm,
+  updateVmForwardedPorts,
+} from "./manager-commands.js";
+import {
+  browseVmFiles,
+  getProviderState,
+  getSummary,
+  getVmDetail,
+  getVmDiskUsage,
+  getVmFrame,
+  getVmLogs,
+  getVmTouchedFiles,
+  readVmFile,
+} from "./manager-read-models.js";
+import {
+  performManagerTick,
+  reconcileDefaultTemplateLaunchSource,
+  reconcileFailedProvisioningJobs,
+  reconcileInterruptedJobs,
+  recoverInterruptedBootVms,
+  requestVmSessionRefresh,
+  syncProviderState,
+} from "./manager-workers.js";
+import { resolveDefaultTemplateLaunchSource } from "./template-defaults.js";
 
 export class DesktopManager {
   private readonly listeners = new Set<(summary: DashboardSummary) => void>();
@@ -81,6 +102,7 @@ export class DesktopManager {
   private readonly defaultTemplateLaunchSource: string;
   private sessionRefreshMode: VmSessionRefreshMode = "none";
   private sessionRefreshInFlight = false;
+  private readonly runtime: DesktopManagerRuntime;
 
   constructor(
     private readonly store: StateStore,
@@ -90,16 +112,17 @@ export class DesktopManager {
     this.defaultTemplateLaunchSource = resolveDefaultTemplateLaunchSource(
       this.options.defaultTemplateLaunchSource,
     );
-    this.reconcileDefaultTemplateLaunchSource();
-    this.syncProviderState();
-    this.reconcileInterruptedJobs();
-    this.reconcileFailedProvisioningJobs();
-    this.recoverInterruptedBootVms();
+    this.runtime = this.createRuntime();
+    reconcileDefaultTemplateLaunchSource(this.runtime);
+    syncProviderState(this.runtime);
+    reconcileInterruptedJobs(this.runtime);
+    reconcileFailedProvisioningJobs(this.runtime);
+    recoverInterruptedBootVms(this.runtime);
     this.hostTelemetry = appendTelemetrySample(
       emptyResourceTelemetry(),
       this.provider.sampleHostTelemetry(),
     );
-    this.requestVmSessionRefresh("all");
+    requestVmSessionRefresh(this.runtime, "all");
   }
 
   start(): void {
@@ -108,87 +131,7 @@ export class DesktopManager {
     }
 
     this.ticker = setInterval(() => {
-      const providerChanged = this.syncProviderState();
-      let telemetryChanged = false;
-      const nextHostTelemetry = appendTelemetrySample(
-        this.hostTelemetry,
-        this.provider.sampleHostTelemetry(),
-      );
-
-      if (!sameTelemetry(nextHostTelemetry, this.hostTelemetry)) {
-        this.hostTelemetry = nextHostTelemetry;
-        telemetryChanged = true;
-      }
-
-      const activeTelemetryVmIds = new Set<string>();
-      const { changed } = this.store.update((state) => {
-        let dirty = false;
-
-        for (const vm of state.vms) {
-          if (vm.status !== "running") {
-            continue;
-          }
-
-          activeTelemetryVmIds.add(vm.id);
-
-          const nextVmTelemetry = appendTelemetrySample(
-            this.vmTelemetry.get(vm.id) ?? emptyResourceTelemetry(),
-            this.provider.sampleVmTelemetry(vm),
-          );
-
-          if (!sameTelemetry(nextVmTelemetry, this.vmTelemetry.get(vm.id) ?? null)) {
-            this.vmTelemetry.set(vm.id, nextVmTelemetry);
-            telemetryChanged = true;
-          }
-
-          const template = state.templates.find(
-            (entry) => entry.id === vm.templateId,
-          );
-
-          if (!template) {
-            continue;
-          }
-
-          const tick = this.provider.tickVm(vm, template);
-
-          if (!tick) {
-            continue;
-          }
-
-          vm.frameRevision += 1;
-          vm.updatedAt = nowIso();
-
-          if (tick.activeWindow) {
-            vm.activeWindow = tick.activeWindow;
-          }
-
-          if (tick.activity) {
-            appendActivity(vm, tick.activity);
-          }
-
-          dirty = true;
-        }
-
-        return dirty;
-      });
-
-      for (const vmId of [...this.vmTelemetry.keys()]) {
-        if (!activeTelemetryVmIds.has(vmId)) {
-          this.vmTelemetry.delete(vmId);
-          telemetryChanged = true;
-        }
-      }
-
-      this.requestVmSessionRefresh();
-
-      if (changed) {
-        this.publish();
-        return;
-      }
-
-      if (providerChanged || telemetryChanged) {
-        this.publish();
-      }
+      performManagerTick(this.runtime);
     }, 2400);
   }
 
@@ -200,130 +143,42 @@ export class DesktopManager {
   }
 
   getProviderState(): ProviderState {
-    this.syncProviderState();
-    return this.store.load().provider;
+    return getProviderState(this.runtime);
   }
 
   getSummary(): DashboardSummary {
-    const state = this.store.load();
-    const metrics = collectMetrics(state.vms);
-    metrics.hostCpuCount = this.hostCpuCount;
-    metrics.hostRamMb = this.hostRamMb;
-    metrics.hostDiskGb = this.hostDiskGb;
-
-    return {
-      hostTelemetry: this.hostTelemetry,
-      provider: state.provider,
-      templates: state.templates,
-      vms: state.vms.map((vm) => ({
-        ...vm,
-        telemetry: this.vmTelemetry.get(vm.id) ?? emptyResourceTelemetry(),
-      })),
-      snapshots: state.snapshots,
-      jobs: state.jobs,
-      metrics,
-      generatedAt: nowIso(),
-    };
+    return getSummary(this.runtime);
   }
 
   getVmDetail(vmId: string): VmDetail {
-    const state = this.store.load();
-    const vm = this.requireVm(state, vmId);
-
-    return {
-      provider: state.provider,
-      vm: {
-        ...vm,
-        telemetry: this.vmTelemetry.get(vm.id) ?? emptyResourceTelemetry(),
-      },
-      template: state.templates.find((template) => template.id === vm.templateId) ?? null,
-      snapshots: state.snapshots.filter((snapshot) => snapshot.vmId === vm.id),
-      recentJobs: state.jobs.filter((job) => job.targetVmId === vm.id).slice(0, 8),
-      generatedAt: nowIso(),
-    };
+    return getVmDetail(this.runtime, vmId);
   }
 
   async getVmLogs(vmId: string): Promise<VmLogsSnapshot> {
-    const state = this.store.load();
-    const vm = this.requireVm(state, vmId);
-    this.ensureActiveProvider(vm);
-    return this.provider.readVmLogs(vm);
+    return getVmLogs(this.runtime, vmId);
   }
 
   async browseVmFiles(
     vmId: string,
     requestedPath?: string | null,
   ): Promise<VmFileBrowserSnapshot> {
-    const state = this.store.load();
-    const vm = this.requireVm(state, vmId);
-    this.ensureActiveProvider(vm);
-    return this.provider.browseVmFiles(
-      vm,
-      resolveVmGuestPath(vm.workspacePath, requestedPath),
-    );
+    return browseVmFiles(this.runtime, vmId, requestedPath);
   }
 
   async readVmFile(vmId: string, requestedPath: string): Promise<VmFileContent> {
-    const state = this.store.load();
-    const vm = this.requireVm(state, vmId);
-    this.ensureActiveProvider(vm);
-    return this.provider.readVmFile(
-      vm,
-      requireVmGuestPath(vm.workspacePath, requestedPath),
-    );
+    return readVmFile(this.runtime, vmId, requestedPath);
   }
 
   async getVmTouchedFiles(vmId: string): Promise<VmTouchedFilesSnapshot> {
-    const state = this.store.load();
-    const vm = this.requireVm(state, vmId);
-    this.ensureActiveProvider(vm);
-    return this.provider.readVmTouchedFiles(vm);
+    return getVmTouchedFiles(this.runtime, vmId);
   }
 
   async getVmDiskUsage(vmId: string): Promise<VmDiskUsageSnapshot> {
-    const state = this.store.load();
-    const vm = this.requireVm(state, vmId);
-
-    if (vm.status !== "running") {
-      return {
-        vmId: vm.id,
-        workspacePath: vm.workspacePath,
-        checkedAt: nowIso(),
-        status: "unavailable",
-        detail: "Guest disk usage is only available while the workspace is running.",
-        warningThresholdBytes: 4 * 1024 ** 3,
-        criticalThresholdBytes: 1024 ** 3,
-        root: null,
-        workspace: null,
-      };
-    }
-
-    this.ensureActiveProvider(vm);
-
-    if (!this.provider.readVmDiskUsage) {
-      return {
-        vmId: vm.id,
-        workspacePath: vm.workspacePath,
-        checkedAt: nowIso(),
-        status: "unavailable",
-        detail: "The active provider does not expose guest disk usage probes.",
-        warningThresholdBytes: 4 * 1024 ** 3,
-        criticalThresholdBytes: 1024 ** 3,
-        root: null,
-        workspace: null,
-      };
-    }
-
-    return this.provider.readVmDiskUsage(vm);
+    return getVmDiskUsage(this.runtime, vmId);
   }
 
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {
-    const state = this.store.load();
-    const vm = this.requireVm(state, vmId);
-    const template =
-      state.templates.find((entry) => entry.id === vm.templateId) ?? null;
-
-    return this.provider.renderFrame(vm, template, mode);
+    return getVmFrame(this.runtime, vmId, mode);
   }
 
   subscribe(listener: (summary: DashboardSummary) => void): () => void {
@@ -336,1028 +191,146 @@ export class DesktopManager {
   }
 
   createVm(input: CreateVmInput): VmInstance {
-    let createdVm: VmInstance | null = null;
-    let createdJob: ActionJob | null = null;
-    let launchTemplate: EnvironmentTemplate | null = null;
-    let launchSnapshot: Snapshot | null = null;
-  const requestedTemplateId = input.templateId?.trim() || null;
-  const requestedSnapshotId = input.snapshotId?.trim() || null;
-  const name = input.name.trim();
-  const wallpaperName = input.wallpaperName?.trim() || name;
-
-    if ((requestedTemplateId === null) === (requestedSnapshotId === null)) {
-      throw new Error("Exactly one launch source is required.");
-    }
-
-    if (!name) {
-      throw new Error("VM name is required.");
-    }
-
-    validateResources(input.resources);
-
-    if (requestedSnapshotId && input.initCommands !== undefined) {
-      throw new Error("Init commands are only supported when launching from a template.");
-    }
-
-    this.store.update((draft) => {
-      if (requestedSnapshotId) {
-        const snapshot = requireSnapshot(draft, requestedSnapshotId);
-        const template = resolveTemplateForSnapshot(
-          draft,
-          snapshot,
-          this.defaultTemplateLaunchSource,
-        );
-        const sourceVm = draft.vms.find((entry) => entry.id === snapshot.vmId) ?? null;
-        const forwardedPorts =
-          input.forwardedPorts ??
-          (sourceVm
-            ? sourceVm.forwardedPorts.map(copyForwardAsTemplatePort)
-            : template.defaultForwardedPorts);
-
-        validateTemplateCreateResources(template, input.resources);
-        validateSnapshotCreateResources(snapshot, input.resources);
-        validateForwardedPorts(forwardedPorts);
-
-        const vm = buildVmRecord(
-          draft,
-          template,
-          name,
-          wallpaperName,
-          input.resources,
-          forwardedPorts,
-          normalizeVmNetworkMode(input.networkMode ?? sourceVm?.networkMode ?? template.defaultNetworkMode),
-          draft.provider.kind,
-          "creating",
-          this.options.forwardedServiceHostBase ?? null,
-        );
-        vm.lastAction = `Queued from snapshot ${snapshot.label}`;
-
-        if (sourceVm) {
-          vm.activeWindow = sourceVm.activeWindow;
-        }
-
-        appendActivity(vm, `snapshot: ${snapshot.label}`);
-
-        const job = buildJob(
-          draft,
-          "launch-snapshot",
-          vm.id,
-          template.id,
-          `Queued snapshot launch from ${snapshot.label}`,
-        );
-
-        draft.vms.unshift(vm);
-        draft.jobs.unshift(job);
-        trimJobs(draft);
-
-        launchTemplate = template;
-        launchSnapshot = snapshot;
-        createdVm = vm;
-        createdJob = job;
-        return;
-      }
-
-      const template = requireTemplate(
-        draft,
-        requestedTemplateId ?? failMissingCreateTemplateId(),
-      );
-      validateTemplateCreateResources(template, input.resources);
-      validateForwardedPorts(input.forwardedPorts ?? template.defaultForwardedPorts);
-
-      const vm = buildVmRecord(
-        draft,
-        template,
-        name,
-        wallpaperName,
-        input.resources,
-        input.forwardedPorts ?? template.defaultForwardedPorts,
-        normalizeVmNetworkMode(input.networkMode ?? template.defaultNetworkMode),
-        draft.provider.kind,
-        "creating",
-        this.options.forwardedServiceHostBase ?? null,
-      );
-      launchTemplate =
-        input.initCommands !== undefined
-          ? {
-              ...template,
-              initCommands: normalizeTemplateInitCommands(input.initCommands),
-            }
-          : template;
-      const job = buildJob(draft, "create", vm.id, template.id, `Queued create for ${name}`);
-
-      draft.vms.unshift(vm);
-      draft.jobs.unshift(job);
-      trimJobs(draft);
-
-      createdVm = vm;
-      createdJob = job;
-    });
-
-    this.publish();
-
-    if (!createdVm || !createdJob) {
-      throw new Error("Failed to queue VM creation.");
-    }
-
-    const vmRecord = createdVm as VmInstance;
-    const jobRecord = createdJob as ActionJob;
-
-    void this.runJob(jobRecord.id, async (report) => {
-      try {
-        if (launchSnapshot) {
-          report("Preparing snapshot launch", 18);
-          await sleep(350);
-          const snapshot = launchSnapshot;
-          const template =
-            launchTemplate ??
-            resolveTemplateForSnapshot(
-              this.store.load(),
-              snapshot,
-              this.defaultTemplateLaunchSource,
-            );
-          const mutation = await this.provider.launchVmFromSnapshot(
-            snapshot,
-            vmRecord,
-            template,
-            report,
-          );
-
-          this.store.update((draft) => {
-            const vm = this.requireVm(draft, vmRecord.id);
-            vm.status = "running";
-            vm.liveSince = nowIso();
-            applyProviderMutation(vm, mutation);
-          });
-
-          this.publish();
-
-          return `${vmRecord.name} launched from ${snapshot.label}`;
-        }
-
-        const templateRecord = requireTemplate(this.store.load(), vmRecord.templateId);
-        const template =
-          launchTemplate
-            ? {
-                ...templateRecord,
-                ...launchTemplate,
-                snapshotIds: [...templateRecord.snapshotIds],
-              }
-            : templateRecord;
-        const mutation = await this.createVmWithTemplateRecovery(vmRecord, template, report);
-
-        this.store.update((draft) => {
-          const vm = this.requireVm(draft, vmRecord.id);
-          vm.status = "running";
-          vm.liveSince = nowIso();
-          applyProviderMutation(vm, mutation);
-        });
-
-        this.publish();
-
-        return `${vmRecord.name} is running`;
-      } catch (error) {
-        this.markVmFailed(vmRecord.id, error);
-        throw error;
-      }
-    });
-
-    return vmRecord;
+    return createVm(this.runtime, input);
   }
 
   cloneVm(input: CloneVmInput): VmInstance {
-    let createdVm: VmInstance | null = null;
-    let createdJob: ActionJob | null = null;
-    const requestedResources = input.resources ?? null;
-    const shutdownSourceBeforeClone = input.shutdownSourceBeforeClone === true;
-
-    this.store.update((draft) => {
-      const source = this.requireVm(draft, input.sourceVmId);
-      this.ensureActiveProvider(source);
-      const template = requireTemplate(draft, source.templateId);
-      const cloneResources = requestedResources ?? source.resources;
-      validateResources(cloneResources);
-      validateVmCloneResources(source, cloneResources);
-      const cloneName =
-        input.name?.trim() ||
-        `${source.name}-clone-${String(draft.sequence).padStart(2, "0")}`;
-      const wallpaperName = input.wallpaperName?.trim() || cloneName;
-
-      const vm = buildVmRecord(
-        draft,
-        template,
-        cloneName,
-        wallpaperName,
-        cloneResources,
-        source.forwardedPorts.map(copyForwardAsTemplatePort),
-        normalizeVmNetworkMode(input.networkMode ?? source.networkMode ?? template.defaultNetworkMode),
-        draft.provider.kind,
-        "creating",
-        this.options.forwardedServiceHostBase ?? null,
-      );
-      vm.activeWindow = source.activeWindow;
-      vm.activityLog = [...source.activityLog];
-      vm.session = cloneVmSession(source.session);
-
-      const job = buildJob(draft, "clone", vm.id, template.id, `Queued clone from ${source.name}`);
-
-      draft.vms.unshift(vm);
-      draft.jobs.unshift(job);
-      trimJobs(draft);
-
-      createdVm = vm;
-      createdJob = job;
-    });
-
-    this.publish();
-
-    if (!createdVm || !createdJob) {
-      throw new Error("Failed to queue VM clone.");
-    }
-
-    const vmRecord = createdVm as VmInstance;
-    const jobRecord = createdJob as ActionJob;
-
-    void this.runJob(jobRecord.id, async (report) => {
-      try {
-        report("Preparing clone", 18);
-        await sleep(500);
-        const target = this.getVmDetail(vmRecord.id).vm;
-        const source = this.getVmDetail(input.sourceVmId).vm;
-        const template = this.getVmDetail(vmRecord.id).template;
-
-        this.ensureActiveProvider(source);
-
-        if (!template) {
-          throw new Error("Template for clone target was not found.");
-        }
-
-        if (shutdownSourceBeforeClone && source.status === "running") {
-          report("Stopping source VM", 32);
-          const stopMutation = await this.provider.stopVm(source);
-          this.markVmStopped(source.id, stopMutation);
-        }
-
-        const mutation = await this.provider.cloneVm(source, target, template, report);
-
-        this.store.update((draft) => {
-          const vm = this.requireVm(draft, vmRecord.id);
-          vm.status = "running";
-          vm.liveSince = nowIso();
-          applyProviderMutation(vm, mutation);
-        });
-
-        this.publish();
-
-        return `${vmRecord.name} cloned successfully`;
-      } catch (error) {
-        this.markVmFailed(vmRecord.id, error);
-        throw error;
-      }
-    });
-
-    return vmRecord;
+    return cloneVm(this.runtime, input);
   }
 
   startVm(vmId: string): void {
-    this.queueVmAction(vmId, "start", async (vm, report) => {
-      if (vm.status === "running") {
-        return `${vm.name} is already running`;
-      }
-
-      report("Preparing boot", 24);
-      await sleep(350);
-      report("Starting VM", 58);
-      const mutation = await this.provider.startVm(vm);
-      report("Waiting for desktop", 88);
-      this.markVmRunning(vmId, mutation);
-
-      return `${vm.name} started`;
-    });
+    startVm(this.runtime, vmId);
   }
 
   stopVm(vmId: string): void {
-    this.queueVmAction(vmId, "stop", async (vm, report) => {
-      if (vm.status === "stopped") {
-        return `${vm.name} is already stopped`;
-      }
-
-      report("Stopping workspace", 58);
-      const mutation = await this.provider.stopVm(vm);
-      this.markVmStopped(vmId, mutation);
-
-      return `${vm.name} stopped`;
-    });
+    stopVm(this.runtime, vmId);
   }
 
   restartVm(vmId: string): void {
-    this.queueVmAction(vmId, "restart", async (vm, report) => {
-      const wasRunning = vm.status !== "stopped";
-
-      if (wasRunning) {
-        report("Stopping workspace", 24);
-        const stopMutation = await this.provider.stopVm(vm);
-        this.markVmStopped(vmId, stopMutation);
-      }
-
-      const currentVm = this.getVmDetail(vmId).vm;
-      report("Preparing boot", wasRunning ? 42 : 24);
-      await sleep(350);
-      report("Starting VM", wasRunning ? 66 : 58);
-      const startMutation = await this.provider.startVm(currentVm);
-      report("Waiting for desktop", 92);
-      this.markVmRunning(vmId, startMutation);
-
-      return wasRunning
-        ? `${vm.name} restarted`
-        : `${vm.name} started`;
-    });
+    restartVm(this.runtime, vmId);
   }
 
   reorderVms(input: ReorderVmsInput): DashboardSummary {
-    const requestedVmIds = input.vmIds.filter(
-      (vmId, index, vmIds) => vmId.trim().length > 0 && vmIds.indexOf(vmId) === index,
-    );
-
-    this.store.update((draft) => {
-      const byId = new Map(draft.vms.map((vm) => [vm.id, vm]));
-      const nextVms = requestedVmIds
-        .map((vmId) => byId.get(vmId) ?? null)
-        .filter((vm): vm is VmInstance => vm !== null);
-      const pinnedIds = new Set(nextVms.map((vm) => vm.id));
-
-      draft.vms = [
-        ...nextVms,
-        ...draft.vms.filter((vm) => !pinnedIds.has(vm.id)),
-      ];
-
-      return true;
-    });
-
-    this.publish();
-    return this.getSummary();
+    return reorderVms(this.runtime, input);
   }
 
   deleteVm(vmId: string): void {
-    let deletedName = "";
-
-    this.queueVmAction(vmId, "delete", async (vm) => {
-      deletedName = vm.name;
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmId);
-        current.status = "deleting";
-        current.lastAction = "Delete requested";
-        current.updatedAt = nowIso();
-      });
-      this.publish();
-
-      await sleep(450);
-      await this.provider.deleteVm(vm);
-
-      this.store.update((draft) => {
-        draft.vms = draft.vms.filter((entry) => entry.id !== vmId);
-      });
-      this.publish();
-
-      return `${deletedName} deleted`;
-    });
+    deleteVm(this.runtime, vmId);
   }
 
   resizeVm(vmId: string, input: ResizeVmInput): void {
-    validateResources(input.resources);
-
-    this.queueVmAction(vmId, "resize", async (vm) => {
-      await sleep(300);
-      const mutation = await this.provider.resizeVm(vm, input.resources);
-
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmId);
-        current.resources = input.resources;
-        applyProviderMutation(current, mutation);
-      });
-      this.publish();
-
-      return `${vm.name} resized`;
-    });
+    resizeVm(this.runtime, vmId, input);
   }
 
   snapshotVm(vmId: string, input: SnapshotInput): void {
-    this.queueVmAction(vmId, "snapshot", async (vm) => {
-      const label = input.label?.trim() || `Snapshot ${new Date().toLocaleTimeString("en-US")}`;
-      await sleep(400);
-      const snapshotData = await this.provider.snapshotVm(vm, label);
-
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmId);
-        const snapshot = buildSnapshot(
-          draft,
-          current,
-          label,
-          snapshotData.providerRef,
-          snapshotData.summary,
-        );
-        const template = requireTemplate(draft, current.templateId);
-
-        current.snapshotIds.unshift(snapshot.id);
-        current.lastAction = `Snapshot captured: ${label}`;
-        current.updatedAt = nowIso();
-        current.frameRevision += 1;
-        template.snapshotIds.unshift(snapshot.id);
-        template.updatedAt = nowIso();
-        draft.snapshots.unshift(snapshot);
-        appendActivity(current, `snapshot: ${label}`);
-      });
-      this.publish();
-
-      return `${vm.name} snapshotted`;
-    });
+    snapshotVm(this.runtime, vmId, input);
   }
 
   launchVmFromSnapshot(vmId: string, snapshotId: string, input: CloneVmInput): VmInstance {
-    let createdVm: VmInstance | null = null;
-    let createdJob: ActionJob | null = null;
-
-    this.store.update((draft) => {
-      const source = this.requireVm(draft, vmId);
-      this.ensureActiveProvider(source);
-      const snapshot = requireVmSnapshot(draft, vmId, snapshotId);
-      const template = resolveTemplateForSnapshot(
-        draft,
-        snapshot,
-        this.defaultTemplateLaunchSource,
-      );
-      const name =
-        input.name?.trim() ||
-        `${source.name}-${slugify(snapshot.label) || "snapshot"}-${String(draft.sequence).padStart(2, "0")}`;
-      const wallpaperName = input.wallpaperName?.trim() || name;
-
-      const vm = buildVmRecord(
-        draft,
-        template,
-        name,
-        wallpaperName,
-        snapshot.resources,
-        source.forwardedPorts.map(copyForwardAsTemplatePort),
-        normalizeVmNetworkMode(source.networkMode ?? template.defaultNetworkMode),
-        draft.provider.kind,
-        "creating",
-        this.options.forwardedServiceHostBase ?? null,
-      );
-      vm.activeWindow = source.activeWindow;
-      appendActivity(vm, `snapshot: ${snapshot.label}`);
-
-      const job = buildJob(
-        draft,
-        "launch-snapshot",
-        vm.id,
-        template.id,
-        `Queued snapshot launch from ${snapshot.label}`,
-      );
-
-      draft.vms.unshift(vm);
-      draft.jobs.unshift(job);
-      trimJobs(draft);
-
-      createdVm = vm;
-      createdJob = job;
-    });
-
-    this.publish();
-
-    if (!createdVm || !createdJob) {
-      throw new Error("Failed to queue snapshot launch.");
-    }
-
-    const vmRecord = createdVm as VmInstance;
-    const jobRecord = createdJob as ActionJob;
-
-    void this.runJob(jobRecord.id, async (report) => {
-      try {
-        report("Preparing snapshot launch", 18);
-        await sleep(350);
-        const detail = this.getVmDetail(vmId);
-        const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
-        const template = resolveTemplateForSnapshot(
-          this.store.load(),
-          snapshot,
-          this.defaultTemplateLaunchSource,
-        );
-
-        this.ensureActiveProvider(detail.vm);
-
-        const mutation = await this.provider.launchVmFromSnapshot(
-          snapshot,
-          vmRecord,
-          template,
-          report,
-        );
-
-        this.store.update((draft) => {
-          const current = this.requireVm(draft, vmRecord.id);
-          current.status = "running";
-          current.liveSince = nowIso();
-          applyProviderMutation(current, mutation);
-        });
-
-        this.publish();
-
-        return `${vmRecord.name} launched from ${snapshot.label}`;
-      } catch (error) {
-        this.markVmFailed(vmRecord.id, error);
-        throw error;
-      }
-    });
-
-    return vmRecord;
+    return launchVmFromSnapshot(this.runtime, vmId, snapshotId, input);
   }
 
   restoreVmSnapshot(vmId: string, snapshotId: string): void {
-    this.queueVmAction(vmId, "restore-snapshot", async (vm, report) => {
-      const snapshot = requireVmSnapshot(this.store.load(), vmId, snapshotId);
-
-      report("Preparing snapshot restore", 22);
-      await sleep(250);
-      report("Restoring VM state", 56);
-      const mutation = await this.provider.restoreVmToSnapshot(vm, snapshot);
-
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmId);
-        current.status = vm.status === "running" ? "running" : "stopped";
-        current.liveSince = current.status === "running" ? nowIso() : null;
-        applyProviderMutation(current, mutation);
-      });
-
-      this.publish();
-
-      return `${vm.name} restored to ${snapshot.label}`;
-    });
+    restoreVmSnapshot(this.runtime, vmId, snapshotId);
   }
 
   captureTemplate(vmId: string, input: CaptureTemplateInput): void {
-    const captureName = input.name.trim();
-    const captureDescription = input.description.trim();
-    const requestedTemplateId = input.templateId?.trim() || null;
-
-    if (!captureName) {
-      throw new Error("Template name is required.");
-    }
-
-    let jobId = "";
-    let targetTemplateId = requestedTemplateId;
-
-    this.store.update((draft) => {
-      const vm = this.requireVm(draft, vmId);
-      this.ensureActiveProvider(vm);
-
-      if (targetTemplateId) {
-        requireTemplate(draft, targetTemplateId);
-      } else {
-        targetTemplateId = nextId(draft, "tpl");
-      }
-
-      const job = buildJob(
-        draft,
-        "capture-template",
-        vm.id,
-        targetTemplateId,
-        `Queued capture-template for ${vm.name}`,
-      );
-
-      draft.jobs.unshift(job);
-      trimJobs(draft);
-      jobId = job.id;
-    });
-
-    this.publish();
-
-    if (!targetTemplateId) {
-      throw new Error("Failed to reserve a template target.");
-    }
-
-    const reservedTemplateId = targetTemplateId;
-
-    void this.runJob(jobId, async (report) => {
-      report("Preparing template capture", 18);
-      await sleep(180);
-      const detail = this.getVmDetail(vmId);
-      this.ensureActiveProvider(detail.vm);
-
-      const providerSnapshot = await this.provider.captureTemplate(detail.vm, {
-        templateId: reservedTemplateId,
-        name: captureName,
-      }, report);
-      report("Updating template metadata", 96);
-      const launchSource =
-        providerSnapshot.launchSource ??
-        detail.template?.launchSource ??
-        this.defaultTemplateLaunchSource;
-      let updatedExistingTemplate = false;
-
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmId);
-        const existingTemplate = requestedTemplateId
-          ? requireTemplate(draft, requestedTemplateId)
-          : null;
-        const snapshot = buildSnapshot(
-          draft,
-          current,
-          `Template capture: ${captureName}`,
-          providerSnapshot.providerRef,
-          providerSnapshot.summary,
-          reservedTemplateId,
-        );
-        const captureNotes = buildCaptureNotes(
-          current,
-          existingTemplate?.notes ?? [],
-        );
-        const provenance = buildCapturedTemplateProvenance(
-          current,
-          detail.template,
-          snapshot,
-        );
-        const captureHistoryEntry = buildTemplateHistoryEntry(
-          "captured",
-          existingTemplate
-            ? `Refreshed from VM ${current.name} via snapshot ${snapshot.label}.`
-            : `Captured from VM ${current.name} via snapshot ${snapshot.label}.`,
-          snapshot.createdAt,
-        );
-
-        current.snapshotIds.unshift(snapshot.id);
-        current.lastAction = `Captured template ${captureName}`;
-        current.updatedAt = nowIso();
-        current.frameRevision += 1;
-        draft.snapshots.unshift(snapshot);
-
-        if (existingTemplate) {
-          updatedExistingTemplate = true;
-          existingTemplate.name = captureName;
-          existingTemplate.description =
-            captureDescription || existingTemplate.description || `Captured from ${current.name}`;
-          existingTemplate.launchSource = launchSource;
-          existingTemplate.defaultResources = { ...current.resources };
-          existingTemplate.defaultForwardedPorts = current.forwardedPorts.map(
-            copyForwardAsTemplatePort,
-          );
-          existingTemplate.defaultNetworkMode = normalizeVmNetworkMode(current.networkMode);
-          existingTemplate.snapshotIds.unshift(snapshot.id);
-          existingTemplate.tags = Array.from(
-            new Set(["captured", slugify(current.name), ...existingTemplate.tags]),
-          );
-          existingTemplate.notes = captureNotes;
-          existingTemplate.provenance = provenance;
-          existingTemplate.history = appendTemplateHistory(
-            existingTemplate.history,
-            captureHistoryEntry,
-          );
-          existingTemplate.updatedAt = nowIso();
-        } else {
-          const template: EnvironmentTemplate = {
-            id: reservedTemplateId,
-            name: captureName,
-            description: captureDescription || `Captured from ${current.name}`,
-            launchSource,
-            defaultResources: { ...current.resources },
-            defaultForwardedPorts: current.forwardedPorts.map(copyForwardAsTemplatePort),
-            defaultNetworkMode: normalizeVmNetworkMode(current.networkMode),
-            initCommands: [...(detail.template?.initCommands ?? [])],
-            tags: ["captured", slugify(current.name)],
-            notes: captureNotes,
-            snapshotIds: [snapshot.id],
-            provenance,
-            history: [captureHistoryEntry],
-            createdAt: nowIso(),
-            updatedAt: nowIso(),
-          };
-
-          draft.templates.unshift(template);
-        }
-
-        appendActivity(
-          current,
-          updatedExistingTemplate
-            ? `template: ${captureName} updated`
-            : `template: ${captureName} captured`,
-        );
-      });
-      this.publish();
-
-      return updatedExistingTemplate
-        ? `${captureName} template updated`
-        : `${captureName} template created`;
-    });
+    captureTemplate(this.runtime, vmId, input);
   }
 
   createTemplate(input: CreateTemplateInput): EnvironmentTemplate {
-    const nextName = input.name.trim();
-
-    if (!nextName) {
-      throw new Error("Template name is required.");
-    }
-
-    const nextDescription = input.description.trim();
-    const nextInitCommands = normalizeTemplateInitCommands(input.initCommands);
-    let createdTemplate: EnvironmentTemplate | null = null;
-
-    this.store.update((draft) => {
-      const sourceTemplate = requireTemplate(draft, input.sourceTemplateId);
-      const now = nowIso();
-
-      createdTemplate = {
-        id: nextId(draft, "tpl"),
-        name: nextName,
-        description: nextDescription || sourceTemplate.description,
-        launchSource: sourceTemplate.launchSource,
-        defaultResources: { ...sourceTemplate.defaultResources },
-        defaultForwardedPorts: sourceTemplate.defaultForwardedPorts.map(
-          copyTemplatePortForward,
-        ),
-        defaultNetworkMode: normalizeVmNetworkMode(sourceTemplate.defaultNetworkMode),
-        initCommands: nextInitCommands,
-        tags: Array.from(
-          new Set([
-            ...sourceTemplate.tags,
-            "cloned",
-            ...(nextInitCommands.length > 0 ? ["init-script"] : []),
-          ]),
-        ),
-        notes: buildClonedTemplateNotes(
-          sourceTemplate,
-          sourceTemplate.notes,
-          nextInitCommands,
-        ),
-        snapshotIds: [],
-        provenance: buildClonedTemplateProvenance(sourceTemplate),
-        history: [
-          buildTemplateHistoryEntry(
-            "cloned",
-            `Cloned from template ${sourceTemplate.name}${nextInitCommands.length > 0 ? ` with ${nextInitCommands.length} first-boot init command${nextInitCommands.length === 1 ? "" : "s"}` : ""}.`,
-            now,
-          ),
-        ],
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      draft.templates.unshift(createdTemplate);
-      return true;
-    });
-
-    this.publish();
-
-    if (!createdTemplate) {
-      throw new Error("Failed to create template.");
-    }
-
-    return createdTemplate;
+    return createTemplate(this.runtime, input);
   }
 
   updateTemplate(templateId: string, input: UpdateTemplateInput): EnvironmentTemplate {
-    const nextName = input.name.trim();
-
-    if (!nextName) {
-      throw new Error("Template name is required.");
-    }
-
-    let updatedTemplate: EnvironmentTemplate | null = null;
-
-    this.store.update((draft) => {
-      const template = requireTemplate(draft, templateId);
-      const nextDescription =
-        input.description !== undefined ? input.description.trim() : template.description;
-      const nextInitCommands =
-        input.initCommands !== undefined
-          ? normalizeTemplateInitCommands(input.initCommands)
-          : template.initCommands;
-      const changedFields = collectTemplateUpdateFieldLabels(
-        template,
-        nextName,
-        nextDescription,
-        nextInitCommands,
-      );
-
-      if (
-        template.name === nextName &&
-        template.description === nextDescription &&
-        sameStringArray(template.initCommands, nextInitCommands)
-      ) {
-        updatedTemplate = template;
-        return false;
-      }
-
-      template.name = nextName;
-      template.description = nextDescription;
-      template.initCommands = nextInitCommands;
-      template.history = appendTemplateHistory(
-        template.history,
-        buildTemplateHistoryEntry(
-          "updated",
-          `Updated ${changedFields.join(", ")}.`,
-        ),
-      );
-      template.updatedAt = nowIso();
-      updatedTemplate = template;
-      return true;
-    });
-
-    this.publish();
-
-    if (!updatedTemplate) {
-      throw new Error(`Template ${templateId} was not found.`);
-    }
-
-    return updatedTemplate;
+    return updateTemplate(this.runtime, templateId, input);
   }
 
   updateVm(vmId: string, input: UpdateVmInput): VmInstance {
-    const nextName = input.name.trim();
-
-    if (!nextName) {
-      throw new Error("VM name is required.");
-    }
-
-    let updatedVm: VmInstance | null = null;
-
-    this.store.update((draft) => {
-      const vm = requireVm(draft, vmId);
-
-      if (vm.name === nextName) {
-        updatedVm = vm;
-        return false;
-      }
-
-      const previousName = vm.name;
-      vm.name = nextName;
-      vm.lastAction = `Renamed workspace to ${nextName}`;
-      vm.updatedAt = nowIso();
-      appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
-      updatedVm = vm;
-      return true;
-    });
-
-    this.publish();
-
-    if (!updatedVm) {
-      throw new Error(`VM ${vmId} was not found.`);
-    }
-
-    return updatedVm;
+    return updateVm(this.runtime, vmId, input);
   }
 
   deleteTemplate(templateId: string): void {
-    let removed = false;
-
-    this.store.update((draft) => {
-      const template = requireTemplate(draft, templateId);
-      const linkedVm = draft.vms.find((entry) => entry.templateId === templateId);
-
-      if (linkedVm) {
-        throw new Error(
-          `Template ${template.name} is still attached to VM ${linkedVm.name}.`,
-        );
-      }
-
-      const nextTemplates = draft.templates.filter((entry) => entry.id !== templateId);
-
-      if (nextTemplates.length === draft.templates.length) {
-        return false;
-      }
-
-      draft.templates = nextTemplates;
-      removed = true;
-      return true;
-    });
-
-    if (!removed) {
-      throw new Error(`Template ${templateId} was not found.`);
-    }
-
-    this.publish();
+    deleteTemplate(this.runtime, templateId);
   }
 
   injectCommand(vmId: string, command: string): void {
-    const trimmed = command.trim();
-    if (!trimmed) {
-      throw new Error("Command is required.");
-    }
-
-    this.queueVmAction(vmId, "inject-command", async (vm) => {
-      if (vm.status !== "running") {
-        throw new Error("VM must be running before commands can be injected.");
-      }
-
-      await sleep(150);
-      const mutation = await this.provider.injectCommand(vm, trimmed);
-
-      this.store.update((draft) => {
-        const current = this.requireVm(draft, vmId);
-        applyProviderMutation(current, mutation);
-      });
-      this.publish();
-
-      return `${vm.name} command completed`;
-    });
+    injectCommand(this.runtime, vmId, command);
   }
 
   async setVmResolution(vmId: string, input: SetVmResolutionInput): Promise<void> {
-    const width = Math.round(input.width);
-    const height = Math.round(input.height);
-
-    if (!Number.isFinite(width) || !Number.isFinite(height)) {
-      throw new Error("Display resolution width and height are required.");
-    }
-
-    const vm = this.getVmDetail(vmId).vm;
-    this.ensureActiveProvider(vm);
-
-    if (vm.status !== "running") {
-      throw new Error("VM must be running before the display resolution can be changed.");
-    }
-
-    if (vm.session?.kind !== "vnc") {
-      throw new Error("Display resolution changes require a live VNC-backed desktop.");
-    }
-
-    await this.provider.setDisplayResolution(vm, width, height);
+    await setVmResolution(this.runtime, vmId, input);
   }
 
   async setVmNetworkMode(vmId: string, input: UpdateVmNetworkInput): Promise<void> {
-    const vm = this.getVmDetail(vmId).vm;
-    this.ensureActiveProvider(vm);
-    const nextNetworkMode = normalizeVmNetworkMode(input.networkMode);
-    const currentNetworkMode = normalizeVmNetworkMode(vm.networkMode);
-
-    if (currentNetworkMode === nextNetworkMode) {
-      return;
-    }
-
-    const mutation = await this.provider.setNetworkMode(vm, nextNetworkMode);
-
-    this.store.update((draft) => {
-      const current = this.requireVm(draft, vmId);
-      current.networkMode = nextNetworkMode;
-      applyProviderMutation(current, mutation);
-    });
-
-    this.publish();
+    await setVmNetworkMode(this.runtime, vmId, input);
   }
 
   updateVmForwardedPorts(vmId: string, input: UpdateVmForwardedPortsInput): void {
-    validateForwardedPorts(input.forwardedPorts);
-
-    this.store.update((draft) => {
-      const vm = this.requireVm(draft, vmId);
-      vm.forwardedPorts = buildVmForwardedPorts(
-        vm.id,
-        input.forwardedPorts,
-        this.options.forwardedServiceHostBase ?? null,
-      );
-      vm.updatedAt = nowIso();
-      vm.frameRevision += 1;
-      vm.lastAction =
-        vm.forwardedPorts.length > 0
-          ? `Updated ${vm.forwardedPorts.length} forwarded service port${vm.forwardedPorts.length === 1 ? "" : "s"}`
-          : "Cleared forwarded service ports";
-      appendActivity(
-        vm,
-        vm.forwardedPorts.length > 0
-          ? `forwarding: ${vm.forwardedPorts.map((entry) => `${entry.name}:${entry.guestPort}`).join(", ")}`
-          : "forwarding: cleared",
-      );
-    });
-
-    this.publish();
+    updateVmForwardedPorts(this.runtime, vmId, input);
   }
 
-  private queueVmAction(
-    vmId: string,
-    kind: JobKind,
-    runner: (vm: VmInstance, report: JobProgressReporter) => Promise<string>,
-  ): void {
-    let jobId = "";
+  private createRuntime(): DesktopManagerRuntime {
+    const self = this;
 
-    this.store.update((draft) => {
-      const vm = this.requireVm(draft, vmId);
-      this.ensureActiveProvider(vm);
-      const job = buildJob(draft, kind, vm.id, vm.templateId, `Queued ${kind} for ${vm.name}`);
-      draft.jobs.unshift(job);
-      trimJobs(draft);
-      jobId = job.id;
-    });
-
-    this.publish();
-
-    void this.runJob(jobId, async (report) => {
-      const vm = this.getVmDetail(vmId).vm;
-      this.ensureActiveProvider(vm);
-      return runner(vm, report);
-    });
+    return {
+      store: self.store,
+      provider: self.provider,
+      options: self.options,
+      vmTelemetry: self.vmTelemetry,
+      get defaultTemplateLaunchSource() {
+        return self.defaultTemplateLaunchSource;
+      },
+      get hostCpuCount() {
+        return self.hostCpuCount;
+      },
+      get hostDiskGb() {
+        return self.hostDiskGb;
+      },
+      get hostRamMb() {
+        return self.hostRamMb;
+      },
+      get hostTelemetry() {
+        return self.hostTelemetry;
+      },
+      set hostTelemetry(value) {
+        self.hostTelemetry = value;
+      },
+      get sessionRefreshInFlight() {
+        return self.sessionRefreshInFlight;
+      },
+      set sessionRefreshInFlight(value) {
+        self.sessionRefreshInFlight = value;
+      },
+      get sessionRefreshMode() {
+        return self.sessionRefreshMode;
+      },
+      set sessionRefreshMode(value) {
+        self.sessionRefreshMode = value;
+      },
+      createVmWithTemplateRecovery: (vm, template, report) =>
+        self.createVmWithTemplateRecovery(vm, template, report),
+      ensureActiveProvider: (vm) => self.ensureActiveProvider(vm),
+      getSummary: () => getSummary(self.runtime),
+      getVmDetail: (vmId) => getVmDetail(self.runtime, vmId),
+      markVmFailed: (vmId, error) => self.markVmFailed(vmId, error),
+      markVmRunning: (vmId, mutation) => self.markVmRunning(vmId, mutation),
+      markVmStopped: (vmId, mutation) => self.markVmStopped(vmId, mutation),
+      publish: () => self.publish(),
+      requestVmSessionRefresh: (mode) => requestVmSessionRefresh(self.runtime, mode),
+      requireVm: (state, vmId) => requireVm(state, vmId),
+      runJob: (jobId, runner) => self.runJob(jobId, runner),
+      syncProviderState: () => syncProviderState(self.runtime),
+      updateJob: (jobId, status, message, progressPercent) =>
+        self.updateJob(jobId, status, message, progressPercent),
+    };
   }
 
   private async runJob(
     jobId: string,
     runner: (report: JobProgressReporter) => Promise<string>,
   ): Promise<void> {
-    this.updateJob(jobId, "running", "Action in progress", RUNNING_PROGRESS_PERCENT);
+    this.updateJob(jobId, "running", "Action in progress", 14);
 
     try {
       const report: JobProgressReporter = (message, progressPercent) => {
@@ -1395,13 +368,9 @@ export class DesktopManager {
     this.publish();
   }
 
-  private requireVm(state: AppState, vmId: string): VmInstance {
-    return requireVm(state, vmId);
-  }
-
   private markVmRunning(vmId: string, mutation: ProviderMutation): void {
     this.store.update((draft) => {
-      const current = this.requireVm(draft, vmId);
+      const current = requireVm(draft, vmId);
       current.status = "running";
       current.liveSince = nowIso();
       applyProviderMutation(current, mutation);
@@ -1412,7 +381,7 @@ export class DesktopManager {
 
   private markVmStopped(vmId: string, mutation: ProviderMutation): void {
     this.store.update((draft) => {
-      const current = this.requireVm(draft, vmId);
+      const current = requireVm(draft, vmId);
       current.status = "stopped";
       current.liveSince = null;
       applyProviderMutation(current, mutation);
@@ -1455,212 +424,6 @@ export class DesktopManager {
     this.publish();
   }
 
-  private reconcileFailedProvisioningJobs(): void {
-    this.store.update((draft) => {
-      let dirty = false;
-
-      for (const vm of draft.vms) {
-        if (vm.status !== "creating") {
-          continue;
-        }
-
-        const failedJob = draft.jobs.find(
-          (job) =>
-            job.targetVmId === vm.id &&
-            job.status === "failed" &&
-            (job.kind === "create" ||
-              job.kind === "clone" ||
-              job.kind === "launch-snapshot"),
-        );
-
-        if (!failedJob) {
-          continue;
-        }
-
-        vm.status = "error";
-        vm.liveSince = null;
-        vm.lastAction = failedJob.message;
-        vm.updatedAt = nowIso();
-
-        const errorLine = `error: ${failedJob.message}`;
-        if (!vm.activityLog.includes(errorLine)) {
-          appendActivity(vm, errorLine);
-        }
-
-        dirty = true;
-      }
-
-      return dirty;
-    });
-  }
-
-  private reconcileDefaultTemplateLaunchSource(): void {
-    if (this.options.defaultTemplateLaunchSource == null) {
-      return;
-    }
-
-    this.store.update((draft) => {
-      const template = draft.templates.find((entry) => entry.id === DEFAULT_TEMPLATE_ID);
-
-      if (!template) {
-        return false;
-      }
-
-      let dirty = false;
-      const seededSummary = buildSeedTemplateSummary(this.defaultTemplateLaunchSource);
-      const provenance = template.provenance ?? {
-        kind: "seed",
-        summary: "",
-        sourceTemplateId: null,
-        sourceTemplateName: null,
-        sourceVmId: null,
-        sourceVmName: null,
-        sourceSnapshotId: null,
-        sourceSnapshotLabel: null,
-      };
-
-      if (!template.provenance) {
-        template.provenance = provenance;
-        dirty = true;
-      }
-
-      if (provenance.kind !== "seed") {
-        return false;
-      }
-
-      const history = template.history ?? [];
-
-      if (!template.history) {
-        template.history = history;
-        dirty = true;
-      }
-
-      if (template.launchSource !== this.defaultTemplateLaunchSource) {
-        template.launchSource = this.defaultTemplateLaunchSource;
-        dirty = true;
-      }
-
-      if (isAutoSeedTemplateSummary(provenance.summary)) {
-        if (provenance.summary !== seededSummary) {
-          provenance.summary = seededSummary;
-          dirty = true;
-        }
-      }
-
-      const createdHistoryEntry = history.find((entry) => entry.kind === "created");
-
-      if (!createdHistoryEntry) {
-        history.unshift(buildTemplateHistoryEntry("created", seededSummary, template.createdAt));
-        dirty = true;
-      }
-
-      if (createdHistoryEntry && isAutoSeedTemplateSummary(createdHistoryEntry.summary)) {
-        if (createdHistoryEntry.summary !== seededSummary) {
-          createdHistoryEntry.summary = seededSummary;
-          dirty = true;
-        }
-      }
-
-      if (!dirty) {
-        return false;
-      }
-
-      template.updatedAt = nowIso();
-      return true;
-    });
-  }
-
-  private reconcileInterruptedJobs(): void {
-    this.store.update((draft) => {
-      let dirty = false;
-
-      for (const job of draft.jobs) {
-        if (job.status !== "queued" && job.status !== "running") {
-          continue;
-        }
-
-        const message = `Control server restarted before ${job.kind} could finish.`;
-        job.status = "failed";
-        job.message = message;
-        job.progressPercent = null;
-        job.updatedAt = nowIso();
-        dirty = true;
-
-        const vm =
-          job.targetVmId
-            ? draft.vms.find((entry) => entry.id === job.targetVmId) ?? null
-            : null;
-
-        if (!vm) {
-          continue;
-        }
-
-        if (vm.status === "creating" || vm.status === "deleting") {
-          vm.status = "error";
-        }
-
-        vm.liveSince = vm.status === "running" ? vm.liveSince : null;
-        vm.lastAction = message;
-        vm.updatedAt = nowIso();
-
-        const errorLine = `error: ${message}`;
-        if (!vm.activityLog.includes(errorLine)) {
-          appendActivity(vm, errorLine);
-        }
-      }
-
-      return dirty;
-    });
-  }
-
-  private recoverInterruptedBootVms(): void {
-    this.store.update((draft) => {
-      let dirty = false;
-
-      if (!draft.provider.available) {
-        return false;
-      }
-
-      for (const vm of draft.vms) {
-        if (vm.provider !== draft.provider.kind) {
-          continue;
-        }
-
-        const interruptedBootJob = draft.jobs.find(
-          (job) =>
-            job.targetVmId === vm.id &&
-            job.status === "failed" &&
-            isInterruptedBootJobFailure(job),
-        );
-
-        if (!interruptedBootJob) {
-          continue;
-        }
-
-        const observedPowerState = this.provider.observeVmPowerState(vm);
-
-        if (observedPowerState?.status !== "running") {
-          continue;
-        }
-
-        vm.status = "running";
-        vm.liveSince = vm.liveSince ?? nowIso();
-        vm.lastAction = "Workspace recovered after control server restart.";
-        vm.updatedAt = nowIso();
-        vm.session = null;
-
-        const recoveredLine = `${vm.provider}: recovered ${vm.providerRef} after interrupted ${interruptedBootJob.kind}`;
-        if (!vm.activityLog.includes(recoveredLine)) {
-          appendActivity(vm, recoveredLine);
-        }
-
-        dirty = true;
-      }
-
-      return dirty;
-    });
-  }
-
   private ensureActiveProvider(vm: VmInstance): void {
     if (vm.provider === this.provider.state.kind) {
       return;
@@ -1671,156 +434,8 @@ export class DesktopManager {
     );
   }
 
-  private syncProviderState(): boolean {
-    const nextProviderState = this.provider.refreshState();
-    const { changed } = this.store.update((draft) => {
-      let dirty = !sameProviderState(draft.provider, nextProviderState);
-
-      if (dirty) {
-        draft.provider = nextProviderState;
-      }
-
-      if (!nextProviderState.available) {
-        return dirty;
-      }
-
-      for (const vm of draft.vms) {
-        if (vm.provider !== nextProviderState.kind) {
-          continue;
-        }
-
-        const observedPowerState = this.provider.observeVmPowerState(vm);
-
-        if (vm.status === "running") {
-          if (observedPowerState?.status !== "stopped") {
-            continue;
-          }
-
-          markVmStoppedOutsideControlPlane(vm);
-          this.vmTelemetry.delete(vm.id);
-          dirty = true;
-          continue;
-        }
-
-        if (vm.status === "stopped" && observedPowerState?.status === "running") {
-          markVmRunningOutsideControlPlane(vm);
-          dirty = true;
-        }
-      }
-
-      return dirty;
-    });
-
-    if (nextProviderState.available) {
-      this.requestVmSessionRefresh();
-    }
-
-    return changed;
-  }
-
-  private requestVmSessionRefresh(mode: Exclude<VmSessionRefreshMode, "none"> = "missing"): void {
-    this.sessionRefreshMode = mergeVmSessionRefreshMode(this.sessionRefreshMode, mode);
-
-    if (this.sessionRefreshInFlight) {
-      return;
-    }
-
-    this.sessionRefreshInFlight = true;
-    void this.runVmSessionRefreshLoop();
-  }
-
-  private async runVmSessionRefreshLoop(): Promise<void> {
-    try {
-      while (this.sessionRefreshMode !== "none") {
-        const mode = this.sessionRefreshMode;
-        this.sessionRefreshMode = "none";
-        await this.refreshRunningVmSessions(mode);
-      }
-    } finally {
-      this.sessionRefreshInFlight = false;
-
-      if (this.sessionRefreshMode !== "none") {
-        this.requestVmSessionRefresh(this.sessionRefreshMode);
-      }
-    }
-  }
-
-  private async refreshRunningVmSessions(mode: Exclude<VmSessionRefreshMode, "none">): Promise<void> {
-    const state = this.store.load();
-
-    if (!state.provider.available) {
-      return;
-    }
-
-    const candidateVmIds = state.vms
-      .filter((vm) => this.shouldRefreshVmSession(vm, state.provider.kind, mode))
-      .map((vm) => vm.id);
-
-    if (candidateVmIds.length === 0) {
-      return;
-    }
-
-    let changed = false;
-
-    for (const vmId of candidateVmIds) {
-      const current = this.store.load().vms.find((entry) => entry.id === vmId);
-
-      if (!current || !this.shouldRefreshVmSession(current, state.provider.kind, mode)) {
-        continue;
-      }
-
-      try {
-        const nextSession = enrichVmSession(
-          vmId,
-          await this.provider.refreshVmSession(current),
-        );
-
-        const result = this.store.update((draft) => {
-          const vm = draft.vms.find((entry) => entry.id === vmId);
-
-          if (!vm || !this.shouldRefreshVmSession(vm, draft.provider.kind, mode)) {
-            return false;
-          }
-
-          if (sameVmSession(vm.session, nextSession)) {
-            return false;
-          }
-
-          vm.session = nextSession;
-          vm.updatedAt = nowIso();
-          vm.frameRevision += 1;
-          return true;
-        });
-
-        changed = changed || result.changed;
-      } catch {
-        continue;
-      }
-    }
-
-    if (changed) {
-      this.publish();
-    }
-  }
-
-  private shouldRefreshVmSession(
-    vm: VmInstance,
-    providerKind: ProviderState["kind"],
-    mode: Exclude<VmSessionRefreshMode, "none">,
-  ): boolean {
-    if (vm.status !== "running" || vm.provider !== providerKind) {
-      return false;
-    }
-
-    if (mode === "all") {
-      return true;
-    }
-
-    return !hasReachableVncSession(vm.session);
-  }
-
   private publish(): void {
-    const summary = this.getSummary();
+    const summary = getSummary(this.runtime);
 
     for (const listener of this.listeners) {
       listener(summary);
@@ -1862,890 +477,4 @@ export class DesktopManager {
       };
     }
   }
-}
-
-function buildVmRecord(
-  state: AppState,
-  template: EnvironmentTemplate,
-  name: string,
-  wallpaperName: string,
-  resources: CreateVmInput["resources"],
-  forwardedPorts: TemplatePortForward[],
-  networkMode: VmNetworkMode,
-  provider: ProviderState["kind"],
-  status: VmInstance["status"],
-  forwardedServiceHostBase: string | null,
-): VmInstance {
-  const now = nowIso();
-  const id = nextId(state, "vm");
-
-  return {
-    id,
-    name,
-    wallpaperName,
-    templateId: template.id,
-    provider,
-    providerRef: buildProviderRef(id, name),
-    status,
-    resources: { ...resources },
-    createdAt: now,
-    updatedAt: now,
-    liveSince: null,
-    lastAction: `Queued from ${template.name}`,
-    snapshotIds: [],
-    frameRevision: 1,
-    screenSeed: state.sequence * 47,
-    activeWindow: "editor",
-    workspacePath: provider === "mock" ? `/srv/workspaces/${slugify(name)}` : "/root",
-    networkMode,
-    session:
-      provider === "mock"
-        ? buildSyntheticSession()
-        : null,
-    forwardedPorts: buildVmForwardedPorts(id, forwardedPorts, forwardedServiceHostBase),
-    activityLog: [
-      `template: ${template.name}`,
-      `network: ${describeVmNetworkMode(networkMode)}`,
-      `status: ${status}`,
-    ],
-    commandHistory: [],
-  };
-}
-
-function buildJob(
-  state: AppState,
-  kind: JobKind,
-  vmId: string | null,
-  templateId: string | null,
-  message: string,
-): ActionJob {
-  const now = nowIso();
-
-  return {
-    id: nextId(state, "job"),
-    kind,
-    targetVmId: vmId,
-    targetTemplateId: templateId,
-    status: "queued",
-    message,
-    progressPercent: QUEUED_PROGRESS_PERCENT,
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-type JobProgressReporter = (message: string, progressPercent: number | null) => void;
-
-function buildSnapshot(
-  state: AppState,
-  vm: VmInstance,
-  label: string,
-  providerRef: string,
-  summary: string,
-  templateId = vm.templateId,
-): Snapshot {
-  return {
-    id: nextId(state, "snap"),
-    vmId: vm.id,
-    templateId,
-    label,
-    summary,
-    providerRef,
-    resources: { ...vm.resources },
-    createdAt: nowIso(),
-  };
-}
-
-function normalizeProgressPercent(value: number | null): number | null {
-  if (value === null) {
-    return null;
-  }
-
-  const rounded = Math.round(value);
-  return Math.max(0, Math.min(100, rounded));
-}
-
-function nextId(state: AppState, prefix: string): string {
-  const value = String(state.sequence).padStart(4, "0");
-  state.sequence += 1;
-  return `${prefix}-${value}`;
-}
-
-function mergeVmSessionRefreshMode(
-  current: VmSessionRefreshMode,
-  next: Exclude<VmSessionRefreshMode, "none">,
-): Exclude<VmSessionRefreshMode, "none"> {
-  if (current === "all" || next === "all") {
-    return "all";
-  }
-
-  return "missing";
-}
-
-function applyProviderMutation(vm: VmInstance, mutation: ProviderMutation): void {
-  vm.lastAction = mutation.lastAction;
-  vm.updatedAt = nowIso();
-  vm.frameRevision += 1;
-
-  if (mutation.activeWindow) {
-    vm.activeWindow = mutation.activeWindow;
-  }
-
-  if (mutation.workspacePath !== undefined) {
-    vm.workspacePath = mutation.workspacePath;
-  }
-
-  if ("session" in mutation) {
-    vm.session = enrichVmSession(vm.id, mutation.session ?? null);
-  }
-
-  appendManyActivity(vm, mutation.activity);
-
-  if (mutation.commandResult) {
-    appendCommandResult(vm, {
-      command: mutation.commandResult.command,
-      output: mutation.commandResult.output,
-      workspacePath: mutation.commandResult.workspacePath,
-      createdAt: nowIso(),
-    });
-  }
-}
-
-function appendActivity(vm: VmInstance, line: string): void {
-  vm.activityLog.push(line);
-  vm.activityLog = vm.activityLog.slice(-MAX_ACTIVITY_LINES);
-}
-
-function appendManyActivity(vm: VmInstance, lines: string[]): void {
-  for (const line of lines) {
-    appendActivity(vm, line);
-  }
-}
-
-function appendCommandResult(vm: VmInstance, entry: VmCommandResult): void {
-  const history = [...(vm.commandHistory ?? []), entry];
-  vm.commandHistory = history.slice(-MAX_COMMAND_RESULTS);
-}
-
-function hasReachableVncSession(session: VmInstance["session"]): boolean {
-  return Boolean(
-    session &&
-      session.kind === "vnc" &&
-      session.reachable !== false &&
-      session.host &&
-      session.port,
-  );
-}
-
-function sameVmSession(
-  left: VmInstance["session"],
-  right: VmInstance["session"],
-): boolean {
-  if (left === right) {
-    return true;
-  }
-
-  if (!left || !right) {
-    return left === right;
-  }
-
-  return (
-    left.kind === right.kind &&
-    left.host === right.host &&
-    left.port === right.port &&
-    left.reachable === right.reachable &&
-    left.webSocketPath === right.webSocketPath &&
-    left.browserPath === right.browserPath &&
-    left.display === right.display
-  );
-}
-
-function markVmStoppedOutsideControlPlane(vm: VmInstance): void {
-  vm.status = "stopped";
-  vm.liveSince = null;
-  vm.lastAction = "Workspace stopped";
-  vm.updatedAt = nowIso();
-  vm.frameRevision += 1;
-  vm.activeWindow = "logs";
-  vm.session = null;
-  appendActivity(
-    vm,
-    `${vm.provider}: detected ${vm.providerRef} stopped outside the dashboard`,
-  );
-}
-
-function markVmRunningOutsideControlPlane(vm: VmInstance): void {
-  vm.status = "running";
-  vm.liveSince = nowIso();
-  vm.lastAction = "Workspace resumed";
-  vm.updatedAt = nowIso();
-  vm.frameRevision += 1;
-  vm.activeWindow = "terminal";
-  vm.session = null;
-  appendActivity(
-    vm,
-    `${vm.provider}: detected ${vm.providerRef} running outside the dashboard`,
-  );
-}
-
-function trimJobs(state: AppState): void {
-  state.jobs = state.jobs.slice(0, MAX_JOBS);
-}
-
-function isInterruptedBootJobFailure(job: ActionJob): boolean {
-  if (
-    job.kind !== "create" &&
-    job.kind !== "clone" &&
-    job.kind !== "launch-snapshot" &&
-    job.kind !== "start" &&
-    job.kind !== "restart"
-  ) {
-    return false;
-  }
-
-  return job.message === `Control server restarted before ${job.kind} could finish.`;
-}
-
-function buildCaptureNotes(
-  vm: VmInstance,
-  previousNotes: string[],
-): string[] {
-  const refreshedNotes = [
-    `Captured from VM ${vm.name}.`,
-    `Workspace path at capture: ${vm.workspacePath}.`,
-    ...previousNotes.filter(
-      (note) =>
-        note !== `Captured from VM ${vm.name}.` &&
-        note !== `Workspace path at capture: ${vm.workspacePath}.`,
-    ),
-  ];
-
-  return refreshedNotes.slice(0, 6);
-}
-
-function buildCapturedTemplateProvenance(
-  vm: VmInstance,
-  sourceTemplate: EnvironmentTemplate | null,
-  snapshot: Snapshot,
-): TemplateProvenance {
-  return {
-    kind: "captured",
-    summary: sourceTemplate
-      ? `Captured from VM ${vm.name} using template ${sourceTemplate.name}.`
-      : `Captured from VM ${vm.name}.`,
-    sourceTemplateId: sourceTemplate?.id ?? null,
-    sourceTemplateName: sourceTemplate?.name ?? null,
-    sourceVmId: vm.id,
-    sourceVmName: vm.name,
-    sourceSnapshotId: snapshot.id,
-    sourceSnapshotLabel: snapshot.label,
-  };
-}
-
-function buildClonedTemplateNotes(
-  sourceTemplate: EnvironmentTemplate,
-  previousNotes: string[],
-  initCommands: string[],
-): string[] {
-  const refreshedNotes = [
-    `Cloned from template ${sourceTemplate.name}.`,
-    initCommands.length > 0
-      ? `First-boot init script runs ${initCommands.length} command${initCommands.length === 1 ? "" : "s"}.`
-      : "No first-boot init commands configured.",
-    ...previousNotes.filter(
-      (note) =>
-        note !== `Cloned from template ${sourceTemplate.name}.` &&
-        note !== "No first-boot init commands configured." &&
-        !note.startsWith("First-boot init script runs "),
-    ),
-  ];
-
-  return refreshedNotes.slice(0, 6);
-}
-
-function buildClonedTemplateProvenance(
-  sourceTemplate: EnvironmentTemplate,
-): TemplateProvenance {
-  return {
-    kind: "cloned",
-    summary: `Cloned from template ${sourceTemplate.name}.`,
-    sourceTemplateId: sourceTemplate.id,
-    sourceTemplateName: sourceTemplate.name,
-    sourceVmId: null,
-    sourceVmName: null,
-    sourceSnapshotId: null,
-    sourceSnapshotLabel: null,
-  };
-}
-
-function buildTemplateHistoryEntry(
-  kind: TemplateHistoryEntry["kind"],
-  summary: string,
-  createdAt = nowIso(),
-): TemplateHistoryEntry {
-  return {
-    kind,
-    summary,
-    createdAt,
-  };
-}
-
-function appendTemplateHistory(
-  history: TemplateHistoryEntry[] | undefined,
-  entry: TemplateHistoryEntry,
-): TemplateHistoryEntry[] {
-  const nextHistory = [
-    entry,
-    ...(history ?? []).filter(
-      (current) =>
-        current.kind !== entry.kind ||
-        current.summary !== entry.summary ||
-        current.createdAt !== entry.createdAt,
-    ),
-  ];
-
-  return nextHistory.slice(0, 12);
-}
-
-function collectTemplateUpdateFieldLabels(
-  template: EnvironmentTemplate,
-  nextName: string,
-  nextDescription: string,
-  nextInitCommands: string[],
-): string[] {
-  const changedFields: string[] = [];
-
-  if (template.name !== nextName) {
-    changedFields.push("name");
-  }
-
-  if (template.description !== nextDescription) {
-    changedFields.push("description");
-  }
-
-  if (!sameStringArray(template.initCommands, nextInitCommands)) {
-    changedFields.push("init commands");
-  }
-
-  return changedFields.length > 0 ? changedFields : ["template metadata"];
-}
-
-function normalizeTemplateInitCommands(
-  initCommands: EnvironmentTemplate["initCommands"] | undefined,
-): string[] {
-  if (!Array.isArray(initCommands)) {
-    return [];
-  }
-
-  return initCommands
-    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-    .filter((entry) => entry.length > 0)
-    .slice(0, 64);
-}
-
-function sameStringArray(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((entry, index) => entry === right[index]);
-}
-
-function requireTemplate(
-  state: AppState,
-  templateId: string,
-): EnvironmentTemplate {
-  const template = state.templates.find((entry) => entry.id === templateId);
-
-  if (!template) {
-    throw new Error(`Template ${templateId} was not found.`);
-  }
-
-  return template;
-}
-
-function resolveTemplateForSnapshot(
-  state: AppState,
-  snapshot: Snapshot,
-  defaultTemplateLaunchSource = FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
-): EnvironmentTemplate {
-  return (
-    state.templates.find((entry) => entry.id === snapshot.templateId) ??
-    buildOrphanedSnapshotTemplate(snapshot, defaultTemplateLaunchSource)
-  );
-}
-
-function resolveTemplateCreateFallbackSnapshot(
-  state: AppState,
-  template: EnvironmentTemplate,
-  vm: VmInstance,
-  error: unknown,
-): Snapshot | null {
-  if (!isMissingCapturedTemplateLaunchSourceError(template, error)) {
-    return null;
-  }
-
-  const candidates = state.snapshots
-    .filter(
-      (snapshot) =>
-        snapshot.templateId === template.id || template.snapshotIds.includes(snapshot.id),
-    )
-    .sort((left, right) => {
-      const rightMs = Date.parse(right.createdAt);
-      const leftMs = Date.parse(left.createdAt);
-      return (Number.isFinite(rightMs) ? rightMs : 0) - (Number.isFinite(leftMs) ? leftMs : 0);
-    });
-
-  return candidates.find((snapshot) => snapshot.resources.diskGb <= vm.resources.diskGb) ?? null;
-}
-
-function isMissingCapturedTemplateLaunchSourceError(
-  template: EnvironmentTemplate,
-  error: unknown,
-): boolean {
-  if (!template.launchSource.startsWith("parallaize-template-")) {
-    return false;
-  }
-
-  const message = errorMessage(error);
-
-  return (
-    message.includes(`Image "${template.launchSource}" not found`) ||
-    message.includes(`Image '${template.launchSource}' not found`)
-  );
-}
-
-function buildOrphanedSnapshotTemplate(
-  snapshot: Snapshot,
-  defaultTemplateLaunchSource: string,
-): EnvironmentTemplate {
-  const now = nowIso();
-
-  return {
-    id: snapshot.templateId,
-    name: "Deleted template",
-    description: "Recovered from snapshot metadata after the template record was removed.",
-    launchSource: defaultTemplateLaunchSource,
-    defaultResources: { ...snapshot.resources },
-    defaultForwardedPorts: [],
-    initCommands: [],
-    tags: ["orphaned"],
-    notes: ["Recovered from snapshot metadata after template deletion."],
-    snapshotIds: [snapshot.id],
-    provenance: {
-      kind: "recovered",
-      summary: `Recovered from snapshot ${snapshot.label} after template deletion.`,
-      sourceTemplateId: snapshot.templateId,
-      sourceTemplateName: null,
-      sourceVmId: snapshot.vmId,
-      sourceVmName: null,
-      sourceSnapshotId: snapshot.id,
-      sourceSnapshotLabel: snapshot.label,
-    },
-    history: [
-      buildTemplateHistoryEntry(
-        "recovered",
-        `Recovered from snapshot ${snapshot.label} after template deletion.`,
-        now,
-      ),
-    ],
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function requireVm(state: AppState, vmId: string): VmInstance {
-  const vm = state.vms.find((entry) => entry.id === vmId);
-
-  if (!vm) {
-    throw new Error(`VM ${vmId} was not found.`);
-  }
-
-  return vm;
-}
-
-function requireSnapshot(state: AppState, snapshotId: string): Snapshot {
-  const snapshot = state.snapshots.find((entry) => entry.id === snapshotId);
-
-  if (!snapshot) {
-    throw new Error(`Snapshot ${snapshotId} was not found.`);
-  }
-
-  return snapshot;
-}
-
-function requireVmSnapshot(
-  state: AppState,
-  vmId: string,
-  snapshotId: string,
-): Snapshot {
-  const snapshot = requireSnapshot(state, snapshotId);
-
-  if (snapshot.vmId !== vmId) {
-    throw new Error(`Snapshot ${snapshotId} does not belong to VM ${vmId}.`);
-  }
-
-  return snapshot;
-}
-
-function failMissingCreateTemplateId(): never {
-  throw new Error("Template launch source is required.");
-}
-
-function validateResources(resources: CreateVmInput["resources"]): void {
-  if (
-    resources.cpu < 1 ||
-    resources.cpu > 96 ||
-    resources.ramMb < 1024 ||
-    resources.ramMb > 262144 ||
-    resources.diskGb < 10 ||
-    resources.diskGb > 4096
-  ) {
-    throw new Error(
-      "Resources must be within sane ranges: cpu 1-96, ram 1-256 GB, disk 10-4096 GB.",
-    );
-  }
-}
-
-function validateTemplateCreateResources(
-  template: EnvironmentTemplate,
-  resources: CreateVmInput["resources"],
-): void {
-  const minimumDiskGb = minimumCreateDiskGb(template);
-
-  if (minimumDiskGb !== null && resources.diskGb < minimumDiskGb) {
-    throw new Error(
-      `Template ${template.name} requires at least ${minimumDiskGb} GB disk because it was captured from a ${minimumDiskGb} GB workspace.`,
-    );
-  }
-}
-
-function validateSnapshotCreateResources(
-  snapshot: Snapshot,
-  resources: CreateVmInput["resources"],
-): void {
-  if (resources.diskGb < snapshot.resources.diskGb) {
-    throw new Error(
-      `Snapshot ${snapshot.label} requires at least ${snapshot.resources.diskGb} GB disk because shrinking a saved filesystem is not supported.`,
-    );
-  }
-}
-
-function validateVmCloneResources(
-  sourceVm: VmInstance,
-  resources: CreateVmInput["resources"],
-): void {
-  if (resources.diskGb < sourceVm.resources.diskGb) {
-    throw new Error(
-      `VM ${sourceVm.name} needs at least ${sourceVm.resources.diskGb} GB disk because shrinking a cloned filesystem is not supported.`,
-    );
-  }
-}
-
-function normalizeVmNetworkMode(mode: VmNetworkMode | undefined): VmNetworkMode {
-  return mode === "dmz" ? "dmz" : "default";
-}
-
-function describeVmNetworkMode(mode: VmNetworkMode | undefined): string {
-  return normalizeVmNetworkMode(mode) === "dmz" ? "dmz" : "default bridge";
-}
-
-function buildProviderRef(vmId: string, name: string): string {
-  const slug = slugify(name) || "workspace";
-  return `parallaize-${vmId}-${slug}`;
-}
-
-function buildSyntheticSession(): VmInstance["session"] {
-  return {
-    kind: "synthetic",
-    host: null,
-    port: null,
-    webSocketPath: null,
-    browserPath: null,
-    display: "Synthetic frame stream",
-  };
-}
-
-function validateForwardedPorts(forwardedPorts: TemplatePortForward[]): void {
-  const seenNames = new Set<string>();
-
-  for (const forwardedPort of forwardedPorts) {
-    const name = forwardedPort.name.trim();
-
-    if (!name) {
-      throw new Error("Forwarded port names are required.");
-    }
-
-    if (seenNames.has(name.toLowerCase())) {
-      throw new Error(`Forwarded port name ${name} is duplicated.`);
-    }
-
-    seenNames.add(name.toLowerCase());
-
-    if (forwardedPort.guestPort < 1 || forwardedPort.guestPort > 65535) {
-      throw new Error("Forwarded guest ports must be between 1 and 65535.");
-    }
-  }
-}
-
-function buildVmForwardedPorts(
-  vmId: string,
-  forwardedPorts: TemplatePortForward[],
-  forwardedServiceHostBase: string | null,
-): VmPortForward[] {
-  return forwardedPorts.map((forwardedPort, index) => {
-    const id = `port-${String(index + 1).padStart(2, "0")}`;
-
-    return {
-      name: forwardedPort.name.trim(),
-      guestPort: forwardedPort.guestPort,
-      protocol: forwardedPort.protocol,
-      description: forwardedPort.description.trim(),
-      id,
-      publicPath: buildVmForwardPath(vmId, id),
-      publicHostname: buildVmForwardHostname(
-        vmId,
-        forwardedPort.name,
-        forwardedServiceHostBase,
-      ),
-    };
-  });
-}
-
-function resolveVmGuestPath(
-  workspacePath: string,
-  requestedPath?: string | null,
-): string | null {
-  const normalizedWorkspacePath = normalizeWorkspaceGuestPath(workspacePath);
-
-  if (!requestedPath || requestedPath.trim().length === 0) {
-    return null;
-  }
-
-  const candidate = requestedPath.startsWith("/")
-    ? requestedPath
-    : pathPosix.resolve(normalizedWorkspacePath, requestedPath);
-  return normalizeWorkspaceGuestPath(candidate);
-}
-
-function requireVmGuestPath(
-  workspacePath: string,
-  requestedPath?: string | null,
-): string {
-  const resolvedPath = resolveVmGuestPath(workspacePath, requestedPath);
-
-  if (!resolvedPath) {
-    throw new Error("Guest file path is required.");
-  }
-
-  return resolvedPath;
-}
-
-function normalizeWorkspaceGuestPath(path: string): string {
-  const normalized = pathPosix.normalize(path || "/");
-
-  if (normalized === ".") {
-    return "/";
-  }
-
-  return normalized.startsWith("/")
-    ? normalized
-    : pathPosix.resolve("/", normalized);
-}
-
-function copyForwardAsTemplatePort(forwardedPort: VmPortForward): TemplatePortForward {
-  return {
-    name: forwardedPort.name,
-    guestPort: forwardedPort.guestPort,
-    protocol: forwardedPort.protocol,
-    description: forwardedPort.description,
-  };
-}
-
-function copyTemplatePortForward(forwardedPort: TemplatePortForward): TemplatePortForward {
-  return {
-    name: forwardedPort.name,
-    guestPort: forwardedPort.guestPort,
-    protocol: forwardedPort.protocol,
-    description: forwardedPort.description,
-  };
-}
-
-function enrichVmSession(
-  vmId: string,
-  session: VmInstance["session"],
-): VmInstance["session"] {
-  if (!session) {
-    return null;
-  }
-
-  if (session.kind !== "vnc") {
-    return {
-      ...session,
-      browserPath: null,
-      webSocketPath: null,
-    };
-  }
-
-  return {
-    ...session,
-    webSocketPath:
-      session.reachable !== false && session.host && session.port
-        ? buildVncSocketPath(vmId)
-        : null,
-    browserPath:
-      session.reachable !== false && session.host && session.port
-        ? buildVmBrowserPath(vmId)
-        : null,
-  };
-}
-
-function cloneVmSession(
-  session: VmInstance["session"],
-): VmInstance["session"] {
-  if (!session) {
-    return null;
-  }
-
-  if (session.kind === "vnc") {
-    return null;
-  }
-
-  return {
-    ...session,
-    browserPath: null,
-    webSocketPath: null,
-  };
-}
-
-function appendTelemetrySample(
-  current: ResourceTelemetry,
-  sample: ProviderTelemetrySample | null,
-): ResourceTelemetry {
-  if (!sample) {
-    return {
-      ...current,
-      cpuPercent: null,
-      ramPercent: null,
-    };
-  }
-
-  const cpuPercent =
-    sample.cpuPercent === null ? null : normalizeTelemetryPercent(sample.cpuPercent);
-  const ramPercent =
-    sample.ramPercent === null ? null : normalizeTelemetryPercent(sample.ramPercent);
-
-  return {
-    cpuPercent,
-    ramPercent,
-    cpuHistory:
-      cpuPercent === null ? current.cpuHistory : appendTelemetryPoint(current.cpuHistory, cpuPercent),
-    ramHistory:
-      ramPercent === null ? current.ramHistory : appendTelemetryPoint(current.ramHistory, ramPercent),
-  };
-}
-
-function appendTelemetryPoint(history: number[], value: number): number[] {
-  return [...history, value].slice(-MAX_TELEMETRY_SAMPLES);
-}
-
-function emptyResourceTelemetry(): ResourceTelemetry {
-  return {
-    cpuHistory: [],
-    cpuPercent: null,
-    ramHistory: [],
-    ramPercent: null,
-  };
-}
-
-function normalizeTelemetryPercent(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-function sameTelemetry(
-  left: ResourceTelemetry | null,
-  right: ResourceTelemetry | null,
-): boolean {
-  if (!left || !right) {
-    return left === right;
-  }
-
-  return (
-    left.cpuPercent === right.cpuPercent &&
-    left.ramPercent === right.ramPercent &&
-    left.cpuHistory.length === right.cpuHistory.length &&
-    left.ramHistory.length === right.ramHistory.length &&
-    left.cpuHistory.every((value, index) => value === right.cpuHistory[index]) &&
-    left.ramHistory.every((value, index) => value === right.ramHistory[index])
-  );
-}
-
-function sameProviderState(left: ProviderState, right: ProviderState): boolean {
-  return (
-    left.kind === right.kind &&
-    left.available === right.available &&
-    left.detail === right.detail &&
-    left.hostStatus === right.hostStatus &&
-    left.binaryPath === right.binaryPath &&
-    left.project === right.project &&
-    left.desktopTransport === right.desktopTransport &&
-    left.nextSteps.length === right.nextSteps.length &&
-    left.nextSteps.every((step, index) => step === right.nextSteps[index])
-  );
-}
-
-function buildVncSocketPath(vmId: string): string {
-  return `/api/vms/${vmId}/vnc`;
-}
-
-function buildVmBrowserPath(vmId: string): string {
-  return `/?vm=${vmId}`;
-}
-
-function buildVmForwardPath(vmId: string, forwardId: string): string {
-  return `/vm/${vmId}/forwards/${forwardId}/`;
-}
-
-function buildVmForwardHostname(
-  vmId: string,
-  forwardName: string,
-  forwardedServiceHostBase: string | null,
-): string | null {
-  const normalizedBase = forwardedServiceHostBase
-    ?.trim()
-    .toLowerCase()
-    .replace(/^\.+|\.+$/g, "");
-
-  if (!normalizedBase) {
-    return null;
-  }
-
-  return `${slugify(forwardName) || "forward"}--${vmId}.${normalizedBase}`;
-}
-
-function detectHostDiskGb(): number {
-  for (const path of ["/var/lib/incus", process.cwd(), "/"]) {
-    try {
-      const stats = statfsSync(path);
-      const totalBytes = stats.bsize * stats.blocks;
-
-      if (Number.isFinite(totalBytes) && totalBytes > 0) {
-        return Math.round(totalBytes / (1024 ** 3));
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return 0;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error";
-}
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

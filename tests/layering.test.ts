@@ -9,6 +9,11 @@ const controlRoot = resolve(repoRoot, "apps/control/src");
 const sharedRoot = resolve(repoRoot, "packages/shared/src");
 const dashboardTransportPath = resolve(webRoot, "dashboardTransport.ts");
 const dashboardFullscreenPath = resolve(webRoot, "dashboardFullscreen.ts");
+const dashboardPersistencePath = resolve(webRoot, "dashboardPersistence.ts");
+const dashboardResolutionControlPath = resolve(
+  webRoot,
+  "dashboardResolutionControl.ts",
+);
 const storeNormalizePath = resolve(controlRoot, "store-normalize.ts");
 const storeJsonPath = resolve(controlRoot, "store-json.ts");
 const storePostgresPath = resolve(controlRoot, "store-postgres.ts");
@@ -76,6 +81,18 @@ test("extracted runtime helpers keep transport and persistence boundaries narrow
   for (const specifier of readImportSpecifiers(dashboardFullscreenPath)) {
     if (specifier === "react" || specifier.startsWith("react/")) {
       violations.push("apps/web/src/dashboardFullscreen.ts imports React");
+    }
+  }
+
+  for (const specifier of readImportSpecifiers(dashboardPersistencePath)) {
+    if (specifier === "react" || specifier.startsWith("react/")) {
+      violations.push("apps/web/src/dashboardPersistence.ts imports React");
+    }
+  }
+
+  for (const specifier of readImportSpecifiers(dashboardResolutionControlPath)) {
+    if (specifier === "react" || specifier.startsWith("react/")) {
+      violations.push("apps/web/src/dashboardResolutionControl.ts imports React");
     }
   }
 

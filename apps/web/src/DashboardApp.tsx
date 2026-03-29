@@ -63,14 +63,10 @@ import type {
 import {
   applyViewportBoundsToResolution,
   buildResolutionControlLeaseStorageKey,
-  canClaimResolutionControlLease,
-  createResolutionControlLease,
   emptyResolutionRequestQueue,
   emptyViewportBounds,
   enqueueResolutionRequest,
-  parseResolutionControlLease,
   resolveResolutionRequest,
-  resolutionControlLeaseTtlMs,
   shouldScheduleResolutionRepair,
   type ResolutionRequest,
   type ViewportBounds,
@@ -180,6 +176,31 @@ import {
   releaseFullscreenKeyboardLock,
   syncFullscreenKeyboardLock,
 } from "./dashboardFullscreen.js";
+import {
+  activeCpuThresholdsByVmStorageKey,
+  desktopResolutionByVmStorageKey,
+  livePreviewsStorageKey,
+  overviewSidepanelCollapsedStorageKey,
+  railWidthStorageKey,
+  readActiveCpuThresholdsByVm,
+  readDesktopResolutionByVm,
+  readDocumentVisible,
+  readSidepanelCollapsedByVm,
+  readStoredBoolean,
+  readStoredNumber,
+  readThemeMode,
+  readViewportWidth,
+  sidepanelCollapsedByVmStorageKey,
+  sidepanelWidthStorageKey,
+  themeModeStorageKey,
+  writeStoredString,
+} from "./dashboardPersistence.js";
+import {
+  claimResolutionControlLease,
+  createTabId,
+  readOrCreateResolutionControlClientId,
+  releaseResolutionControlLease,
+} from "./dashboardResolutionControl.js";
 import {
   AuthRequiredError,
   applyVmLogsAppend,
@@ -350,9 +371,6 @@ const defaultLoginDraft: LoginDraft = {
 };
 
 const quickCommands = ["pwd", "ls -la", "pnpm build", "pnpm test", "incus list"];
-const railWidthStorageKey = "parallaize.rail-width";
-const activeCpuThresholdsByVmStorageKey = "parallaize.active-cpu-thresholds-by-vm";
-const overviewSidepanelCollapsedStorageKey = "parallaize.overview-sidepanel-collapsed";
 const railCompactWidth = 48;
 const railExpandedMinWidth = 248;
 const railCompactSnapWidth = Math.round((railCompactWidth + railExpandedMinWidth) / 2);
@@ -378,11 +396,7 @@ const guestDisplayHeightMin = 200;
 const guestDisplayHeightMax = 8192;
 const desktopResolutionRetryDelayMs = 900;
 const desktopResolutionRetryMaxAttempts = 4;
-const desktopResolutionByVmStorageKey = "parallaize.desktop-resolution-by-vm";
-const resolutionControlClientIdStorageKey = "parallaize.resolution-control-client-id";
 const resolutionControlHeartbeatMs = 1_500;
-const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
-const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
 const sidepanelClosedWidth = 0;
 const sidepanelDefaultWidth = 380;
 const sidepanelMinWidth = 320;
@@ -443,7 +457,13 @@ export function DashboardApp(): JSX.Element {
   );
   const [desktopResolutionByVm, setDesktopResolutionByVm] = useState<
     Record<string, DesktopResolutionPreference>
-  >(() => readDesktopResolutionByVm());
+  >(() =>
+    readDesktopResolutionByVm((preference) =>
+      normalizeDesktopResolutionPreference(
+        preference as Partial<DesktopResolutionPreference>,
+      ),
+    ),
+  );
   const [openVmMenuId, setOpenVmMenuId] = useState<string | null>(null);
   const [vmRailOrderIds, setVmRailOrderIds] = useState<string[] | null>(null);
   const [draggedVmId, setDraggedVmId] = useState<string | null>(null);
@@ -454,7 +474,7 @@ export function DashboardApp(): JSX.Element {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [activeCpuThresholdsByVm, setActiveCpuThresholdsByVm] = useState<
     Record<string, number>
-  >(() => readActiveCpuThresholdsByVm());
+  >(() => readActiveCpuThresholdsByVm(normalizeActiveCpuThreshold));
   const [resolutionDraft, setResolutionDraft] = useState<ResolutionDraft>(() =>
     buildResolutionDraft(
       defaultDesktopResolutionPreference.mode,
@@ -464,7 +484,7 @@ export function DashboardApp(): JSX.Element {
     ),
   );
   const [showLivePreviews, setShowLivePreviews] = useState(() =>
-    readStoredBoolean("parallaize.live-previews", true),
+    readStoredBoolean(livePreviewsStorageKey, true),
   );
   const [viewportWidth, setViewportWidth] = useState(() => readViewportWidth());
   const [railWidthPreference, setRailWidthPreference] = useState(() =>
@@ -1467,12 +1487,12 @@ export function DashboardApp(): JSX.Element {
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
-    writeStoredString("parallaize.theme", themeMode);
+    writeStoredString(themeModeStorageKey, themeMode);
   }, [themeMode]);
 
   useEffect(() => {
     writeStoredString(
-      "parallaize.live-previews",
+      livePreviewsStorageKey,
       showLivePreviews ? "true" : "false",
     );
   }, [showLivePreviews]);
@@ -7811,219 +7831,6 @@ function noticeToneClassName(tone: Notice["tone"]): string {
     default:
       return "notice-bar--info";
   }
-}
-
-function readThemeMode(): ThemeMode {
-  const stored = readStoredString("parallaize.theme");
-
-  if (stored === "light" || stored === "dark") {
-    return stored;
-  }
-
-  if (typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-    return "dark";
-  }
-
-  return "light";
-}
-
-function readStoredBoolean(key: string, fallback: boolean): boolean {
-  const stored = readStoredString(key);
-
-  if (stored === "true") {
-    return true;
-  }
-
-  if (stored === "false") {
-    return false;
-  }
-
-  return fallback;
-}
-
-function readStoredNumber(key: string): number | null {
-  const stored = readStoredString(key);
-
-  if (!stored) {
-    return null;
-  }
-
-  const value = Number(stored);
-
-  return Number.isFinite(value) ? value : null;
-}
-
-function readStoredString(key: string): string | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function clearStoredString(key: string): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.removeItem(key);
-  } catch {
-    // Ignore persistence failures and keep the session usable.
-  }
-}
-
-function readDocumentVisible(): boolean {
-  return typeof document === "undefined" ? true : document.visibilityState === "visible";
-}
-
-function readOrCreateResolutionControlClientId(): string {
-  const existing = readStoredString(resolutionControlClientIdStorageKey)?.trim();
-
-  if (existing) {
-    return existing;
-  }
-
-  const clientId = `client-${createTabId()}`;
-  writeStoredString(resolutionControlClientIdStorageKey, clientId);
-  return clientId;
-}
-
-function createTabId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-
-  return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function claimResolutionControlLease(
-  vmId: string,
-  tabId: string,
-  force = false,
-): ResolutionControlOwner {
-  if (typeof window === "undefined") {
-    return "self";
-  }
-
-  const key = buildResolutionControlLeaseStorageKey(vmId);
-  const now = Date.now();
-  const existingLease = parseResolutionControlLease(readStoredString(key));
-
-  if (
-    !force &&
-    !canClaimResolutionControlLease({
-      lease: existingLease,
-      now,
-      tabId,
-      ttlMs: resolutionControlLeaseTtlMs,
-      vmId,
-    })
-  ) {
-    return "other";
-  }
-
-  writeStoredString(key, JSON.stringify(createResolutionControlLease(vmId, tabId, now)));
-  const confirmedLease = parseResolutionControlLease(readStoredString(key));
-
-  return confirmedLease?.tabId === tabId ? "self" : "other";
-}
-
-function releaseResolutionControlLease(vmId: string, tabId: string): void {
-  const key = buildResolutionControlLeaseStorageKey(vmId);
-  const existingLease = parseResolutionControlLease(readStoredString(key));
-
-  if (!existingLease || existingLease.tabId !== tabId) {
-    return;
-  }
-
-  clearStoredString(key);
-}
-
-function readSidepanelCollapsedByVm(): Record<string, true> {
-  const stored = readStoredString(sidepanelCollapsedByVmStorageKey);
-
-  if (!stored) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(stored) as Record<string, unknown>;
-
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        ([vmId, collapsed]) => vmId.length > 0 && collapsed === true,
-      ),
-    ) as Record<string, true>;
-  } catch {
-    return {};
-  }
-}
-
-function readActiveCpuThresholdsByVm(): Record<string, number> {
-  const stored = readStoredString(activeCpuThresholdsByVmStorageKey);
-
-  if (!stored) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(stored) as Record<string, unknown>;
-
-    return Object.fromEntries(
-      Object.entries(parsed)
-        .map(([vmId, threshold]) => {
-          if (vmId.length === 0 || typeof threshold !== "number" || !Number.isFinite(threshold)) {
-            return null;
-          }
-
-          return [vmId, normalizeActiveCpuThreshold(threshold)];
-        })
-        .filter((entry): entry is [string, number] => entry !== null),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function readDesktopResolutionByVm(): Record<string, DesktopResolutionPreference> {
-  const stored = readStoredString(desktopResolutionByVmStorageKey);
-
-  if (!stored) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(stored) as Record<string, Partial<DesktopResolutionPreference>>;
-
-    return Object.fromEntries(
-      Object.entries(parsed)
-        .filter(([vmId]) => vmId.length > 0)
-        .map(([vmId, preference]) => [vmId, normalizeDesktopResolutionPreference(preference)]),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function writeStoredString(key: string, value: string): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    // Ignore persistence failures and keep the session usable.
-  }
-}
-
-function readViewportWidth(): number {
-  return typeof window === "undefined" ? 1440 : window.innerWidth;
 }
 
 function buildResolutionDraft(

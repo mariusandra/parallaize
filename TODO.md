@@ -4,7 +4,7 @@ Last updated: 2026-03-29
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
-Current focus: clean up the current codebase so new work lands behind smaller seams with better tests.
+Current focus: finish the provider split and keep peeling stateful UI surfaces out of `DashboardApp.tsx` now that the manager and browser-persistence seams are smaller.
 
 Untrusted AI workflow work is deferred until the cleanup slices below are in materially better shape.
 
@@ -29,7 +29,7 @@ Goal: reduce file size, cross-cutting state, and duplicated helper logic in the 
 - [x] Extract latest-release parsing/cache logic from `apps/control/src/server.ts` into `apps/control/src/server-release.ts`.
 - [x] Extract event stream and VM log-tail lifecycle code out of `apps/control/src/server.ts`.
 - [x] Split `apps/control/src/server.ts` route handling into grouped route modules.
-- [ ] Split `apps/control/src/manager.ts` into read models, VM/template/snapshot commands, and background orchestration workers.
+- [x] Split `apps/control/src/manager.ts` into read models, VM/template/snapshot commands, and background orchestration workers.
 - [ ] Break `apps/control/src/providers.ts` into provider contracts, mock provider, Incus lifecycle, guest inspection, networking, and streaming helpers.
 - [x] Separate `apps/control/src/store.ts` into store interface, normalization/migration helpers, JSON persistence, and PostgreSQL persistence.
 - [x] Add targeted unit coverage for extracted control-plane helpers so behavior does not depend only on giant end-to-end suites.
@@ -40,13 +40,13 @@ Goal: reduce file size, cross-cutting state, and duplicated helper logic in the 
 - [x] Extract leaf dashboard primitives from `apps/web/src/DashboardApp.tsx` into `apps/web/src/dashboardPrimitives.tsx`.
 - [ ] Move app shell, overview, workspace stage, sidepanel sections, and dialog surfaces into focused components.
 - [x] Pull browser-only fetch/SSE plumbing and fullscreen handling into dedicated services.
-- [ ] Pull browser-only persistence and resolution-control coordination into dedicated hooks/services.
+- [x] Pull browser-only persistence and resolution-control coordination into dedicated hooks/services.
 - [ ] Split `apps/web/src/styles.css` into tokens, shell layout, workspace layout, dialogs, sidepanel, and feature-local sections/files.
 - [x] Add targeted tests around extracted browser helpers so the view-model logic is characterized outside the monolith component.
 
 ### Block 3: Guardrails And Characterization
 
-- [ ] Keep `docs/refactor-map.md` aligned with live ownership seams, file budgets, and the next extraction targets.
+- [x] Keep `docs/refactor-map.md` aligned with live ownership seams, file budgets, and the next extraction targets.
 - [x] Expand `tests/layering.test.ts` and neighboring guardrail tests so runtime boundaries stay enforced while files move.
 - [ ] Remove dead helpers and duplicate formatting/state logic as extracted modules become the single source of truth.
 - [ ] Keep `TODO.md` current whenever scope changes or a major cleanup slice lands.
