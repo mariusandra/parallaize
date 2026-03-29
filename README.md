@@ -120,6 +120,53 @@ flox activate -d . -- pnpm smoke:incus
 `pnpm smoke:incus` is the live end-to-end path. It expects the control plane to be running in Incus mode and Caddy to be serving on `:8080`.
 It builds the current tree first, launches from the seeded Ubuntu 24.04 desktop source by default, and waits for both a working VNC bridge and a non-black guest framebuffer before passing.
 
+## Wallpaper Tests
+
+There is also a small OpenAI-backed wallpaper experiment for generating abstract animal wallpapers in the style of Ubuntu 24.04's Monument Valley background.
+
+```bash
+OPENAI_API_KEY=... \
+flox activate -d . -- pnpm wallpaper:test
+```
+
+By default it:
+
+- picks one random VM-name animal and adjective from the existing lists
+- uses a text prompt that borrows the Monument Valley low-poly visual language without copying that exact place or composition
+- places the animal in a stylized version of its own habitat
+- generates `1536x1024` landscape outputs at the `low` quality setting only
+- writes images, the resolved prompt, and a manifest under `artifacts/wallpaper-tests/`
+
+Useful overrides:
+
+```bash
+OPENAI_API_KEY=... \
+flox activate -d . -- pnpm wallpaper:test -- --animal fox --adjective quiet
+
+OPENAI_API_KEY=... \
+flox activate -d . -- pnpm wallpaper:test -- --animal otter --variants 3
+
+flox activate -d . -- pnpm wallpaper:test -- --dry-run
+```
+
+If you pass `--animal` without `--adjective`, the script now fills in a random adjective so the result still targets a full VM-style name such as `quiet-fox`.
+
+For the full catalog, use:
+
+```bash
+OPENAI_API_KEY=... \
+flox activate -d . -- pnpm wallpaper:all
+```
+
+That bulk mode:
+
+- generates every adjective-animal combination once
+- runs up to `10` OpenAI image requests in parallel
+- writes images directly to `artifacts/wallpapers/24.04/<adjective>-<animal>.jpg`
+- writes a resumable `manifest.json` alongside the images
+- skips files that already exist, so rerunning the same command resumes automatically
+- pauses cleanly on OpenAI quota exhaustion and leaves the manifest pointing at the next slug to generate
+
 ## Packaging
 
 Parallaize includes a real package-build path for host installs.

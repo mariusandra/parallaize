@@ -96,6 +96,39 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.ok((job?.progressPercent ?? 100) < 100);
 });
 
+test("manager preserves the generated wallpaper name across later renames", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-wallpaper-name-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "custom-client-name",
+    wallpaperName: "angry-puffin",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  assert.equal(manager.getVmDetail(vm.id).vm.wallpaperName, "angry-puffin");
+
+  const updated = manager.updateVm(vm.id, {
+    name: "renamed-client-name",
+  });
+
+  assert.equal(updated.name, "renamed-client-name");
+  assert.equal(updated.wallpaperName, "angry-puffin");
+});
+
 test("manager reconciles the seeded template launch source to the configured default", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-source-reconcile-"));
   context.after(() => {
@@ -1749,7 +1782,8 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
 
   const vm: VmInstance = {
     id: "vm-0099",
-    name: "delta-lab",
+    name: "renamed-delta-lab",
+    wallpaperName: "angry-puffin",
     templateId: template.id,
     provider: "incus",
     providerRef: instanceName,
@@ -1872,6 +1906,12 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetCall?.[4] ?? "", /sleep-inactive-ac-timeout 'uint32 0'/);
   assert.match(configSetCall?.[4] ?? "", /sleep-inactive-battery-type 'nothing'/);
   assert.match(configSetCall?.[4] ?? "", /sleep-inactive-battery-timeout 'uint32 0'/);
+  assert.match(
+    configSetCall?.[4] ?? "",
+    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/angry-puffin\.jpg/,
+  );
+  assert.match(configSetCall?.[4] ?? "", /download_remote_wallpaper\(\)/);
+  assert.match(configSetCall?.[4] ?? "", /resolve_first_boot_wallpaper_uri\(\)/);
   assert.match(configSetCall?.[4] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
   assert.match(configSetCall?.[4] ?? "", /desktop-wallpaper-initialized/);
   assert.match(configSetCall?.[4] ?? "", /picture-uri-dark/);
@@ -2757,7 +2797,8 @@ test("incus provider applies guest display resolution through xrandr", async () 
 
   const vm: VmInstance = {
     id: "vm-0199",
-    name: "resolution-lab",
+    name: "resolution-lab-renamed",
+    wallpaperName: "daring-fox",
     templateId: "tpl-0001",
     provider: "incus",
     providerRef: instanceName,
@@ -2834,6 +2875,12 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /sleep-inactive-ac-timeout 'uint32 0'/);
   assert.match(execCall?.[5] ?? "", /sleep-inactive-battery-type 'nothing'/);
   assert.match(execCall?.[5] ?? "", /sleep-inactive-battery-timeout 'uint32 0'/);
+  assert.match(
+    execCall?.[5] ?? "",
+    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/daring-fox\.jpg/,
+  );
+  assert.match(execCall?.[5] ?? "", /download_remote_wallpaper\(\)/);
+  assert.match(execCall?.[5] ?? "", /resolve_first_boot_wallpaper_uri\(\)/);
   assert.match(execCall?.[5] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
   assert.match(execCall?.[5] ?? "", /desktop-wallpaper-initialized/);
   assert.match(execCall?.[5] ?? "", /picture-uri-dark/);
@@ -5236,6 +5283,7 @@ test("incus provider refresh reruns guest desktop bootstrap when VNC is still mi
   const session = await provider.refreshVmSession({
     id: "vm-0202",
     name: "refresh-bootstrap",
+    wallpaperName: "angry-puffin",
     templateId: "tpl-0001",
     provider: "incus",
     providerRef: instanceName,
@@ -5268,6 +5316,10 @@ test("incus provider refresh reruns guest desktop bootstrap when VNC is still mi
   );
 
   assert.ok(bootstrapExecCall);
+  assert.match(
+    bootstrapExecCall?.[5] ?? "",
+    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/angry-puffin\.jpg/,
+  );
   assert.equal(session?.display, "10.55.0.202:5900");
 });
 

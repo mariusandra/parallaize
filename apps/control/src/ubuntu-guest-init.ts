@@ -1,6 +1,9 @@
+import { slugify } from "../../../packages/shared/src/helpers.js";
+
 const DEFAULT_GUEST_USERNAME = "ubuntu";
 export const DEFAULT_GUEST_HOME = `/home/${DEFAULT_GUEST_USERNAME}`;
 const DEFAULT_GUEST_WALLPAPER = "Monument_valley_by_orbitelambda.jpg";
+const DEFAULT_GUEST_WALLPAPER_BASE_URL = "https://wallpapers.parallaize.com/24.04";
 
 export interface GuestInotifySettings {
   maxUserWatches: number;
@@ -17,12 +20,13 @@ WaylandEnable=false`;
 export function buildEnsureGuestDesktopBootstrapScript(
   port: number,
   strictStart: boolean,
+  vmName?: string,
 ): string {
   return `BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"
 BOOTSTRAP_SERVICE_FILE="/etc/systemd/system/parallaize-desktop-bootstrap.service"
 CURRENT_BOOTSTRAP="$(cat "$BOOTSTRAP_FILE" 2>/dev/null || true)"
 DESIRED_BOOTSTRAP="$(cat <<'PARALLAIZE_BOOTSTRAP_SCRIPT'
-${buildGuestDesktopBootstrapScript(port)}
+${buildGuestDesktopBootstrapScript(port, vmName)}
 PARALLAIZE_BOOTSTRAP_SCRIPT
 )"
 CURRENT_BOOTSTRAP_SERVICE="$(cat "$BOOTSTRAP_SERVICE_FILE" 2>/dev/null || true)"
@@ -33,7 +37,7 @@ PARALLAIZE_BOOTSTRAP_UNIT
 if [ "$CURRENT_BOOTSTRAP" != "$DESIRED_BOOTSTRAP" ] || [ "$CURRENT_BOOTSTRAP_SERVICE" != "$DESIRED_BOOTSTRAP_SERVICE" ]; then
   mkdir -p /usr/local/bin /etc/systemd/system
   cat > "$BOOTSTRAP_FILE" <<'PARALLAIZE_BOOTSTRAP_SCRIPT'
-${buildGuestDesktopBootstrapScript(port)}
+${buildGuestDesktopBootstrapScript(port, vmName)}
 PARALLAIZE_BOOTSTRAP_SCRIPT
   chmod 0755 "$BOOTSTRAP_FILE"
   cat > "$BOOTSTRAP_SERVICE_FILE" <<'PARALLAIZE_BOOTSTRAP_UNIT'
@@ -168,7 +172,8 @@ RestartSec=3
 WantedBy=multi-user.target`;
 }
 
-function buildGuestDesktopSessionSetupScript(): string {
+function buildGuestDesktopSessionSetupScript(vmName?: string): string {
+  const wallpaperUrl = buildGuestWallpaperUrl(vmName);
   return `#!/bin/sh
 set -eu
 DASH_TO_DOCK_SCHEMA="org.gnome.shell.extensions.dash-to-dock"
@@ -176,8 +181,12 @@ BACKGROUND_SCHEMA="org.gnome.desktop.background"
 SESSION_SCHEMA="org.gnome.desktop.session"
 POWER_SCHEMA="org.gnome.settings-daemon.plugins.power"
 WALLPAPER_NAME="${DEFAULT_GUEST_WALLPAPER}"
+WALLPAPER_REMOTE_URL="${wallpaperUrl ?? ""}"
 WALLPAPER_ROOTS="/usr/share/backgrounds /usr/share/gnome-background-properties"
 PARALLAIZE_CONFIG_DIR="\${XDG_CONFIG_HOME:-$HOME/.config}/parallaize"
+WALLPAPER_DOWNLOAD_DIR="$PARALLAIZE_CONFIG_DIR/wallpapers"
+WALLPAPER_DOWNLOAD_FILE="$WALLPAPER_DOWNLOAD_DIR/initial-wallpaper.jpg"
+WALLPAPER_DOWNLOAD_TEMP="$WALLPAPER_DOWNLOAD_DIR/initial-wallpaper.jpg.tmp"
 WALLPAPER_MARKER_FILE="$PARALLAIZE_CONFIG_DIR/desktop-wallpaper-initialized"
 set_dash_to_dock_defaults() {
   gsettings set "$DASH_TO_DOCK_SCHEMA" dock-position RIGHT >/dev/null 2>&1 || true
@@ -195,14 +204,48 @@ find_named_wallpaper() {
     | sort \
     | head -n 1
 }
+download_remote_wallpaper() {
+  if [ -z "$WALLPAPER_REMOTE_URL" ]; then
+    return 1
+  fi
+  mkdir -p "$WALLPAPER_DOWNLOAD_DIR"
+  rm -f "$WALLPAPER_DOWNLOAD_TEMP"
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL --connect-timeout 10 --max-time 60 "$WALLPAPER_REMOTE_URL" -o "$WALLPAPER_DOWNLOAD_TEMP"; then
+      mv "$WALLPAPER_DOWNLOAD_TEMP" "$WALLPAPER_DOWNLOAD_FILE"
+      printf '%s\\n' "$WALLPAPER_DOWNLOAD_FILE"
+      return 0
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -q -T 60 -O "$WALLPAPER_DOWNLOAD_TEMP" "$WALLPAPER_REMOTE_URL"; then
+      mv "$WALLPAPER_DOWNLOAD_TEMP" "$WALLPAPER_DOWNLOAD_FILE"
+      printf '%s\\n' "$WALLPAPER_DOWNLOAD_FILE"
+      return 0
+    fi
+  fi
+  rm -f "$WALLPAPER_DOWNLOAD_TEMP"
+  return 1
+}
+resolve_first_boot_wallpaper_uri() {
+  downloaded_wallpaper="$(download_remote_wallpaper || true)"
+  if [ -n "$downloaded_wallpaper" ] && [ -f "$downloaded_wallpaper" ]; then
+    printf 'file://%s\\n' "$downloaded_wallpaper"
+    return 0
+  fi
+  fallback_wallpaper="$(find_named_wallpaper || true)"
+  if [ -n "$fallback_wallpaper" ]; then
+    printf 'file://%s\\n' "$fallback_wallpaper"
+    return 0
+  fi
+  return 1
+}
 apply_first_boot_wallpaper() {
   if [ -f "$WALLPAPER_MARKER_FILE" ]; then
     return 0
   fi
   mkdir -p "$PARALLAIZE_CONFIG_DIR"
-  wallpaper="$(find_named_wallpaper || true)"
-  if [ -n "$wallpaper" ]; then
-    wallpaper_uri="file://$wallpaper"
+  wallpaper_uri="$(resolve_first_boot_wallpaper_uri || true)"
+  if [ -n "$wallpaper_uri" ]; then
     gsettings set "$BACKGROUND_SCHEMA" picture-uri "$wallpaper_uri" >/dev/null 2>&1 || true
     gsettings set "$BACKGROUND_SCHEMA" picture-uri-dark "$wallpaper_uri" >/dev/null 2>&1 || true
     gsettings set "$BACKGROUND_SCHEMA" picture-options zoom >/dev/null 2>&1 || true
@@ -243,7 +286,17 @@ LIBGL_ALWAYS_SOFTWARE=1
 GALLIUM_DRIVER=llvmpipe`;
 }
 
-function buildGuestDesktopBootstrapScript(port: number): string {
+export function buildGuestWallpaperUrl(vmName?: string): string | null {
+  const slug = typeof vmName === "string" ? slugify(vmName) : "";
+
+  if (!slug) {
+    return null;
+  }
+
+  return `${DEFAULT_GUEST_WALLPAPER_BASE_URL}/${slug}.jpg`;
+}
+
+function buildGuestDesktopBootstrapScript(port: number, vmName?: string): string {
   return `#!/bin/sh
 set -eu
 GDM_FILE="/etc/gdm3/custom.conf"
@@ -278,7 +331,7 @@ ENV
 )"
 CURRENT_SESSION_SETUP="$(cat "$SESSION_SETUP_FILE" 2>/dev/null || true)"
 DESIRED_SESSION_SETUP="$(cat <<'SCRIPT'
-${buildGuestDesktopSessionSetupScript()}
+${buildGuestDesktopSessionSetupScript(vmName)}
 SCRIPT
 )"
 CURRENT_SESSION_AUTOSTART="$(cat "$SESSION_AUTOSTART_FILE" 2>/dev/null || true)"
@@ -345,7 +398,7 @@ fi
 if [ "$CURRENT_SESSION_SETUP" != "$DESIRED_SESSION_SETUP" ]; then
   mkdir -p /usr/local/bin
   cat > "$SESSION_SETUP_FILE" <<'SCRIPT'
-${buildGuestDesktopSessionSetupScript()}
+${buildGuestDesktopSessionSetupScript(vmName)}
 SCRIPT
   chmod 0755 "$SESSION_SETUP_FILE"
 fi
@@ -404,6 +457,7 @@ fs.inotify.max_user_instances=${settings.maxUserInstances}`;
 export function buildGuestVncCloudInit(
   port: number,
   inotifySettings: GuestInotifySettings,
+  vmName?: string,
 ): string {
   return `#cloud-config
 write_files:
@@ -426,7 +480,7 @@ ${indentBlock(buildGuestRenderingEnvironmentConfig(), "      ")}
   - path: /usr/local/bin/parallaize-desktop-bootstrap
     permissions: '0755'
     content: |
-${indentBlock(buildGuestDesktopBootstrapScript(port), "      ")}
+${indentBlock(buildGuestDesktopBootstrapScript(port, vmName), "      ")}
   - path: /etc/systemd/system/parallaize-desktop-bootstrap.service
     permissions: '0644'
     content: |

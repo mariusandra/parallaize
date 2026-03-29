@@ -340,9 +340,10 @@ export class DesktopManager {
     let createdJob: ActionJob | null = null;
     let launchTemplate: EnvironmentTemplate | null = null;
     let launchSnapshot: Snapshot | null = null;
-    const requestedTemplateId = input.templateId?.trim() || null;
-    const requestedSnapshotId = input.snapshotId?.trim() || null;
-    const name = input.name.trim();
+  const requestedTemplateId = input.templateId?.trim() || null;
+  const requestedSnapshotId = input.snapshotId?.trim() || null;
+  const name = input.name.trim();
+  const wallpaperName = input.wallpaperName?.trim() || name;
 
     if ((requestedTemplateId === null) === (requestedSnapshotId === null)) {
       throw new Error("Exactly one launch source is required.");
@@ -381,6 +382,7 @@ export class DesktopManager {
           draft,
           template,
           name,
+          wallpaperName,
           input.resources,
           forwardedPorts,
           normalizeVmNetworkMode(input.networkMode ?? sourceVm?.networkMode ?? template.defaultNetworkMode),
@@ -426,6 +428,7 @@ export class DesktopManager {
         draft,
         template,
         name,
+        wallpaperName,
         input.resources,
         input.forwardedPorts ?? template.defaultForwardedPorts,
         normalizeVmNetworkMode(input.networkMode ?? template.defaultNetworkMode),
@@ -538,11 +541,13 @@ export class DesktopManager {
       const cloneName =
         input.name?.trim() ||
         `${source.name}-clone-${String(draft.sequence).padStart(2, "0")}`;
+      const wallpaperName = input.wallpaperName?.trim() || cloneName;
 
       const vm = buildVmRecord(
         draft,
         template,
         cloneName,
+        wallpaperName,
         cloneResources,
         source.forwardedPorts.map(copyForwardAsTemplatePort),
         normalizeVmNetworkMode(input.networkMode ?? source.networkMode ?? template.defaultNetworkMode),
@@ -786,11 +791,13 @@ export class DesktopManager {
       const name =
         input.name?.trim() ||
         `${source.name}-${slugify(snapshot.label) || "snapshot"}-${String(draft.sequence).padStart(2, "0")}`;
+      const wallpaperName = input.wallpaperName?.trim() || name;
 
       const vm = buildVmRecord(
         draft,
         template,
         name,
+        wallpaperName,
         snapshot.resources,
         source.forwardedPorts.map(copyForwardAsTemplatePort),
         normalizeVmNetworkMode(source.networkMode ?? template.defaultNetworkMode),
@@ -1865,6 +1872,7 @@ function buildVmRecord(
   state: AppState,
   template: EnvironmentTemplate,
   name: string,
+  wallpaperName: string,
   resources: CreateVmInput["resources"],
   forwardedPorts: TemplatePortForward[],
   networkMode: VmNetworkMode,
@@ -1878,6 +1886,7 @@ function buildVmRecord(
   return {
     id,
     name,
+    wallpaperName,
     templateId: template.id,
     provider,
     providerRef: buildProviderRef(id, name),

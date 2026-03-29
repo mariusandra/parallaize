@@ -109,6 +109,7 @@ type CreateSourceCategory =
 interface CreateDraft {
   launchSource: string;
   name: string;
+  wallpaperName: string;
   cpu: string;
   ramGb: string;
   diskGb: string;
@@ -260,11 +261,13 @@ interface VmLogsViewState {
 interface CloneVmDialogState {
   sourceVmId: string;
   sourceVmName: string;
+  wallpaperName: string;
 }
 
 const emptyCreateDraft: CreateDraft = {
   launchSource: "",
   name: "",
+  wallpaperName: "",
   cpu: "",
   ramGb: "",
   diskGb: "",
@@ -2071,12 +2074,14 @@ export function DashboardApp(): JSX.Element {
             ? await postJson<VmInstance>(`/api/vms/${selectedSource.sourceVm.id}/clone`, {
                 sourceVmId: selectedSource.sourceVm.id,
                 name: requestedName,
+                wallpaperName: createDraft.wallpaperName.trim() || requestedName,
                 resources: requestedResources,
                 networkMode: createDraft.networkMode,
                 shutdownSourceBeforeClone: createDraft.shutdownSourceBeforeClone,
               })
             : await postJson<VmInstance>("/api/vms", {
                 name: requestedName,
+                wallpaperName: createDraft.wallpaperName.trim() || requestedName,
                 resources: requestedResources,
                 networkMode: createDraft.networkMode,
                 ...(selectedSource.kind === "snapshot"
@@ -2133,6 +2138,8 @@ export function DashboardApp(): JSX.Element {
             ...current,
             name: value,
           };
+        case "wallpaperName":
+          return current;
         case "cpu":
           return {
             ...current,
@@ -2189,7 +2196,13 @@ export function DashboardApp(): JSX.Element {
     }
 
     setCreateDirty(false);
-    setCreateDraft(buildCreateDraftFromSource(selectedSource, createDraft.name));
+    setCreateDraft(
+      buildCreateDraftFromSource(
+        selectedSource,
+        createDraft.name,
+        createDraft.wallpaperName,
+      ),
+    );
   }
 
   function openCreateDialog(): void {
@@ -2942,11 +2955,13 @@ export function DashboardApp(): JSX.Element {
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
+    const wallpaperName = buildRandomVmName();
     setCloneVmDialog({
       sourceVmId: vm.id,
       sourceVmName: vm.name,
+      wallpaperName,
     });
-    setCloneVmDraft(buildRandomVmName());
+    setCloneVmDraft(wallpaperName);
   }
 
   async function handleCloneVmSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -2968,6 +2983,7 @@ export function DashboardApp(): JSX.Element {
         const clone = await postJson<VmInstance>(`/api/vms/${cloneVmDialog.sourceVmId}/clone`, {
           sourceVmId: cloneVmDialog.sourceVmId,
           name,
+          wallpaperName: cloneVmDialog.wallpaperName,
         });
         closeCloneVmDialog();
         setVmSidepanelCollapsed(clone.id, false);
@@ -7912,31 +7928,46 @@ function syncCreateDraft(
     return current;
   }
 
-  return buildCreateDraftFromSource(nextSource, current.name);
+  return buildCreateDraftFromSource(
+    nextSource,
+    current.name,
+    current.wallpaperName,
+  );
 }
 
 function buildCreateDraftFromSource(
   source: CreateSourceSelection,
   name = "",
+  wallpaperName = "",
 ): CreateDraft {
   if (source.kind === "snapshot" && source.snapshot) {
-    return buildCreateDraftFromSnapshot(source.snapshot, source.template, source.sourceVm, name);
+    return buildCreateDraftFromSnapshot(
+      source.snapshot,
+      source.template,
+      source.sourceVm,
+      name,
+      wallpaperName,
+    );
   }
 
   if (source.kind === "vm" && source.sourceVm) {
-    return buildCreateDraftFromVm(source.sourceVm, source.template, name);
+    return buildCreateDraftFromVm(source.sourceVm, source.template, name, wallpaperName);
   }
 
-  return buildCreateDraftFromTemplate(source.template, name);
+  return buildCreateDraftFromTemplate(source.template, name, wallpaperName);
 }
 
 function buildCreateDraftFromTemplate(
   template: EnvironmentTemplate,
   name = "",
+  wallpaperName = "",
 ): CreateDraft {
+  const nextWallpaperName = wallpaperName || buildRandomVmName();
+
   return {
     launchSource: buildCreateSourceValue("template", template.id),
-    name: name || buildRandomVmName(),
+    name: name || nextWallpaperName,
+    wallpaperName: nextWallpaperName,
     cpu: String(template.defaultResources.cpu),
     ramGb: formatRamDraftValue(template.defaultResources.ramMb),
     diskGb: String(template.defaultResources.diskGb),
@@ -7951,10 +7982,14 @@ function buildCreateDraftFromSnapshot(
   template: EnvironmentTemplate,
   sourceVm: VmInstance | null,
   name = "",
+  wallpaperName = "",
 ): CreateDraft {
+  const nextWallpaperName = wallpaperName || buildRandomVmName();
+
   return {
     launchSource: buildCreateSourceValue("snapshot", snapshot.id),
-    name: name || buildRandomVmName(),
+    name: name || nextWallpaperName,
+    wallpaperName: nextWallpaperName,
     cpu: String(snapshot.resources.cpu),
     ramGb: formatRamDraftValue(snapshot.resources.ramMb),
     diskGb: String(snapshot.resources.diskGb),
@@ -7968,10 +8003,14 @@ function buildCreateDraftFromVm(
   sourceVm: VmInstance,
   template: EnvironmentTemplate,
   name = "",
+  wallpaperName = "",
 ): CreateDraft {
+  const nextWallpaperName = wallpaperName || buildRandomVmName();
+
   return {
     launchSource: buildCreateSourceValue("vm", sourceVm.id),
-    name: name || buildRandomVmName(),
+    name: name || nextWallpaperName,
+    wallpaperName: nextWallpaperName,
     cpu: String(sourceVm.resources.cpu),
     ramGb: formatRamDraftValue(sourceVm.resources.ramMb),
     diskGb: String(sourceVm.resources.diskGb),

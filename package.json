@@ -12,6 +12,8 @@
     "start:mock": "PARALLAIZE_PROVIDER=mock PARALLAIZE_DATA_FILE=data/state.json node dist/apps/control/src/server.js",
     "dev": "pnpm build && pnpm start",
     "smoke:incus": "pnpm build && node dist/scripts/smoke-incus.js",
+    "wallpaper:test": "pnpm build && node dist/scripts/generate-wallpaper-tests.js",
+    "wallpaper:all": "pnpm build && node dist/scripts/generate-wallpaper-tests.js --all",
     "persistence:export": "pnpm build && node dist/apps/control/src/persistence-cli.js export",
     "persistence:import": "pnpm build && node dist/apps/control/src/persistence-cli.js import",
     "persistence:copy": "pnpm build && node dist/apps/control/src/persistence-cli.js copy",

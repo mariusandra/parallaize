@@ -152,6 +152,7 @@ export interface EnvironmentTemplate {
 export interface VmInstance {
   id: string;
   name: string;
+  wallpaperName?: string;
   templateId: string;
   provider: ProviderKind;
   providerRef: string;
@@ -353,6 +354,7 @@ export interface CreateVmInput {
   templateId?: string;
   snapshotId?: string;
   name: string;
+  wallpaperName?: string;
   resources: ResourceSpec;
   forwardedPorts?: TemplatePortForward[];
   networkMode?: VmNetworkMode;
@@ -362,6 +364,7 @@ export interface CreateVmInput {
 export interface CloneVmInput {
   sourceVmId: string;
   name?: string;
+  wallpaperName?: string;
   resources?: ResourceSpec;
   networkMode?: VmNetworkMode;
   shutdownSourceBeforeClone?: boolean;

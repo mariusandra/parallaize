@@ -203,6 +203,7 @@ export interface ProviderVmPowerState {
 
 interface ResolveSessionOptions {
   requireBootstrapRepairBeforeReady?: boolean;
+  guestWallpaperName?: string;
 }
 
 interface IncusCommandRunner {
@@ -853,7 +854,10 @@ class IncusProvider implements DesktopProvider {
       return session;
     }
 
-    const bootstrapped = await this.maybeEnsureGuestDesktopBootstrapAsync(vm.providerRef);
+    const bootstrapped = await this.maybeEnsureGuestDesktopBootstrapAsync(
+      vm.providerRef,
+      resolveGuestWallpaperName(vm),
+    );
 
     if (!bootstrapped) {
       return null;
@@ -958,7 +962,7 @@ class IncusProvider implements DesktopProvider {
       buildGuestVncCloudInit(this.guestVncPort, {
         maxUserWatches: this.guestInotifyMaxUserWatches,
         maxUserInstances: this.guestInotifyMaxUserInstances,
-      }),
+      }, resolveGuestWallpaperName(vm)),
     ]);
     emitCreateProgress("Preparing guest agent", VM_CREATE_GUEST_AGENT_PERCENT);
     await this.ensureAgentDeviceAsync(vm.providerRef);
@@ -971,6 +975,7 @@ class IncusProvider implements DesktopProvider {
     await this.runAsync(["start", vm.providerRef]);
 
     const session = await this.resolveSession(vm.providerRef, emitCreateProgress, {
+      guestWallpaperName: resolveGuestWallpaperName(vm),
       requireBootstrapRepairBeforeReady: shouldRequireGuestBootstrapRepairBeforeReady(template),
     });
     await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
@@ -1037,6 +1042,7 @@ class IncusProvider implements DesktopProvider {
     await this.runAsync(["start", targetVm.providerRef]);
 
     const session = await this.resolveSession(targetVm.providerRef, undefined, {
+      guestWallpaperName: resolveGuestWallpaperName(targetVm),
       // Clones boot from an existing disk image, so cloud-init will not rewrite stale guest services.
       requireBootstrapRepairBeforeReady: true,
     });
@@ -1076,7 +1082,9 @@ class IncusProvider implements DesktopProvider {
       }
     }
 
-    const session = await this.resolveSession(vm.providerRef);
+    const session = await this.resolveSession(vm.providerRef, undefined, {
+      guestWallpaperName: resolveGuestWallpaperName(vm),
+    });
     await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
 
     return {
@@ -1217,7 +1225,12 @@ class IncusProvider implements DesktopProvider {
       "--",
       "sh",
       "-lc",
-      buildSetDisplayResolutionScript(width, height, this.guestVncPort),
+      buildSetDisplayResolutionScript(
+        width,
+        height,
+        this.guestVncPort,
+        resolveGuestWallpaperName(vm),
+      ),
     ]);
   }
 
@@ -1269,6 +1282,7 @@ class IncusProvider implements DesktopProvider {
     await this.runAsync(["start", targetVm.providerRef]);
 
     const session = await this.resolveSession(targetVm.providerRef, undefined, {
+      guestWallpaperName: resolveGuestWallpaperName(targetVm),
       // Snapshot launches also reuse an existing filesystem and need an in-guest bootstrap repair.
       requireBootstrapRepairBeforeReady: true,
     });
@@ -1310,7 +1324,9 @@ class IncusProvider implements DesktopProvider {
 
     if (wasRunning) {
       await this.runAsync(["start", vm.providerRef]);
-      session = await this.resolveSession(vm.providerRef);
+      session = await this.resolveSession(vm.providerRef, undefined, {
+        guestWallpaperName: resolveGuestWallpaperName(vm),
+      });
       await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
     }
 
@@ -2139,7 +2155,10 @@ class IncusProvider implements DesktopProvider {
       address = addresses[0] ?? null;
 
       if (!bootstrapConfirmed) {
-        bootstrapConfirmed = await this.ensureGuestDesktopBootstrapAsync(instanceName);
+        bootstrapConfirmed = await this.ensureGuestDesktopBootstrapAsync(
+          instanceName,
+          options?.guestWallpaperName,
+        );
       }
 
       const session = await this.probeReachableSessionForAddresses(addresses);
@@ -2151,7 +2170,10 @@ class IncusProvider implements DesktopProvider {
       }
 
       if (bootstrapConfirmed) {
-        await this.maybeEnsureGuestDesktopBootstrapAsync(instanceName);
+        await this.maybeEnsureGuestDesktopBootstrapAsync(
+          instanceName,
+          options?.guestWallpaperName,
+        );
       }
 
       if (normalizeStatus(info.status ?? info.state?.status) !== "running") {
@@ -2172,7 +2194,10 @@ class IncusProvider implements DesktopProvider {
     return buildVncSession(address, this.guestVncPort, false);
   }
 
-  private async maybeEnsureGuestDesktopBootstrapAsync(instanceName: string): Promise<boolean> {
+  private async maybeEnsureGuestDesktopBootstrapAsync(
+    instanceName: string,
+    guestWallpaperName?: string,
+  ): Promise<boolean> {
     const now = Date.now();
     const lastAttemptAt = this.guestDesktopBootstrapAttemptAt.get(instanceName) ?? 0;
 
@@ -2181,17 +2206,24 @@ class IncusProvider implements DesktopProvider {
     }
 
     this.guestDesktopBootstrapAttemptAt.set(instanceName, now);
-    return this.ensureGuestDesktopBootstrapAsync(instanceName);
+    return this.ensureGuestDesktopBootstrapAsync(instanceName, guestWallpaperName);
   }
 
-  private async ensureGuestDesktopBootstrapAsync(instanceName: string): Promise<boolean> {
+  private async ensureGuestDesktopBootstrapAsync(
+    instanceName: string,
+    guestWallpaperName?: string,
+  ): Promise<boolean> {
     const args = [
       "exec",
       instanceName,
       "--",
       "sh",
       "-lc",
-      buildEnsureGuestDesktopBootstrapScript(this.guestVncPort, false),
+      buildEnsureGuestDesktopBootstrapScript(
+        this.guestVncPort,
+        false,
+        guestWallpaperName,
+      ),
     ];
     const result = await this.executeGuestExecWithRetryAsync(args);
 
@@ -3120,11 +3152,12 @@ function buildSetDisplayResolutionScript(
   width: number,
   height: number,
   port: number,
+  guestWallpaperName?: string,
 ): string {
   return `set -eu
 WIDTH=${width}
 HEIGHT=${height}
-${buildEnsureGuestDesktopBootstrapScript(port, true)}
+${buildEnsureGuestDesktopBootstrapScript(port, true, guestWallpaperName)}
 ${buildGuestDisplayDiscoveryScript()}
 ATTEMPT=0
 AUTH_FILE=""
@@ -3306,6 +3339,13 @@ function buildTemplateAlias(templateId: string): string {
 
 function buildTemplatePublisherInstanceName(templateId: string): string {
   return `parallaize-template-publish-${slugify(templateId)}-${Date.now().toString(36)}`;
+}
+
+function resolveGuestWallpaperName(vm: Pick<VmInstance, "name" | "wallpaperName">): string {
+  const wallpaperName =
+    typeof vm.wallpaperName === "string" ? vm.wallpaperName.trim() : "";
+
+  return wallpaperName || vm.name;
 }
 
 function describeTemplatePublishActivity(

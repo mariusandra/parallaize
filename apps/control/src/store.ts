@@ -475,6 +475,10 @@ function normalizeVm(vm: LegacyVm): VmInstance {
   return {
     id: vm.id ?? "vm-missing",
     name,
+    wallpaperName:
+      typeof vm.wallpaperName === "string" && vm.wallpaperName.trim()
+        ? vm.wallpaperName.trim()
+        : name,
     templateId: vm.templateId ?? "tpl-missing",
     provider,
     providerRef: vm.providerRef ?? buildProviderRef(vm.id ?? "vm-missing", name),
