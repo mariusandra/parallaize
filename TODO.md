@@ -1,10 +1,12 @@
 # Parallaize TODO
 
-Last updated: 2026-03-28
+Last updated: 2026-03-29
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
-Current focus: start the first trusted collection flow for untrusted AI workloads.
+Current focus: clean up the current codebase so new work lands behind smaller seams with better tests.
+
+Untrusted AI workflow work is deferred until the cleanup slices below are in materially better shape.
 
 Completed implementation details now live in:
 
@@ -14,19 +16,47 @@ Completed implementation details now live in:
 - `docs/postgres-operations.md`
 - `docs/packaging.md`
 - `docs/apt-repository.md`
+- `docs/refactor-map.md`
 
-## Current Slice: Untrusted AI Workloads
+## Current Slice: Maintainability Cleanup
 
-Target slice: run agents against Git-backed codebases inside untrusted worker VMs without handing write-capable upstream credentials to those guests.
+Goal: reduce file size, cross-cutting state, and duplicated helper logic in the control plane and dashboard before adding more feature surface.
 
-- [ ] Write down the threat model and trust boundaries: worker VMs are untrusted, workers get read-only repo access, collection is trusted, and only the collection side can push upstream.
-- [ ] Add repo-source configuration in the UI and API that stays provider-agnostic: read-only clone URL, optional trusted push URL, branch or ref, workspace path, and whether collection is enabled for that workspace.
-- [ ] Define the first collection architecture around a trusted control VM or service that pulls state from workers over SSH or `git bundle` and treats each handoff as a reviewable Git diff.
-- [ ] Automate SSH key and Git identity provisioning for that model, including worker read-only clone credentials, trusted collection access into workers, rotation, revocation, and UI visibility into what credentials exist.
-- [ ] Add a guest-side `Collect` action that packages the current repo state for handoff instead of attempting an in-guest push.
-- [ ] Build the trusted verification and sync-back path: queue submitted diffs, inspect and test them in a clean environment, approve or reject them, then push approved changes from the trusted side only.
-- [ ] Document fallback and recovery flows: manual patch or bundle export, abandoned-worker collection, upstream branch drift, conflicts, and collection-service outage handling.
+### Block 1: Control Plane Decomposition
 
-## Backlog
+- [x] Extract auth/session handling from `apps/control/src/server.ts` into `apps/control/src/server-auth.ts`.
+- [x] Extract generic HTTP/static/download/SSE helpers from `apps/control/src/server.ts` into `apps/control/src/server-http.ts`.
+- [x] Extract latest-release parsing/cache logic from `apps/control/src/server.ts` into `apps/control/src/server-release.ts`.
+- [ ] Extract event stream and VM log-tail lifecycle code out of `apps/control/src/server.ts`.
+- [ ] Split `apps/control/src/server.ts` route handling into grouped route modules.
+- [ ] Split `apps/control/src/manager.ts` into read models, VM/template/snapshot commands, and background orchestration workers.
+- [ ] Break `apps/control/src/providers.ts` into provider contracts, mock provider, Incus lifecycle, guest inspection, networking, and streaming helpers.
+- [ ] Separate `apps/control/src/store.ts` into store interface, normalization/migration helpers, JSON persistence, and PostgreSQL persistence.
+- [x] Add targeted unit coverage for extracted control-plane helpers so behavior does not depend only on giant end-to-end suites.
 
-- [ ] Try Selkies as an alternative browser desktop transport to the current VNC/noVNC path, with focus on latency, reliability, and deployment complexity.
+### Block 2: Dashboard Decomposition
+
+- [x] Extract create/template workflow helpers, VM browser/touched-file formatting, job/progress selectors, and health/status label helpers out of `apps/web/src/DashboardApp.tsx` into `apps/web/src/dashboardHelpers.ts`.
+- [x] Extract leaf dashboard primitives from `apps/web/src/DashboardApp.tsx` into `apps/web/src/dashboardPrimitives.tsx`.
+- [ ] Move app shell, overview, workspace stage, sidepanel sections, and dialog surfaces into focused components.
+- [ ] Pull browser-only persistence, fetch/SSE plumbing, fullscreen handling, and resolution-control coordination into dedicated hooks/services.
+- [ ] Split `apps/web/src/styles.css` into tokens, shell layout, workspace layout, dialogs, sidepanel, and feature-local sections/files.
+- [x] Add targeted tests around extracted browser helpers so the view-model logic is characterized outside the monolith component.
+
+### Block 3: Guardrails And Characterization
+
+- [ ] Keep `docs/refactor-map.md` aligned with live ownership seams, file budgets, and the next extraction targets.
+- [ ] Expand `tests/layering.test.ts` and neighboring guardrail tests so runtime boundaries stay enforced while files move.
+- [ ] Remove dead helpers and duplicate formatting/state logic as extracted modules become the single source of truth.
+- [ ] Keep `TODO.md` current whenever scope changes or a major cleanup slice lands.
+
+### Block 4: Scripts, Packaging, And Docs Cleanup
+
+- [ ] Normalize responsibilities under `scripts/` and trim duplicated packaging/config logic between `infra/` and `packaging/`.
+- [ ] Audit README and operational docs for stale references after refactors land.
+- [ ] Keep `pnpm build`, `pnpm test`, and `pnpm start` green after every verified cleanup slice.
+
+## Deferred Until Cleanup Lands
+
+- [ ] Resume the trusted/untrusted collection architecture only after the control plane and dashboard seams above are smaller and better tested.
+- [ ] Evaluate Selkies as an alternative browser desktop transport once the current runtime boundaries are cleaner.
