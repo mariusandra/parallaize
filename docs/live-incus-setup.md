@@ -202,7 +202,7 @@ curl http://127.0.0.1:3000/api/health
 curl http://127.0.0.1:3000/api/summary
 ```
 
-Then create a VM from `tpl-0001` in the UI.
+Then create a VM from the seeded Ubuntu 24.04 template (`tpl-0001`, shown as `Ubuntu Agent Forge`) in the UI.
 
 What should happen:
 
@@ -210,6 +210,7 @@ What should happen:
 - Parallaize injects cloud-init to install and start `x11vnc`.
 - The guest gets an address on the Incus bridge.
 - The browser VNC path becomes available through the app and through Caddy if Caddy is running.
+- After the guest finishes first-boot setup, the VNC session renders a desktop frame that is not pure black.
 
 ## Optional smoke test
 
@@ -219,9 +220,7 @@ Once the control plane is up in Incus mode and Caddy is running on `:8080`, you 
 flox activate -d . -- pnpm smoke:incus
 ```
 
-This smoke test creates a throwaway VM, validates the VNC bridge, injects a guest HTTP service, verifies Caddy forwarding, and cleans the VM up afterward unless told not to.
-
-It assumes the current user can run `sudo` for the temporary guest-disk mount operations.
+This smoke test creates a throwaway VM from the seeded Ubuntu 24.04 launch source by default, validates the VNC bridge, waits for a non-black desktop framebuffer, installs a guest HTTP service, verifies Caddy forwarding, and cleans the VM up afterward unless told not to.
 
 Notes from the live PostgreSQL-backed run on March 26, 2026:
 

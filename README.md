@@ -117,7 +117,8 @@ flox activate -d . -- pnpm test
 flox activate -d . -- pnpm smoke:incus
 ```
 
-`pnpm smoke:incus` is the live end-to-end path. It expects the control plane to be running in Incus mode, Caddy to be serving on `:8080`, and the current user to have `sudo` access for temporary guest-disk mount operations.
+`pnpm smoke:incus` is the live end-to-end path. It expects the control plane to be running in Incus mode and Caddy to be serving on `:8080`.
+It builds the current tree first, launches from the seeded Ubuntu 24.04 desktop source by default, and waits for both a working VNC bridge and a non-black guest framebuffer before passing.
 
 ## Packaging
 

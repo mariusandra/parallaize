@@ -18,7 +18,7 @@ const bundles = [
     outputFile: join(outputDir, "persistence-cli.mjs"),
   },
   {
-    entryPoint: join(root, "scripts", "smoke-incus.mjs"),
+    entryPoint: join(root, "scripts", "smoke-incus.ts"),
     outputFile: join(outputDir, "smoke-incus.mjs"),
   },
 ];

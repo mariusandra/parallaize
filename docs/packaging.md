@@ -262,7 +262,7 @@ The clean Ubuntu 24.04 `amd64` packaged-host replay now has a checked-in validat
 flox activate -d . -- pnpm package:validate:qemu:amd64
 ```
 
-That flow boots a fresh Ubuntu 24.04 cloud image under QEMU, installs Caddy plus the generated `.deb`, confirms the guest is using distro-managed Incus instead of a mixed daemon model, waits for an acceptable packaged `/api/health` result, starts the packaged Caddy unit, and runs the packaged `parallaize-smoke-incus` path under `sudo` inside the guest.
+That flow boots a fresh Ubuntu 24.04 cloud image under QEMU, installs Caddy plus the generated `.deb`, confirms the guest is using distro-managed Incus instead of a mixed daemon model, waits for an acceptable packaged `/api/health` result, starts the packaged Caddy unit, and runs the packaged `parallaize-smoke-incus` path under `sudo` inside the guest. The packaged smoke path now waits for a non-black guest framebuffer over VNC instead of stopping at the initial `RFB` handshake.
 
 Validation summaries land under `.artifacts/package-validation/amd64-qemu-*/summary.json`.
 
@@ -285,7 +285,7 @@ As of March 27, 2026, the supported Ubuntu 24.04 `amd64` packaged path has been 
 The clean QEMU-host replay installed `parallaize_0.1.10-1_amd64.deb`, kept `incus.socket` active and enabled, exposed `/usr/libexec/incus/incusd` as the only `incusd` process, reported provider `hostStatus=ready`, started the packaged Caddy unit, and passed the packaged smoke workflow end to end:
 
 - nested VM create
-- browser VNC through Caddy
+- browser VNC through Caddy with a non-black desktop frame
 - guest HTTP injection
 - VM restart
 - guest HTTP reachability
