@@ -1,3 +1,4 @@
+import { normalizeVmNetworkMode } from "../../../packages/shared/src/helpers.js";
 import type {
   ActionJob,
   VmDetail,
@@ -151,10 +152,6 @@ function sessionRank(session: VmInstance["session"] | null | undefined): number 
   }
 
   return 1;
-}
-
-function normalizeVmNetworkMode(networkMode: VmInstance["networkMode"] | undefined): string {
-  return networkMode ?? "default";
 }
 
 function sameStringArray(left: readonly string[], right: readonly string[]): boolean {

@@ -34,6 +34,8 @@ The staged install layout is:
 - `/etc/parallaize/parallaize.env`: packaged runtime env file
 - `/etc/parallaize/Caddyfile`: packaged Caddy config
 
+The package build now derives `/etc/parallaize/Caddyfile` from `infra/Caddyfile`, replacing the source-checkout bind and proxy ports with `${PARALLAIZE_CADDY_PORT}` and `${PORT}` placeholders so the two route maps do not drift.
+
 ## Host Dependencies
 
 Bundled inside the package:
@@ -75,7 +77,7 @@ The package build flow does this:
 1. Builds the normal app artifacts.
 2. Bundles the server, persistence CLI, and smoke CLI into package-specific runtime bundles.
 3. Downloads and verifies the matching official Node tarball for the target architecture.
-4. Stages the install tree.
+4. Stages the install tree, including the packaged Caddyfile rendered from `infra/Caddyfile`.
 5. Emits `.deb` via `dpkg-deb`.
 
 ## GitHub Release Workflow

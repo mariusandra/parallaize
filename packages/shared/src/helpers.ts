@@ -3,6 +3,7 @@ import type {
   EnvironmentTemplate,
   ResourceSpec,
   VmInstance,
+  VmNetworkMode,
 } from "./types.js";
 
 export function formatResources(resources: ResourceSpec): string {
@@ -15,6 +16,18 @@ export function formatRam(ramMb: number): string {
   }
 
   return `${ramMb} MB`;
+}
+
+export function normalizeVmNetworkMode(
+  mode: VmNetworkMode | null | undefined,
+): VmNetworkMode {
+  return mode === "dmz" ? "dmz" : "default";
+}
+
+export function describeVmNetworkMode(
+  mode: VmNetworkMode | null | undefined,
+): string {
+  return normalizeVmNetworkMode(mode) === "dmz" ? "dmz" : "default bridge";
 }
 
 export function minimumCreateDiskGb(

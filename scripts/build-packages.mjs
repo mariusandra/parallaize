@@ -5,8 +5,13 @@ import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import process from "node:process";
 
+import { renderPackagedCaddyfile } from "./package-assets.mjs";
+
 const root = resolve(process.cwd());
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+const packagedCaddyfile = renderPackagedCaddyfile(
+  await readFile(join(root, "infra", "Caddyfile"), "utf8"),
+);
 const args = parseArgs(process.argv.slice(2));
 
 const appName = "parallaize";
@@ -210,9 +215,9 @@ async function stageRootFilesystem({
     join(root, "packaging", "config", "parallaize.env"),
     join(rootfsDir, "etc", appName, "parallaize.env"),
   );
-  await copyFileWithMode(
-    join(root, "packaging", "config", "Caddyfile"),
+  await writeTextFile(
     join(rootfsDir, "etc", appName, "Caddyfile"),
+    packagedCaddyfile,
   );
 
   await copyFileWithMode(
@@ -438,7 +443,8 @@ function splitCsv(value) {
     .filter(Boolean);
 }
 
-async function writeTextFile(path, contents) {
+async function writeTextFile(path, contents, mode = 0o644) {
   await mkdir(join(path, ".."), { recursive: true });
   await writeFile(path, contents, "utf8");
+  await chmod(path, mode);
 }

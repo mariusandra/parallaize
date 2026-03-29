@@ -22,7 +22,9 @@ It is built around a simple loop: launch a VM, configure it the way you want, th
 - `apps/control`: Node.js control plane, Incus integration, and persistence CLI
 - `apps/web`: React dashboard and noVNC browser client
 - `packages/shared`: shared API and domain types
-- `infra/`: example env, Caddy config, PostgreSQL compose file, and systemd assets
+- `scripts/`: build, smoke, package, and release entrypoints
+- `packaging/`: package-only launchers, systemd units, maintainer scripts, and config defaults
+- `infra/`: source-checkout env, local Caddy config, PostgreSQL compose file, and source-run systemd examples
 - `docs/`: deeper setup and packaging notes
 
 ## Quick Start
@@ -185,6 +187,8 @@ flox activate -d . -- pnpm package:release
 ```
 
 See [docs/packaging.md](docs/packaging.md) for package contents and host-install layout, and [docs/apt-repository.md](docs/apt-repository.md) for the signed Ubuntu 24.04 APT source and key flow.
+
+The packaged `/etc/parallaize/Caddyfile` is generated from [infra/Caddyfile](infra/Caddyfile) during the package build so the source-checkout and packaged route maps stay aligned.
 
 On Hetzner dedicated hosts, prefer creating the Incus-backed LVM disk or volume group from the Hetzner rescue system before installing Ubuntu. That lets Parallaize target a real `lvm` pool instead of relying on the packaged blank-host storage fallback.
 

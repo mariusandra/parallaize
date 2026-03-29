@@ -1,4 +1,7 @@
-import { slugify } from "../../../packages/shared/src/helpers.js";
+import {
+  normalizeVmNetworkMode,
+  slugify,
+} from "../../../packages/shared/src/helpers.js";
 import type {
   ActionJob,
   AdminSessionRecord,
@@ -577,10 +580,6 @@ function normalizeSession(
 
 function normalizeProviderKind(value: VmInstance["provider"] | undefined): ProviderKind {
   return value === "incus" ? "incus" : "mock";
-}
-
-function normalizeVmNetworkMode(value: VmNetworkMode | undefined): VmNetworkMode {
-  return value === "dmz" ? "dmz" : "default";
 }
 
 function normalizeTemplateForwardedPorts(

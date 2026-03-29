@@ -92,18 +92,15 @@ import {
   buildVmFileBrowserBreadcrumbs,
   buildVmFileBrowserEntryTitle,
   buildVmFileDownloadHref,
-  describeVmNetworkMode,
   desktopFallbackBadge,
   desktopFallbackMessage,
   findProminentJob,
   formatActiveJobTiming,
-  formatJobKindLabel,
   formatRamDraftValue,
   formatTemplateProvenanceKindLabel,
   formatTouchedFileRowMeta,
   formatVmFileBrowserKindToken,
   formatVmFileBrowserRowMeta,
-  formatVmNetworkModeLabel,
   getVmDesktopBootState,
   incusStorageChipLabel,
   incusStoragePoolLabel,
@@ -139,29 +136,11 @@ import {
   type TemplateCloneDraft,
   type TemplateEditDraft,
 } from "./dashboardHelpers.js";
-import {
-  CloneVmDialog,
-  CreateVmDialog,
-  RenameDialog,
-  TemplateCloneDialog,
-  TemplateEditDialog,
-  VmLogsDialog,
-} from "./dashboardDialogs.js";
-import { LoadingShell, LoginShell, MiniStat } from "./dashboardPrimitives.js";
-import { RailCreateIcon, RailHomeIcon, RailSettingsIcon, VmTile } from "./dashboardRail.js";
-import {
-  formatRamUsage,
-  formatTelemetryPercent,
-  joinClassNames,
-  PortalPopover,
-  statusClassName,
-  TelemetryPanel,
-} from "./dashboardUi.js";
-import {
-  OverviewSidepanel,
-  RailResizeHandle,
-  WorkspaceSidepanel,
-} from "./dashboardSidepanel.js";
+import { DashboardDialogsHost } from "./dashboardDialogsHost.js";
+import { DashboardNoticeStack } from "./dashboardNoticeStack.js";
+import { LoadingShell, LoginShell } from "./dashboardPrimitives.js";
+import { formatTelemetryPercent, joinClassNames } from "./dashboardUi.js";
+import { OverviewSidepanel, WorkspaceSidepanel } from "./dashboardSidepanel.js";
 import {
   EmptyWorkspaceStage,
   WorkspaceBootSurface,
@@ -169,6 +148,7 @@ import {
   WorkspaceFallbackSurface,
   WorkspaceLogsSurface,
 } from "./dashboardStage.js";
+import { DashboardWorkspaceRail } from "./dashboardWorkspaceRail.js";
 import {
   buildDesktopResolutionRequestKey,
   buildDesktopResolutionTarget,
@@ -182,7 +162,6 @@ import {
   defaultDesktopResolutionPreference,
   formatViewportScale,
   liveCaptureWarningCopy,
-  noticeToneClassName,
   normalizeDesktopResolutionPreference,
   normalizeGuestDisplayResolution,
   railExpandedMinWidth,
@@ -259,6 +238,7 @@ import {
   openVmLogsEventSource,
   postJson,
 } from "./dashboardTransport.js";
+import { createDashboardAppMutations } from "./dashboardAppMutations.js";
 
 const appVersionLabel = __PARALLAIZE_VERSION__;
 const githubReleaseTagBaseUrl = "https://github.com/mariusandra/parallaize/releases/tag/v";
@@ -613,6 +593,141 @@ export function DashboardApp(): JSX.Element {
         gridTemplateColumns: `${railWidth}px minmax(0, 1fr) ${displayedSidepanelWidth}px`,
       } satisfies CSSProperties)
     : undefined;
+
+  const {
+    activeCpuThresholdForVm,
+    applyResolutionMode,
+    applyViewportScalePreference,
+    closeCloneVmDialog,
+    closeRenameDialog,
+    closeTemplateCloneDialog,
+    closeTemplateEditDialog,
+    closeVmLogsDialog,
+    handleClone,
+    handleCloneVmSubmit,
+    handleCreate,
+    handleCreateField,
+    handleCreateShutdownBeforeCloneChange,
+    handleCreateSourceChange,
+    handleDelete,
+    handleDeleteTemplate,
+    handleEditTemplateSubmit,
+    handleLogout,
+    handleRailResizeKeyDown,
+    handleRailResizeStart,
+    handleRenameSubmit,
+    handleRenameTemplate,
+    handleRenameVm,
+    handleSetActiveCpuThreshold,
+    handleSidepanelClosedResizeStart,
+    handleSidepanelResizeKeyDown,
+    handleSidepanelResizeStart,
+    handleSnapshot,
+    handleTemplateCloneField,
+    handleTemplateCloneSubmit,
+    handleTemplateEditField,
+    handleVmAction,
+    handleVmStripDragOver,
+    handleVmStripDrop,
+    handleVmTileDragEnd,
+    handleVmTileDragOver,
+    handleVmTileDragStart,
+    handleVmTileDrop,
+    inspectVm,
+    openCreateDialog,
+    openCreateDialogForTemplate,
+    openHomepage,
+    openTemplateCloneDialog,
+    openTemplateEditDialog,
+    openVmLogsDialog,
+    refreshDetail,
+    refreshHealth,
+    refreshSummary,
+    refreshVmFileBrowserSnapshot,
+    refreshVmLogsDialog,
+    refreshVmTouchedFilesSnapshot,
+    requireLogin,
+    runMutation,
+    selectVm,
+    setCurrentSidepanelCollapsed,
+    setVmDesktopResolutionPreference,
+    setVmSidepanelCollapsed,
+    toggleFullscreen,
+  } = createDashboardAppMutations({
+    summary,
+    displayedVms,
+    createDraft,
+    cloneVmDialog,
+    cloneVmDraft,
+    renameDialog,
+    renameDraft,
+    templateEditDraft,
+    templateCloneDraft,
+    activeCpuThresholdsByVm,
+    detail,
+    draggedVmId,
+    vmRailOrderIds,
+    vmReorderBusy,
+    wideShellLayout,
+    compactSidepanelLayout,
+    railWidth,
+    displayedSidepanelWidth,
+    viewportWidth,
+    appliedDesktopViewportScale,
+    appliedDesktopWidth,
+    appliedDesktopHeight,
+    resolutionDraft,
+    emptyCreateDraft,
+    selectedVmIdRef,
+    lastResolutionRequestKeyRef,
+    railRef,
+    railResizeRef,
+    sidepanelRef,
+    sidepanelResizeRef,
+    vmDragDropCommittedRef,
+    setSummary,
+    setAuthState,
+    setHealth,
+    setDetail,
+    setVmFileBrowser,
+    setVmFileBrowserError,
+    setVmFileBrowserLoading,
+    setVmTouchedFiles,
+    setVmTouchedFilesError,
+    setVmTouchedFilesLoading,
+    setVmDiskUsage,
+    setVmDiskUsageError,
+    setVmDiskUsageLoading,
+    setNotice,
+    setBusyLabel,
+    setCreateDirty,
+    setCreateDraft,
+    setShowCreateDialog,
+    setCloneVmDialog,
+    setCloneVmDraft,
+    setRenameDialog,
+    setRenameDraft,
+    setVmLogsDialog,
+    setVmLogsRefreshTick,
+    setTemplateCloneDraft,
+    setTemplateEditDraft,
+    setShellMenuOpen,
+    setOpenVmMenuId,
+    setOpenTemplateMenuId,
+    setSelectedVmId,
+    setSidepanelCollapsedByVm,
+    setOverviewSidepanelCollapsed,
+    setDesktopResolutionByVm,
+    setResolutionDraft,
+    setActiveCpuThresholdsByVm,
+    setVmRailOrderIds,
+    setDraggedVmId,
+    setVmReorderBusy,
+    setRailResizeActive,
+    setRailWidthPreference,
+    setSidepanelResizeActive,
+    setSidepanelWidthPreference,
+  });
 
   function flushQueuedRailWidthPreference(): void {
     if (railResizeFrameRef.current !== null) {
@@ -1893,1170 +2008,6 @@ export function DashboardApp(): JSX.Element {
     };
   }, []);
 
-  async function refreshSummary(): Promise<DashboardSummary> {
-    const nextSummary = await fetchJson<DashboardSummary>("/api/summary");
-    startTransition(() => {
-      setSummary(nextSummary);
-    });
-    setAuthState("ready");
-    return nextSummary;
-  }
-
-  async function refreshHealth(silent: boolean): Promise<HealthStatus | null> {
-    try {
-      const nextHealth = await fetchJson<HealthStatus>("/api/health");
-      setHealth(nextHealth);
-      return nextHealth;
-    } catch (error) {
-      if (error instanceof AuthRequiredError) {
-        requireLogin();
-        return null;
-      }
-
-      if (!silent) {
-        setNotice({
-          tone: "error",
-          message: errorMessage(error),
-        });
-      }
-
-      return null;
-    }
-  }
-
-  async function refreshDetail(vmId: string): Promise<void> {
-    setDetail(await fetchJson<VmDetail>(`/api/vms/${vmId}`));
-  }
-
-  async function refreshVmFileBrowserSnapshot(
-    vmId: string,
-    path?: string,
-  ): Promise<void> {
-    setVmFileBrowserLoading(true);
-    setVmFileBrowserError(null);
-
-    try {
-      const query = path && path.trim().length > 0
-        ? `?path=${encodeURIComponent(path)}`
-        : "";
-      const snapshot = await fetchJson<VmFileBrowserSnapshot>(
-        `/api/vms/${vmId}/files${query}`,
-      );
-      setVmFileBrowser(snapshot);
-    } catch (error) {
-      if (error instanceof AuthRequiredError) {
-        requireLogin();
-        return;
-      }
-
-      setVmFileBrowserError(errorMessage(error));
-    } finally {
-      setVmFileBrowserLoading(false);
-    }
-  }
-
-  async function refreshVmTouchedFilesSnapshot(vmId: string): Promise<void> {
-    setVmTouchedFilesLoading(true);
-    setVmTouchedFilesError(null);
-
-    try {
-      const snapshot = await fetchJson<VmTouchedFilesSnapshot>(`/api/vms/${vmId}/files/touched`);
-      setVmTouchedFiles(snapshot);
-    } catch (error) {
-      if (error instanceof AuthRequiredError) {
-        requireLogin();
-        return;
-      }
-
-      setVmTouchedFilesError(errorMessage(error));
-    } finally {
-      setVmTouchedFilesLoading(false);
-    }
-  }
-
-  function requireLogin(): void {
-    setAuthState("required");
-    setHealth(null);
-    setSummary(null);
-    setDetail(null);
-    setVmFileBrowser(null);
-    setVmFileBrowserError(null);
-    setVmFileBrowserLoading(false);
-    setVmTouchedFiles(null);
-    setVmTouchedFilesError(null);
-    setVmTouchedFilesLoading(false);
-    setVmDiskUsage(null);
-    setVmDiskUsageError(null);
-    setVmDiskUsageLoading(false);
-    setNotice(null);
-    setBusyLabel(null);
-    setShellMenuOpen(false);
-    setOpenVmMenuId(null);
-    setOpenTemplateMenuId(null);
-    setVmLogsDialog(null);
-  }
-
-  async function handleLogout(): Promise<void> {
-    try {
-      await postJson<AuthStatus>("/api/auth/logout", {});
-    } finally {
-      requireLogin();
-    }
-  }
-
-  async function runMutation(
-    label: string,
-    task: () => Promise<void>,
-    successMessage?: string,
-  ): Promise<void> {
-    setBusyLabel(label);
-
-    try {
-      await task();
-      if (successMessage) {
-        setNotice({
-          tone: "success",
-          message: successMessage,
-        });
-      }
-    } catch (error) {
-      if (error instanceof AuthRequiredError) {
-        requireLogin();
-        return;
-      }
-
-      setNotice({
-        tone: "error",
-        message: errorMessage(error),
-      });
-    } finally {
-      setBusyLabel(null);
-    }
-  }
-
-  async function handleCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-
-    const selectedSource =
-      summary
-        ? resolveCreateSourceSelection(
-            summary.templates,
-            summary.snapshots,
-            summary.vms,
-            createDraft.launchSource,
-          )
-        : null;
-    const createValidationError = buildCreateLaunchValidationError(
-      selectedSource,
-      createDraft.diskGb,
-    );
-
-    if (!selectedSource) {
-      setNotice({
-        tone: "error",
-        message: "Choose a template, snapshot, or existing VM before launching a workspace.",
-      });
-      return;
-    }
-
-    if (createValidationError) {
-      setNotice({
-        tone: "error",
-        message: createValidationError,
-      });
-      return;
-    }
-
-    const requestedName = createDraft.name.trim();
-    const requestedResources = {
-      cpu: Number(createDraft.cpu),
-      ramMb: parseRamDraftValue(createDraft.ramGb),
-      diskGb: Number(createDraft.diskGb),
-    };
-    const pendingLabel =
-      requestedName ||
-      (selectedSource.kind === "vm" && selectedSource.sourceVm
-        ? `${selectedSource.sourceVm.name}-clone`
-        : "workspace");
-
-    await runMutation(
-      `Creating ${pendingLabel}`,
-      async () => {
-        const createdVm =
-          selectedSource.kind === "vm" && selectedSource.sourceVm
-            ? await postJson<VmInstance>(`/api/vms/${selectedSource.sourceVm.id}/clone`, {
-                sourceVmId: selectedSource.sourceVm.id,
-                name: requestedName,
-                wallpaperName: createDraft.wallpaperName.trim() || requestedName,
-                resources: requestedResources,
-                networkMode: createDraft.networkMode,
-                shutdownSourceBeforeClone: createDraft.shutdownSourceBeforeClone,
-              })
-            : await postJson<VmInstance>("/api/vms", {
-                name: requestedName,
-                wallpaperName: createDraft.wallpaperName.trim() || requestedName,
-                resources: requestedResources,
-                networkMode: createDraft.networkMode,
-                ...(selectedSource.kind === "snapshot"
-                  ? { snapshotId: selectedSource.snapshot?.id }
-                  : {
-                      templateId: selectedSource.template.id,
-                      initCommands: parseInitCommandsDraft(createDraft.initCommands),
-                    }),
-              } satisfies CreateVmInput);
-        setCreateDirty(false);
-        if (selectedSource.kind === "snapshot" && selectedSource.snapshot) {
-          setCreateDraft(
-            buildCreateDraftFromSnapshot(
-              selectedSource.snapshot,
-              selectedSource.template,
-              selectedSource.sourceVm,
-            ),
-          );
-        } else if (selectedSource.kind === "vm" && selectedSource.sourceVm) {
-          setCreateDraft(
-            buildCreateDraftFromVm(
-              selectedSource.sourceVm,
-              selectedSource.template,
-            ),
-          );
-        } else {
-          setCreateDraft(buildCreateDraftFromTemplate(selectedSource.template));
-        }
-        setVmSidepanelCollapsed(createdVm.id, false);
-        setSelectedVmId(createdVm.id);
-        setShowCreateDialog(false);
-        await refreshSummary();
-        await refreshDetail(createdVm.id);
-      },
-      selectedSource.kind === "snapshot"
-        ? `Queued snapshot launch for ${pendingLabel}.`
-        : selectedSource.kind === "vm"
-          ? `Queued clone for ${pendingLabel}.`
-          : `Queued create for ${pendingLabel}.`,
-    );
-  }
-
-  function handleCreateField(field: keyof CreateDraft, value: string): void {
-    setCreateDirty(true);
-    setCreateDraft((current) => {
-      switch (field) {
-        case "launchSource":
-          return {
-            ...current,
-            launchSource: value,
-          };
-        case "name":
-          return {
-            ...current,
-            name: value,
-          };
-        case "wallpaperName":
-          return current;
-        case "cpu":
-          return {
-            ...current,
-            cpu: value,
-          };
-        case "ramGb":
-          return {
-            ...current,
-            ramGb: value,
-          };
-        case "diskGb":
-          return {
-            ...current,
-            diskGb: value,
-          };
-        case "networkMode":
-          return {
-            ...current,
-            networkMode: normalizeVmNetworkMode(value),
-          };
-        case "initCommands":
-          return {
-            ...current,
-            initCommands: value,
-          };
-        case "shutdownSourceBeforeClone":
-          return current;
-      }
-    });
-  }
-
-  function handleCreateShutdownBeforeCloneChange(checked: boolean): void {
-    setCreateDirty(true);
-    setCreateDraft((current) => ({
-      ...current,
-      shutdownSourceBeforeClone: checked,
-    }));
-  }
-
-  function handleCreateSourceChange(event: ChangeEvent<HTMLSelectElement>): void {
-    if (!summary) {
-      return;
-    }
-
-    const selectedSource = resolveCreateSourceSelection(
-      summary.templates,
-      summary.snapshots,
-      summary.vms,
-      event.target.value,
-    );
-
-    if (!selectedSource) {
-      return;
-    }
-
-    setCreateDirty(false);
-    setCreateDraft(
-      buildCreateDraftFromSource(
-        selectedSource,
-        createDraft.name,
-        createDraft.wallpaperName,
-      ),
-    );
-  }
-
-  function openCreateDialog(): void {
-    const nextSource = summary
-      ? resolveCreateSourceSelection(
-          summary.templates,
-          summary.snapshots,
-          summary.vms,
-          createDraft.launchSource,
-        ) ?? firstCreateSourceSelection(summary.templates, summary.snapshots, summary.vms)
-      : null;
-
-    setCreateDirty(false);
-    setCreateDraft(nextSource ? buildCreateDraftFromSource(nextSource) : emptyCreateDraft);
-    setOpenTemplateMenuId(null);
-    setOpenVmMenuId(null);
-    setShellMenuOpen(false);
-    setShowCreateDialog(true);
-  }
-
-  function openCreateDialogForTemplate(template: EnvironmentTemplate): void {
-    setCreateDirty(false);
-    setCreateDraft(buildCreateDraftFromTemplate(template));
-    setOpenTemplateMenuId(null);
-    setOpenVmMenuId(null);
-    setShellMenuOpen(false);
-    setShowCreateDialog(true);
-  }
-
-  function openTemplateCloneDialog(template: EnvironmentTemplate): void {
-    setOpenTemplateMenuId(null);
-    setOpenVmMenuId(null);
-    setShellMenuOpen(false);
-    setTemplateCloneDraft(buildTemplateCloneDraft(template));
-  }
-
-  function openTemplateEditDialog(template: EnvironmentTemplate): void {
-    setOpenTemplateMenuId(null);
-    setOpenVmMenuId(null);
-    setShellMenuOpen(false);
-    setTemplateEditDraft(buildTemplateEditDraft(template));
-  }
-
-  function closeTemplateEditDialog(): void {
-    setTemplateEditDraft(null);
-  }
-
-  function handleTemplateEditField(
-    field: keyof TemplateEditDraft,
-    value: string,
-  ): void {
-    setTemplateEditDraft((current) =>
-      current
-        ? {
-            ...current,
-            [field]: value,
-          }
-        : current,
-    );
-  }
-
-  function closeTemplateCloneDialog(): void {
-    setTemplateCloneDraft(null);
-  }
-
-  function handleTemplateCloneField(
-    field: keyof TemplateCloneDraft,
-    value: string,
-  ): void {
-    setTemplateCloneDraft((current) =>
-      current
-        ? {
-            ...current,
-            [field]: value,
-          }
-        : current,
-    );
-  }
-
-  function openVmLogsDialog(vm: VmInstance): void {
-    setOpenVmMenuId(null);
-    setShellMenuOpen(false);
-    setVmLogsDialog({
-      error: null,
-      loading: true,
-      logs: null,
-      refreshing: false,
-      vmId: vm.id,
-      vmName: vm.name,
-    });
-  }
-
-  function closeVmLogsDialog(): void {
-    setVmLogsDialog(null);
-  }
-
-  function refreshVmLogsDialog(): void {
-    setVmLogsRefreshTick((current) => current + 1);
-  }
-
-  function closeCloneVmDialog(): void {
-    setCloneVmDialog(null);
-    setCloneVmDraft("");
-  }
-
-  function closeRenameDialog(): void {
-    setRenameDialog(null);
-    setRenameDraft("");
-  }
-
-  async function handleRenameVm(vm: VmInstance): Promise<void> {
-    setOpenVmMenuId(null);
-    setShellMenuOpen(false);
-    setRenameDialog({
-      kind: "vm",
-      id: vm.id,
-      currentName: vm.name,
-    });
-    setRenameDraft(vm.name);
-  }
-
-  async function handleRenameTemplate(template: EnvironmentTemplate): Promise<void> {
-    openTemplateEditDialog(template);
-  }
-
-  async function handleRenameSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-
-    if (!renameDialog) {
-      return;
-    }
-
-    const name = renameDraft.trim();
-
-    if (!name || name === renameDialog.currentName) {
-      return;
-    }
-
-    if (renameDialog.kind === "vm") {
-      await runMutation(
-        `Renaming ${renameDialog.currentName}`,
-        async () => {
-          await postJson<VmInstance>(
-            `/api/vms/${renameDialog.id}/update`,
-            {
-              name,
-            } satisfies UpdateVmInput,
-          );
-          closeRenameDialog();
-          await refreshSummary();
-          if (selectedVmIdRef.current === renameDialog.id) {
-            await refreshDetail(renameDialog.id);
-          }
-        },
-        `Renamed workspace to ${name}.`,
-      );
-      return;
-    }
-
-    await runMutation(
-      `Renaming ${renameDialog.currentName}`,
-      async () => {
-        await postJson<EnvironmentTemplate>(
-          `/api/templates/${renameDialog.id}/update`,
-          {
-            name,
-            description: renameDialog.description,
-          } satisfies UpdateTemplateInput,
-        );
-        closeRenameDialog();
-        await refreshSummary();
-      },
-      `Renamed template to ${name}.`,
-    );
-  }
-
-  function activeCpuThresholdForVm(vmId: string): number {
-    return normalizeActiveCpuThreshold(
-      activeCpuThresholdsByVm[vmId] ?? activeCpuThresholdDefault,
-    );
-  }
-
-  function handleSetActiveCpuThreshold(vm: VmInstance): void {
-    const nextValue = window.prompt(
-      "Active threshold (%)",
-      String(activeCpuThresholdForVm(vm.id)),
-    );
-
-    if (nextValue === null) {
-      return;
-    }
-
-    const parsed = Number(nextValue.replace(/%/gu, "").trim());
-
-    if (!Number.isFinite(parsed)) {
-      setNotice({
-        tone: "error",
-        message: "Active threshold must be a number between 0 and 100.",
-      });
-      return;
-    }
-
-    const nextThreshold = normalizeActiveCpuThreshold(parsed);
-    setActiveCpuThresholdsByVm((current) => {
-      if (nextThreshold === activeCpuThresholdDefault) {
-        if (!(vm.id in current)) {
-          return current;
-        }
-
-        const next = { ...current };
-        delete next[vm.id];
-        return next;
-      }
-
-      if (current[vm.id] === nextThreshold) {
-        return current;
-      }
-
-      return {
-        ...current,
-        [vm.id]: nextThreshold,
-      };
-    });
-  }
-
-  async function handleEditTemplateSubmit(
-    event: FormEvent<HTMLFormElement>,
-  ): Promise<void> {
-    event.preventDefault();
-
-    if (!templateEditDraft) {
-      return;
-    }
-
-    const name = templateEditDraft.name.trim();
-
-    if (!name) {
-      return;
-    }
-
-    await runMutation(
-      `Updating ${templateEditDraft.name.trim() || "template"}`,
-      async () => {
-        await postJson<EnvironmentTemplate>(
-          `/api/templates/${templateEditDraft.templateId}/update`,
-          {
-            name,
-            description: templateEditDraft.description.trim(),
-            initCommands: parseInitCommandsDraft(templateEditDraft.initCommands),
-          } satisfies UpdateTemplateInput,
-        );
-        closeTemplateEditDialog();
-        await refreshSummary();
-      },
-      `Updated template ${name}.`,
-    );
-  }
-
-  async function handleTemplateCloneSubmit(
-    event: FormEvent<HTMLFormElement>,
-  ): Promise<void> {
-    event.preventDefault();
-
-    if (!templateCloneDraft) {
-      return;
-    }
-
-    const payload: CreateTemplateInput = {
-      sourceTemplateId: templateCloneDraft.sourceTemplateId,
-      name: templateCloneDraft.name.trim(),
-      description: templateCloneDraft.description.trim(),
-      initCommands: parseInitCommandsDraft(templateCloneDraft.initCommands),
-    };
-
-    await runMutation(
-      `Saving template ${payload.name || "template"}`,
-      async () => {
-        const createdTemplate = await postJson<EnvironmentTemplate>("/api/templates", payload);
-        closeTemplateCloneDialog();
-        await refreshSummary();
-        setCreateDirty(false);
-        setCreateDraft(buildCreateDraftFromTemplate(createdTemplate));
-      },
-      `Saved template ${payload.name}.`,
-    );
-  }
-
-  async function handleDeleteTemplate(template: EnvironmentTemplate): Promise<void> {
-    setOpenTemplateMenuId(null);
-
-    const linkedVmCount =
-      summary?.vms.filter((entry) => entry.templateId === template.id).length ?? 0;
-
-    if (linkedVmCount > 0) {
-      setNotice({
-        tone: "error",
-        message:
-          `${template.name} is still attached to ${linkedVmCount} ` +
-          `VM${linkedVmCount === 1 ? "" : "s"}. Delete those workspaces first.`,
-      });
-      return;
-    }
-
-    if (!window.confirm(`Delete template ${template.name}?`)) {
-      return;
-    }
-
-    await runMutation(
-      `Deleting ${template.name}`,
-      async () => {
-        await postJson(`/api/templates/${template.id}/delete`, {});
-        await refreshSummary();
-      },
-      `Deleted template ${template.name}.`,
-    );
-  }
-
-  function setVmSidepanelCollapsed(vmId: string, collapsed: boolean): void {
-    setSidepanelCollapsedByVm((current) => {
-      if (collapsed) {
-        if (current[vmId]) {
-          return current;
-        }
-
-        return {
-          ...current,
-          [vmId]: true,
-        };
-      }
-
-      if (!current[vmId]) {
-        return current;
-      }
-
-      const next = { ...current };
-      delete next[vmId];
-      return next;
-    });
-  }
-
-  function setCurrentSidepanelCollapsed(collapsed: boolean): void {
-    const activeVmId = selectedVmIdRef.current;
-
-    if (activeVmId) {
-      setVmSidepanelCollapsed(activeVmId, collapsed);
-      return;
-    }
-
-    setOverviewSidepanelCollapsed(collapsed);
-  }
-
-  function setVmDesktopResolutionPreference(
-    vmId: string,
-    preference: DesktopResolutionPreference,
-  ): void {
-    const normalized = normalizeDesktopResolutionPreference(preference);
-
-    setDesktopResolutionByVm((current) => {
-      const existing = current[vmId];
-
-      if (
-        existing &&
-        existing.mode === normalized.mode &&
-        existing.scale === normalized.scale &&
-        existing.width === normalized.width &&
-        existing.height === normalized.height
-      ) {
-        return current;
-      }
-
-      return {
-        ...current,
-        [vmId]: normalized,
-      };
-    });
-  }
-
-  function applyViewportScalePreference(vmId: string, scaleValue: number): void {
-    const requestedScale = Number.isFinite(scaleValue)
-      ? scaleValue
-      : appliedDesktopViewportScale;
-    const nextScale = clampDesktopViewportScale(requestedScale);
-
-    setVmDesktopResolutionPreference(vmId, {
-      mode: "viewport",
-      scale: nextScale,
-      width: appliedDesktopWidth,
-      height: appliedDesktopHeight,
-    });
-    setResolutionDraft((current) => ({
-      ...current,
-      mode: "viewport",
-      scale: formatViewportScale(nextScale),
-    }));
-    lastResolutionRequestKeyRef.current = null;
-  }
-
-  function applyResolutionMode(vmId: string, mode: DesktopResolutionMode): void {
-    if (mode === "viewport") {
-      applyViewportScalePreference(vmId, Number(resolutionDraft.scale));
-      return;
-    }
-
-    const requestedWidth = Number(resolutionDraft.width);
-    const requestedHeight = Number(resolutionDraft.height);
-    const nextWidth = Number.isFinite(requestedWidth)
-      ? clampDesktopFixedWidth(requestedWidth)
-      : appliedDesktopWidth;
-    const nextHeight = Number.isFinite(requestedHeight)
-      ? clampDesktopFixedHeight(requestedHeight)
-      : appliedDesktopHeight;
-    const normalizedFixedResolution = normalizeGuestDisplayResolution(
-      nextWidth,
-      nextHeight,
-    );
-
-    setVmDesktopResolutionPreference(vmId, {
-      mode: "fixed",
-      scale: appliedDesktopViewportScale,
-      width: normalizedFixedResolution.width,
-      height: normalizedFixedResolution.height,
-    });
-    setResolutionDraft(
-      buildResolutionDraft(
-        "fixed",
-        appliedDesktopViewportScale,
-        normalizedFixedResolution.width,
-        normalizedFixedResolution.height,
-      ),
-    );
-    lastResolutionRequestKeyRef.current = null;
-  }
-
-  function selectVm(vmId: string): void {
-    setSelectedVmId(vmId);
-    setOpenVmMenuId(null);
-    setOpenTemplateMenuId(null);
-    setShellMenuOpen(false);
-  }
-
-  function openHomepage(): void {
-    setSelectedVmId(null);
-    setOpenVmMenuId(null);
-    setOpenTemplateMenuId(null);
-    setShellMenuOpen(false);
-  }
-
-  async function toggleFullscreen(): Promise<void> {
-    try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      } else {
-        await document.documentElement.requestFullscreen();
-      }
-    } catch (error) {
-      setNotice({
-        tone: "error",
-        message: errorMessage(error),
-      });
-    }
-  }
-
-  function inspectVm(vmId: string): void {
-    setSelectedVmId(vmId);
-    setVmSidepanelCollapsed(vmId, false);
-    setOpenVmMenuId(null);
-    setOpenTemplateMenuId(null);
-    setShellMenuOpen(false);
-  }
-
-  function currentVmRailIds(): string[] {
-    return (summary?.vms ?? displayedVms).map((vm) => vm.id);
-  }
-
-  async function persistVmRailOrder(vmIds: string[]): Promise<void> {
-    setVmReorderBusy(true);
-
-    try {
-      const nextSummary = await postJson<DashboardSummary>(
-        "/api/vms/reorder",
-        {
-          vmIds,
-        } satisfies ReorderVmsInput,
-      );
-      startTransition(() => {
-        setSummary(nextSummary);
-      });
-      setVmRailOrderIds(null);
-    } catch (error) {
-      if (error instanceof AuthRequiredError) {
-        requireLogin();
-        return;
-      }
-
-      setNotice({
-        tone: "error",
-        message: errorMessage(error),
-      });
-      setVmRailOrderIds(null);
-      await refreshSummary();
-    } finally {
-      setVmReorderBusy(false);
-    }
-  }
-
-  function handleVmTileDragStart(
-    vmId: string,
-    event: ReactDragEvent<HTMLElement>,
-  ): void {
-    if (vmReorderBusy) {
-      event.preventDefault();
-      return;
-    }
-
-    vmDragDropCommittedRef.current = false;
-    setDraggedVmId(vmId);
-    setVmRailOrderIds(currentVmRailIds());
-    setOpenVmMenuId(null);
-    setOpenTemplateMenuId(null);
-    setShellMenuOpen(false);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", vmId);
-  }
-
-  function handleVmTileDragOver(
-    targetVmId: string,
-    event: ReactDragEvent<HTMLElement>,
-  ): void {
-    if (!draggedVmId || draggedVmId === targetVmId) {
-      return;
-    }
-
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    setVmRailOrderIds((current) =>
-      reorderVmIds(current ?? currentVmRailIds(), draggedVmId, targetVmId),
-    );
-  }
-
-  function commitVmRailOrder(nextOrder: string[]): void {
-    vmDragDropCommittedRef.current = true;
-    setDraggedVmId(null);
-
-    if (sameIdOrder(nextOrder, currentVmRailIds())) {
-      setVmRailOrderIds(null);
-      return;
-    }
-
-    setVmRailOrderIds(nextOrder);
-    void persistVmRailOrder(nextOrder);
-  }
-
-  function handleVmStripDragOver(event: ReactDragEvent<HTMLDivElement>): void {
-    if (!draggedVmId) {
-      return;
-    }
-
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  }
-
-  function handleVmStripDrop(event: ReactDragEvent<HTMLDivElement>): void {
-    if (!draggedVmId) {
-      return;
-    }
-
-    event.preventDefault();
-    commitVmRailOrder(vmRailOrderIds ?? currentVmRailIds());
-  }
-
-  function handleVmTileDragEnd(): void {
-    if (!vmDragDropCommittedRef.current) {
-      setVmRailOrderIds(null);
-    }
-
-    setDraggedVmId(null);
-  }
-
-  function handleVmTileDrop(
-    targetVmId: string,
-    event: ReactDragEvent<HTMLElement>,
-  ): void {
-    if (!draggedVmId) {
-      return;
-    }
-
-    event.preventDefault();
-    const nextOrder = reorderVmIds(vmRailOrderIds ?? currentVmRailIds(), draggedVmId, targetVmId);
-    event.stopPropagation();
-    commitVmRailOrder(nextOrder);
-  }
-
-  function handleRailResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
-    if (!wideShellLayout || event.button !== 0) {
-      return;
-    }
-
-    const panelLeft = railRef.current?.getBoundingClientRect().left;
-
-    if (panelLeft === undefined) {
-      return;
-    }
-
-    event.preventDefault();
-    railResizeRef.current = { panelLeft };
-    setRailResizeActive(true);
-  }
-
-  function handleRailResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
-    if (!wideShellLayout) {
-      return;
-    }
-
-    const currentWidth = railWidth;
-    let nextWidth: number | null = null;
-
-    switch (event.key) {
-      case "ArrowLeft":
-        nextWidth =
-          currentWidth <= railExpandedMinWidth ? railCompactWidth : currentWidth - 16;
-        break;
-      case "ArrowRight":
-        nextWidth =
-          currentWidth <= railCompactWidth ? railExpandedMinWidth : currentWidth + 16;
-        break;
-      case "Home":
-        nextWidth = railCompactWidth;
-        break;
-      case "End":
-        nextWidth = railMaxWidth;
-        break;
-      default:
-        return;
-    }
-
-    event.preventDefault();
-    if (nextWidth === null) {
-      return;
-    }
-    setRailWidthPreference(clampRailWidthPreference(nextWidth));
-  }
-
-  function handleSidepanelResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
-    if (compactSidepanelLayout || event.button !== 0) {
-      return;
-    }
-
-    const handleBounds = event.currentTarget.getBoundingClientRect();
-    const handleCenterX = handleBounds.left + handleBounds.width / 2;
-
-    event.preventDefault();
-    sidepanelResizeRef.current = {
-      anchorClientX:
-        displayedSidepanelWidth <= sidepanelClosedWidth ? handleCenterX : event.clientX,
-      anchorWidth: displayedSidepanelWidth,
-      pendingClosedOpen: displayedSidepanelWidth <= sidepanelClosedWidth,
-    };
-    setSidepanelResizeActive(true);
-  }
-
-  function handleSidepanelClosedResizeStart(
-    pointerClientX: number,
-    handleCenterX: number,
-  ): void {
-    if (compactSidepanelLayout) {
-      return;
-    }
-
-    const openingWidth = handleCenterX - pointerClientX;
-
-    if (openingWidth >= sidepanelMinWidth) {
-      const activatedWidth = clampDisplayedSidepanelWidth(openingWidth, viewportWidth);
-      sidepanelResizeRef.current = {
-        anchorClientX: pointerClientX,
-        anchorWidth: activatedWidth,
-        pendingClosedOpen: false,
-      };
-      setCurrentSidepanelCollapsed(false);
-      setSidepanelWidthPreference(activatedWidth);
-      setSidepanelResizeActive(true);
-      return;
-    }
-
-    sidepanelResizeRef.current = {
-      anchorClientX: handleCenterX,
-      anchorWidth: sidepanelClosedWidth,
-      pendingClosedOpen: true,
-    };
-    setCurrentSidepanelCollapsed(true);
-    setSidepanelResizeActive(true);
-  }
-
-  function handleSidepanelResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
-    if (compactSidepanelLayout) {
-      return;
-    }
-
-    const currentWidth = displayedSidepanelWidth;
-    let nextWidth: number | null = null;
-
-    switch (event.key) {
-      case "ArrowLeft":
-        nextWidth =
-          currentWidth <= sidepanelClosedWidth ? sidepanelMinWidth : currentWidth + 24;
-        break;
-      case "ArrowRight":
-        nextWidth =
-          currentWidth <= sidepanelMinWidth ? sidepanelClosedWidth : currentWidth - 24;
-        break;
-      case "Home":
-        nextWidth = sidepanelClosedWidth;
-        break;
-      case "End":
-        nextWidth = sidepanelMaxWidth;
-        break;
-      default:
-        break;
-    }
-
-    if (nextWidth === null) {
-      return;
-    }
-
-    event.preventDefault();
-    const normalizedWidth = clampSidepanelWidthPreference(nextWidth);
-    setCurrentSidepanelCollapsed(normalizedWidth === sidepanelClosedWidth);
-
-    if (normalizedWidth > sidepanelClosedWidth) {
-      setSidepanelWidthPreference(normalizedWidth);
-    }
-  }
-
-  async function handleVmAction(
-    vmId: string,
-    action: VmPowerAction,
-  ): Promise<void> {
-    const vmName = summary?.vms.find((vm) => vm.id === vmId)?.name ?? vmId;
-
-    await runMutation(
-      `${action} ${vmName}`,
-      async () => {
-        await postJson(`/api/vms/${vmId}/${action}`, {});
-        await refreshSummary();
-        if (selectedVmIdRef.current === vmId) {
-          await refreshDetail(vmId);
-        }
-      },
-      `Queued ${action} for ${vmName}.`,
-    );
-  }
-
-  async function handleClone(vm: VmInstance): Promise<void> {
-    setOpenVmMenuId(null);
-    setOpenTemplateMenuId(null);
-    setShellMenuOpen(false);
-    const wallpaperName = buildRandomVmName();
-    setCloneVmDialog({
-      sourceVmId: vm.id,
-      sourceVmName: vm.name,
-      wallpaperName,
-    });
-    setCloneVmDraft(wallpaperName);
-  }
-
-  async function handleCloneVmSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-
-    if (!cloneVmDialog) {
-      return;
-    }
-
-    const name = cloneVmDraft.trim();
-
-    if (!name) {
-      return;
-    }
-
-    await runMutation(
-      `Cloning ${cloneVmDialog.sourceVmName}`,
-      async () => {
-        const clone = await postJson<VmInstance>(`/api/vms/${cloneVmDialog.sourceVmId}/clone`, {
-          sourceVmId: cloneVmDialog.sourceVmId,
-          name,
-          wallpaperName: cloneVmDialog.wallpaperName,
-        });
-        closeCloneVmDialog();
-        setVmSidepanelCollapsed(clone.id, false);
-        setSelectedVmId(clone.id);
-        await refreshSummary();
-        await refreshDetail(clone.id);
-      },
-      `Queued clone for ${cloneVmDialog.sourceVmName}.`,
-    );
-  }
-
-  async function handleSnapshot(vm: VmInstance): Promise<void> {
-    const label = window.prompt(
-      vm.status === "running"
-        ? `Snapshot label\n\n${liveCaptureWarningCopy}`
-        : "Snapshot label",
-      `snapshot-${new Date().toISOString().slice(0, 16)}`,
-    );
-
-    if (label === null) {
-      return;
-    }
-
-    const payload: SnapshotInput = {
-      label: label.trim() || undefined,
-    };
-
-    await runMutation(
-      `Snapshotting ${vm.name}`,
-      async () => {
-        await postJson(`/api/vms/${vm.id}/snapshot`, payload);
-        await refreshSummary();
-        await refreshDetail(vm.id);
-      },
-      `Queued snapshot for ${vm.name}.`,
-    );
-  }
-
-  async function handleDelete(vm: VmInstance): Promise<void> {
-    if (!window.confirm(`Delete ${vm.name}?`)) {
-      return;
-    }
-
-    await runMutation(
-      `Deleting ${vm.name}`,
-      async () => {
-        await postJson(`/api/vms/${vm.id}/delete`, {});
-        if (selectedVmIdRef.current === vm.id) {
-          setSelectedVmId(null);
-          setDetail(null);
-        }
-        await refreshSummary();
-      },
-      `Queued delete for ${vm.name}.`,
-    );
-  }
-
   function canDriveResolutionForVm(vmId: string): boolean {
     return (
       resolutionControlStatusRef.current.owner === "self" &&
@@ -3665,71 +2616,21 @@ export function DashboardApp(): JSX.Element {
           setShellMenuOpen(false);
         }}
       >
-        {notice || busyLabel || visibleProminentJob ? (
-          <div
-            className="app-shell__notice-stack"
-            onClick={(event) => event.stopPropagation()}
-          >
-            {notice || busyLabel ? (
-              <div
-                className={joinClassNames(
-                  "notice-bar",
-                  notice ? noticeToneClassName(notice.tone) : "notice-bar--info",
-                )}
-              >
-                <span>{notice?.message ?? "Working..."}</span>
-                {busyLabel ? (
-                  <span className="surface-pill surface-pill--busy mono-font">{busyLabel}</span>
-                ) : null}
-              </div>
-            ) : null}
-
-            {visibleProminentJob ? (
-              <div className="notice-bar notice-bar--info">
-                <div className="notice-bar__copy">
-                  <strong className="notice-bar__title">
-                    {visibleProminentJob.vmName} · {formatJobKindLabel(visibleProminentJob.job.kind)}
-                  </strong>
-                  <span>{visibleProminentJob.job.message || "Action in progress"}</span>
-                  {visibleProminentJobTiming ? (
-                    <span className="notice-bar__meta">{visibleProminentJobTiming}</span>
-                  ) : null}
-                </div>
-
-                <div className="notice-bar__actions">
-                  <div className="chip-row">
-                    <span className="surface-pill">{visibleProminentJob.job.status}</span>
-                    {visibleProminentJob.job.progressPercent !== null &&
-                    visibleProminentJob.job.progressPercent !== undefined ? (
-                      <span className="surface-pill">{visibleProminentJob.job.progressPercent}%</span>
-                    ) : null}
-                    {visibleProminentJob.activeCount > 1 ? (
-                      <span className="surface-pill">
-                        {visibleProminentJob.activeCount} active
-                      </span>
-                    ) : null}
-                  </div>
-                  <button
-                    className="button button--ghost notice-bar__dismiss"
-                    type="button"
-                    onClick={() =>
-                      setDismissedProminentJobIds((current) =>
-                        current[visibleProminentJob.job.id]
-                          ? current
-                          : {
-                              ...current,
-                              [visibleProminentJob.job.id]: true,
-                            },
-                      )
-                    }
-                  >
-                    Hide
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
+        <DashboardNoticeStack
+          busyLabel={busyLabel}
+          notice={notice}
+          prominentJob={visibleProminentJob}
+          prominentJobTiming={visibleProminentJobTiming}
+          onDismissProminentJob={(jobId) =>
+            setDismissedProminentJobIds((current) =>
+              current[jobId]
+                ? current
+                : {
+                    ...current,
+                    [jobId]: true,
+                  },
+            )}
+        />
 
         <section
           style={workspaceShellStyle}
@@ -3737,291 +2638,83 @@ export function DashboardApp(): JSX.Element {
           data-focused={workspaceFocused ? "true" : "false"}
           onClick={(event) => event.stopPropagation()}
         >
-          <aside
-            ref={railRef}
-            className={joinClassNames(
-              "workspace-rail",
-              compactRail ? "workspace-rail--compact" : "",
-              railResizeActive ? "workspace-rail--resizing" : "",
-            )}
-          >
-            <RailResizeHandle
-              resizable={wideShellLayout}
-              resizing={railResizeActive}
-              width={railWidth}
-              onResizeKeyDown={handleRailResizeKeyDown}
-              onResizePointerDown={handleRailResizeStart}
-            />
-
-            <div className="workspace-rail__header">
-              <div className="workspace-rail__brand">
-                {compactRail ? (
-                  <div className="workspace-rail__compact-actions">
-                    <button
-                      className="workspace-rail__icon-button"
-                      type="button"
-                      aria-label="Home"
-                      title={`Home · ${providerStatusTitle(summary.provider)}`}
-                      onClick={openHomepage}
-                    >
-                      <span className="workspace-rail__icon-shell">
-                        <RailHomeIcon />
-                        <span
-                          className={joinClassNames(
-                            "workspace-rail__status-dot",
-                            "workspace-rail__status-dot--compact",
-                            providerStatusDotClassName(summary.provider),
-                          )}
-                          aria-hidden="true"
-                        />
-                      </span>
-                    </button>
-                    <button
-                      className="workspace-rail__icon-button"
-                      type="button"
-                      aria-label="New VM"
-                      title="New VM"
-                      onClick={openCreateDialog}
-                    >
-                      <RailCreateIcon />
-                    </button>
-                    <button
-                      ref={shellMenuButtonRef}
-                      className={joinClassNames(
-                        "workspace-rail__icon-button",
-                        "workspace-rail__menu-button",
-                        shellMenuOpen ? "workspace-rail__icon-button--open" : "",
-                      )}
-                      type="button"
-                      aria-expanded={shellMenuOpen}
-                      aria-label="Display and theme options"
-                      title="Display and theme options"
-                      onClick={() => {
-                        setOpenVmMenuId(null);
-                        setOpenTemplateMenuId(null);
-                        setShellMenuOpen((current) => !current);
-                      }}
-                    >
-                      <RailSettingsIcon />
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    <div className="workspace-rail__topbar">
-                      <div className="workspace-rail__home-link-group">
-                        <button
-                          className="workspace-shell__eyebrow workspace-rail__home-link"
-                          type="button"
-                          title={providerStatusTitle(summary.provider)}
-                          onClick={openHomepage}
-                        >
-                          <span
-                            className={joinClassNames(
-                              "workspace-rail__status-dot",
-                              providerStatusDotClassName(summary.provider),
-                            )}
-                            aria-hidden="true"
-                          />
-                          <span className="brand-wordmark" aria-label="Parallaize">
-                            <span>Parall</span>
-                            <span className="brand-wordmark__accent">ai</span>
-                            <span>ze</span>
-                          </span>
-                        </button>
-                        <span
-                          className="workspace-rail__brand-lockup"
-                          aria-label={`Version ${appVersionLabel}`}
-                        >
-                          <span className="workspace-rail__brand-version">{appVersionLabel}</span>
-                          {newerReleaseAvailable && latestRelease ? (
-                            <a
-                              className={`workspace-rail__brand-release-indicator${releaseIndicatorSeverity ? ` workspace-rail__brand-release-indicator--${releaseIndicatorSeverity}` : ""}`}
-                              href={buildLatestReleaseTagUrl(latestRelease.version)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              aria-label="New version available!"
-                              title="New version available!"
-                            >
-                              !
-                            </a>
-                          ) : null}
-                        </span>
-                      </div>
-                      <button
-                        ref={shellMenuButtonRef}
-                        className={joinClassNames(
-                          "menu-button",
-                          "workspace-rail__menu-button",
-                          shellMenuOpen ? "menu-button--open" : "",
-                        )}
-                        type="button"
-                        aria-expanded={shellMenuOpen}
-                        aria-label="Display and theme options"
-                        onClick={() => {
-                          setOpenVmMenuId(null);
-                          setOpenTemplateMenuId(null);
-                          setShellMenuOpen((current) => !current);
-                        }}
-                      >
-                        ...
-                      </button>
-                    </div>
-
-                    <div className="chip-row workspace-rail__chips">
-                      <span className="surface-pill">
-                        {summary.metrics.totalCpu}/{summary.metrics.hostCpuCount} CPU
-                      </span>
-                      <span className="surface-pill">
-                        {formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
-                      </span>
-                    </div>
-
-                    <TelemetryPanel
-                      activeCpuThresholdPercent={activeCpuThresholdDefault}
-                      label="Host"
-                      telemetry={summary.hostTelemetry}
-                    />
-                  </>
-                )}
-              </div>
-            </div>
-
-            <PortalPopover
-              anchorPlacement={compactRail ? "bottom-start" : "bottom-end"}
-              anchorRef={shellMenuButtonRef}
-              className="workspace-rail__popover"
-              open={shellMenuOpen}
-              onClose={() => setShellMenuOpen(false)}
-            >
-              {supportsLiveDesktop ? (
-                <button
-                  className={joinClassNames(
-                    "menu-action",
-                    "menu-action--split",
-                    showLivePreviews ? "menu-action--selected" : "",
-                  )}
-                  type="button"
-                  onClick={() => {
-                    setShowLivePreviews((current) => !current);
-                    setShellMenuOpen(false);
-                  }}
-                >
-                  <span>Live previews</span>
-                  <span className="menu-action__state">{showLivePreviews ? "On" : "Off"}</span>
-                </button>
-              ) : (
-                <button className="menu-action menu-action--split" type="button" disabled>
-                  <span>Live previews</span>
-                  <span className="menu-action__state">Unavailable</span>
-                </button>
-              )}
-
-              <button
-                className="menu-action menu-action--split"
-                type="button"
-                onClick={() => {
-                  setThemeMode((current) => (current === "dark" ? "light" : "dark"));
-                  setShellMenuOpen(false);
-                }}
-              >
-                <span>Theme</span>
-                <span className="menu-action__state">
-                  {themeMode === "dark" ? "Dark" : "Light"}
-                </span>
-              </button>
-
-              <button
-                className="menu-action menu-action--split"
-                type="button"
-                onClick={() => {
-                  setShellMenuOpen(false);
-                  void toggleFullscreen();
-                }}
-              >
-                <span>Fullscreen</span>
-                <span className="menu-action__state">{fullscreenActive ? "On" : "Off"}</span>
-              </button>
-
-              {authEnabled ? (
-                <button
-                  className="menu-action"
-                  type="button"
-                  onClick={() => {
-                    setShellMenuOpen(false);
-                    void handleLogout();
-                  }}
-                >
-                  Log out
-                </button>
-              ) : null}
-            </PortalPopover>
-
-            {!compactRail ? (
-              <div className="workspace-rail__list-head">
-                <p className="workspace-shell__eyebrow">
-                  VMs ({summary.metrics.runningVmCount}/{summary.metrics.totalVmCount})
-                </p>
-                <button
-                  className="button button--secondary workspace-rail__create-button"
-                  type="button"
-                  onClick={openCreateDialog}
-                >
-                  New VM
-                </button>
-              </div>
-            ) : null}
-
-            <div
-              className="vm-strip"
-              onDragOver={handleVmStripDragOver}
-              onDrop={handleVmStripDrop}
-            >
-              {renderedVms.map((vm) => (
-                <VmTile
-                  key={vm.id}
-                  activeCpuThresholdPercent={activeCpuThresholdForVm(vm.id)}
-                  busy={isBusy}
-                  compact={compactRail}
-                  dragging={draggedVmId === vm.id}
-                  inspectorVisible={vm.id === selectedVmId && !effectiveSidePanelCollapsed}
-                  menuOpen={openVmMenuId === vm.id}
-                  selected={vm.id === selectedVmId}
-                  showLivePreview={showLivePreviews}
-                  vm={vm}
-                  onDragEnd={handleVmTileDragEnd}
-                  onDragOver={handleVmTileDragOver}
-                  onDragStart={handleVmTileDragStart}
-                  onDrop={handleVmTileDrop}
-                  onClone={handleClone}
-                  onDelete={handleDelete}
-                  onHideInspector={() => setVmSidepanelCollapsed(vm.id, true)}
-                  onOpen={selectVm}
-                  onInspect={inspectVm}
-                  onOpenLogs={openVmLogsDialog}
-                  onRename={handleRenameVm}
-                  onSetActiveCpuThreshold={handleSetActiveCpuThreshold}
-                  onSnapshot={handleSnapshot}
-                  onPowerAction={handleVmAction}
-                  onToggleMenu={(vmId) => {
-                    setShellMenuOpen(false);
-                    setOpenTemplateMenuId(null);
-                    setOpenVmMenuId((current) => (current === vmId ? null : vmId));
-                  }}
-                />
-              ))}
-
-              {renderedVms.length === 0 && !compactRail ? (
-                <div className="empty-state">
-                  <p className="empty-state__eyebrow">No VMs yet</p>
-                  <h3 className="empty-state__title">Launch a workspace to populate the rail.</h3>
-                  <p className="empty-state__copy">
-                    Each workspace stays selectable here with a preview, so the center stage can
-                    remain dedicated to the live desktop.
-                  </p>
-                </div>
-              ) : null}
-            </div>
-          </aside>
+          <DashboardWorkspaceRail
+            summary={summary}
+            appVersionLabel={appVersionLabel}
+            authEnabled={authEnabled}
+            compactRail={compactRail}
+            draggedVmId={draggedVmId}
+            effectiveSidePanelCollapsed={effectiveSidePanelCollapsed}
+            fullscreenActive={fullscreenActive}
+            isBusy={isBusy}
+            latestReleaseHref={
+              newerReleaseAvailable && latestRelease
+                ? buildLatestReleaseTagUrl(latestRelease.version)
+                : null
+            }
+            newerReleaseAvailable={newerReleaseAvailable}
+            openVmMenuId={openVmMenuId}
+            railRef={railRef}
+            railResizeActive={railResizeActive}
+            railWidth={railWidth}
+            releaseIndicatorSeverity={releaseIndicatorSeverity}
+            renderedVms={renderedVms}
+            selectedVmId={selectedVmId}
+            shellMenuButtonRef={shellMenuButtonRef}
+            shellMenuOpen={shellMenuOpen}
+            showLivePreviews={showLivePreviews}
+            supportsLiveDesktop={supportsLiveDesktop}
+            themeMode={themeMode}
+            wideShellLayout={wideShellLayout}
+            onClone={handleClone}
+            onDelete={handleDelete}
+            onHideInspector={(vmId) => setVmSidepanelCollapsed(vmId, true)}
+            onLogout={() => {
+              setShellMenuOpen(false);
+              void handleLogout();
+            }}
+            onOpenCreateDialog={openCreateDialog}
+            onOpenHomepage={openHomepage}
+            onOpenLogs={openVmLogsDialog}
+            onInspectVm={inspectVm}
+            onRename={handleRenameVm}
+            onResizeKeyDown={handleRailResizeKeyDown}
+            onResizePointerDown={handleRailResizeStart}
+            onSelectVm={selectVm}
+            onSetActiveCpuThreshold={handleSetActiveCpuThreshold}
+            onSnapshot={handleSnapshot}
+            onToggleFullscreen={() => {
+              setShellMenuOpen(false);
+              void toggleFullscreen();
+            }}
+            onToggleLivePreviews={() => {
+              setShowLivePreviews((current) => !current);
+              setShellMenuOpen(false);
+            }}
+            onToggleShellMenu={() => {
+              setOpenVmMenuId(null);
+              setOpenTemplateMenuId(null);
+              setShellMenuOpen((current) => !current);
+            }}
+            onCloseShellMenu={() => setShellMenuOpen(false)}
+            onToggleTheme={() => {
+              setThemeMode((current) => (current === "dark" ? "light" : "dark"));
+              setShellMenuOpen(false);
+            }}
+            onVmMenuToggle={(vmId) => {
+              setShellMenuOpen(false);
+              setOpenTemplateMenuId(null);
+              setOpenVmMenuId((current) => (current === vmId ? null : vmId));
+            }}
+            onPowerAction={handleVmAction}
+            onVmTileDragEnd={handleVmTileDragEnd}
+            onVmTileDragOver={handleVmTileDragOver}
+            onVmTileDragStart={handleVmTileDragStart}
+            onVmTileDrop={handleVmTileDrop}
+            onVmStripDragOver={handleVmStripDragOver}
+            onVmStripDrop={handleVmStripDrop}
+            resolveActiveCpuThreshold={activeCpuThresholdForVm}
+          />
 
           <section className="workspace-stage">
             <div
@@ -4206,98 +2899,39 @@ export function DashboardApp(): JSX.Element {
         </section>
       </main>
 
-      {showCreateDialog ? (
-        <CreateVmDialog
-          busy={isBusy}
-          createDraft={createDraft}
-          selectedSource={
-            summary
-              ? resolveCreateSourceSelection(
-                  summary.templates,
-                  summary.snapshots,
-                  summary.vms,
-                  createDraft.launchSource,
-                )
-              : null
-          }
-          sourceGroups={
-            summary
-              ? buildCreateSourceGroups(summary.templates, summary.snapshots, summary.vms)
-              : []
-          }
-          validationError={buildCreateLaunchValidationError(
-            summary
-              ? resolveCreateSourceSelection(
-                  summary.templates,
-                  summary.snapshots,
-                  summary.vms,
-                  createDraft.launchSource,
-                )
-              : null,
-            createDraft.diskGb,
-          )}
-          onClose={() => setShowCreateDialog(false)}
-          onFieldChange={handleCreateField}
-          onShutdownBeforeCloneChange={handleCreateShutdownBeforeCloneChange}
-          onSubmit={handleCreate}
-          onSourceChange={handleCreateSourceChange}
-        />
-      ) : null}
-      {templateCloneDraft ? (
-        <TemplateCloneDialog
-          busy={isBusy}
-          draft={templateCloneDraft}
-          sourceTemplate={
-            displayedTemplates.find(
-              (entry) => entry.id === templateCloneDraft.sourceTemplateId,
-            ) ?? null
-          }
-          onClose={closeTemplateCloneDialog}
-          onFieldChange={handleTemplateCloneField}
-          onSubmit={handleTemplateCloneSubmit}
-        />
-      ) : null}
-      {templateEditDraft ? (
-        <TemplateEditDialog
-          busy={isBusy}
-          draft={templateEditDraft}
-          onClose={closeTemplateEditDialog}
-          onFieldChange={handleTemplateEditField}
-          onSubmit={handleEditTemplateSubmit}
-        />
-      ) : null}
-      {cloneVmDialog ? (
-        <CloneVmDialog
-          busy={isBusy}
-          draft={cloneVmDraft}
-          sourceVmName={cloneVmDialog.sourceVmName}
-          onClose={closeCloneVmDialog}
-          onDraftChange={setCloneVmDraft}
-          onSubmit={handleCloneVmSubmit}
-        />
-      ) : null}
-      {renameDialog ? (
-        <RenameDialog
-          busy={isBusy}
-          currentName={renameDialog.currentName}
-          draft={renameDraft}
-          entityLabel={renameDialog.kind === "vm" ? "Workspace" : "Template"}
-          onClose={closeRenameDialog}
-          onDraftChange={setRenameDraft}
-          onSubmit={handleRenameSubmit}
-        />
-      ) : null}
-      {vmLogsDialog ? (
-        <VmLogsDialog
-          error={vmLogsDialog.error}
-          loading={vmLogsDialog.loading}
-          logs={vmLogsDialog.logs}
-          refreshing={vmLogsDialog.refreshing}
-          vmName={vmLogsDialog.vmName}
-          onClose={closeVmLogsDialog}
-          onRefresh={refreshVmLogsDialog}
-        />
-      ) : null}
+      <DashboardDialogsHost
+        busy={isBusy}
+        cloneVmDialog={cloneVmDialog}
+        cloneVmDraft={cloneVmDraft}
+        createDraft={createDraft}
+        displayedTemplates={displayedTemplates}
+        renameDialog={renameDialog}
+        renameDraft={renameDraft}
+        showCreateDialog={showCreateDialog}
+        summary={summary}
+        templateCloneDraft={templateCloneDraft}
+        templateEditDraft={templateEditDraft}
+        vmLogsDialog={vmLogsDialog}
+        onCloneDraftChange={setCloneVmDraft}
+        onCloseCloneVmDialog={closeCloneVmDialog}
+        onCloseCreateDialog={() => setShowCreateDialog(false)}
+        onCloseRenameDialog={closeRenameDialog}
+        onCloseTemplateCloneDialog={closeTemplateCloneDialog}
+        onCloseTemplateEditDialog={closeTemplateEditDialog}
+        onCloseVmLogsDialog={closeVmLogsDialog}
+        onCloneVmSubmit={handleCloneVmSubmit}
+        onCreateFieldChange={handleCreateField}
+        onCreateShutdownBeforeCloneChange={handleCreateShutdownBeforeCloneChange}
+        onCreateSourceChange={handleCreateSourceChange}
+        onCreateSubmit={handleCreate}
+        onRefreshVmLogsDialog={refreshVmLogsDialog}
+        onRenameDraftChange={setRenameDraft}
+        onRenameSubmit={handleRenameSubmit}
+        onTemplateCloneFieldChange={handleTemplateCloneField}
+        onTemplateCloneSubmit={handleTemplateCloneSubmit}
+        onTemplateEditFieldChange={handleTemplateEditField}
+        onTemplateEditSubmit={handleEditTemplateSubmit}
+      />
     </>
   );
 }

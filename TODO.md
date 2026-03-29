@@ -4,9 +4,9 @@ Last updated: 2026-03-29
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
-Current focus: keep peeling helper categories out of `apps/control/src/providers-incus.ts` and shrink the remaining app-shell orchestration still concentrated in `DashboardApp.tsx` now that shell helpers, stage surfaces, and inspector/overview panels live outside the monolith.
+Current focus: the maintainability cleanup slice is complete. Keep the extracted control-plane seams, dashboard seams, and package-asset generation green while the next feature slice is scoped.
 
-Untrusted AI workflow work is deferred until the cleanup slices below are in materially better shape.
+The Blocks 1-4 cleanup details now live in `docs/refactor-map.md` and the surrounding tests/docs. Only deferred work remains here.
 
 Completed implementation details now live in:
 
@@ -18,46 +18,7 @@ Completed implementation details now live in:
 - `docs/apt-repository.md`
 - `docs/refactor-map.md`
 
-## Current Slice: Maintainability Cleanup
-
-Goal: reduce file size, cross-cutting state, and duplicated helper logic in the control plane and dashboard before adding more feature surface.
-
-### Block 1: Control Plane Decomposition
-
-- [x] Extract auth/session handling from `apps/control/src/server.ts` into `apps/control/src/server-auth.ts`.
-- [x] Extract generic HTTP/static/download/SSE helpers from `apps/control/src/server.ts` into `apps/control/src/server-http.ts`.
-- [x] Extract latest-release parsing/cache logic from `apps/control/src/server.ts` into `apps/control/src/server-release.ts`.
-- [x] Extract event stream and VM log-tail lifecycle code out of `apps/control/src/server.ts`.
-- [x] Split `apps/control/src/server.ts` route handling into grouped route modules.
-- [x] Split `apps/control/src/manager.ts` into read models, VM/template/snapshot commands, and background orchestration workers.
-- [ ] Finish breaking the provider runtime under `apps/control/src/providers.ts` and `apps/control/src/providers-incus.ts` into provider contracts, mock provider, Incus lifecycle, guest inspection, networking, and streaming helpers.
-- [x] Separate `apps/control/src/store.ts` into store interface, normalization/migration helpers, JSON persistence, and PostgreSQL persistence.
-- [x] Add targeted unit coverage for extracted control-plane helpers so behavior does not depend only on giant end-to-end suites.
-
-### Block 2: Dashboard Decomposition
-
-- [x] Extract create/template workflow helpers, VM browser/touched-file formatting, job/progress selectors, and health/status label helpers out of `apps/web/src/DashboardApp.tsx` into `apps/web/src/dashboardHelpers.ts`.
-- [x] Extract leaf dashboard primitives from `apps/web/src/DashboardApp.tsx` into `apps/web/src/dashboardPrimitives.tsx`.
-- [ ] Finish moving the remaining app-shell orchestration and any residual inline sections out of `apps/web/src/DashboardApp.tsx` now that overview, workspace stage, and inspector panels live in focused modules.
-- [x] Pull browser-only fetch/SSE plumbing and fullscreen handling into dedicated services.
-- [x] Pull browser-only persistence and resolution-control coordination into dedicated hooks/services.
-- [x] Split `apps/web/src/styles.css` into tokens, shell layout, workspace layout, dialogs, sidepanel, and feature-local sections/files.
-- [x] Add targeted tests around extracted browser helpers so the view-model logic is characterized outside the monolith component.
-
-### Block 3: Guardrails And Characterization
-
-- [x] Keep `docs/refactor-map.md` aligned with live ownership seams, file budgets, and the next extraction targets.
-- [x] Expand `tests/layering.test.ts` and neighboring guardrail tests so runtime boundaries stay enforced while files move.
-- [ ] Keep removing dead helpers and duplicate formatting/state logic as extracted modules become the single source of truth.
-- [ ] Keep `TODO.md` current whenever scope changes or a major cleanup slice lands.
-
-### Block 4: Scripts, Packaging, And Docs Cleanup
-
-- [ ] Normalize responsibilities under `scripts/` and trim duplicated packaging/config logic between `infra/` and `packaging/`.
-- [ ] Audit README and operational docs for stale references after refactors land.
-- [ ] Keep `pnpm build`, `pnpm test`, and `pnpm start` green after every verified cleanup slice.
-
-## Deferred Until Cleanup Lands
+## Deferred Until Next Slice
 
 - [ ] Resume the trusted/untrusted collection architecture only after the control plane and dashboard seams above are smaller and better tested.
 - [ ] Evaluate Selkies as an alternative browser desktop transport once the current runtime boundaries are cleaner.

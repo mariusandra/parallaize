@@ -1,4 +1,8 @@
-import { formatTimestamp, minimumCreateDiskGb } from "../../../packages/shared/src/helpers.js";
+import {
+  formatTimestamp,
+  minimumCreateDiskGb,
+  normalizeVmNetworkMode,
+} from "../../../packages/shared/src/helpers.js";
 import type {
   DashboardSummary,
   EnvironmentTemplate,
@@ -157,10 +161,7 @@ export function parseInitCommandsDraft(value: string): string[] {
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
 }
-
-export function normalizeVmNetworkMode(value: string | null | undefined): VmNetworkMode {
-  return value === "dmz" ? "dmz" : "default";
-}
+export { normalizeVmNetworkMode };
 
 export function formatVmNetworkModeLabel(networkMode: VmNetworkMode): string {
   return networkMode === "dmz" ? "DMZ" : "Default bridge";

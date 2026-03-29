@@ -1,7 +1,12 @@
-import { minimumCreateDiskGb, slugify } from "../../../packages/shared/src/helpers.js";
 import { statfsSync } from "node:fs";
 import { posix as pathPosix } from "node:path";
 
+import {
+  describeVmNetworkMode,
+  minimumCreateDiskGb,
+  normalizeVmNetworkMode,
+  slugify,
+} from "../../../packages/shared/src/helpers.js";
 import type {
   ActionJob,
   AppState,
@@ -26,6 +31,7 @@ import type {
   ProviderMutation,
   ProviderTelemetrySample,
 } from "./providers.js";
+import { buildSyntheticSession } from "./providers-synthetic.js";
 import type { StateStore } from "./store.js";
 import { FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE } from "./template-defaults.js";
 
@@ -649,28 +655,11 @@ export function validateVmCloneResources(
   }
 }
 
-export function normalizeVmNetworkMode(mode: VmNetworkMode | undefined): VmNetworkMode {
-  return mode === "dmz" ? "dmz" : "default";
-}
-
-export function describeVmNetworkMode(mode: VmNetworkMode | undefined): string {
-  return normalizeVmNetworkMode(mode) === "dmz" ? "dmz" : "default bridge";
-}
+export { describeVmNetworkMode, normalizeVmNetworkMode };
 
 export function buildProviderRef(vmId: string, name: string): string {
   const slug = slugify(name) || "workspace";
   return `parallaize-${vmId}-${slug}`;
-}
-
-export function buildSyntheticSession(): VmInstance["session"] {
-  return {
-    kind: "synthetic",
-    host: null,
-    port: null,
-    webSocketPath: null,
-    browserPath: null,
-    display: "Synthetic frame stream",
-  };
 }
 
 export function validateForwardedPorts(forwardedPorts: TemplatePortForward[]): void {
