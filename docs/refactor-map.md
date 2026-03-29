@@ -11,7 +11,7 @@ Target direction:
 1. `packages/shared`: stable contracts, helpers, and types with no Node, React, or app-runtime imports.
 2. Pure feature logic inside each runtime: selectors, formatters, validation, and state-shaping helpers that should only depend on shared contracts plus same-runtime pure modules.
 3. Runtime adapters at the edge:
-   - `apps/control/src/providers.ts`, `apps/control/src/store.ts`, `apps/control/src/network.ts`, `apps/control/src/config.ts`
+   - `apps/control/src/providers.ts`, `apps/control/src/providers-contracts.ts`, `apps/control/src/providers-incus.ts`, `apps/control/src/store.ts`, `apps/control/src/network.ts`, `apps/control/src/config.ts`
    - browser-only hooks and transport adapters such as `apps/web/src/NoVncViewport.tsx`, `apps/web/src/desktopResolution.ts`, `apps/web/src/dashboardPersistence.ts`, and `apps/web/src/dashboardResolutionControl.ts`
 4. Composition roots and entrypoints only:
    - `apps/control/src/server.ts`
@@ -42,10 +42,11 @@ Main runtime flows:
 
 Top dependency chains today:
 
-- `DashboardApp.tsx` -> browser APIs, dashboard transport/fullscreen/persistence/resolution-control services, desktop helpers, noVNC adapter, and shared contracts.
+- `DashboardApp.tsx` -> browser APIs, dashboard transport/fullscreen/persistence/resolution-control services, extracted dialog/rail/shared-ui modules, desktop helpers, noVNC adapter, and shared contracts.
 - `server.ts` -> config/store/provider/manager/network bridge plus auth/session, route modules, event-stream service, and release-cache wiring.
 - `manager.ts` -> composition root over `manager-core.ts`, `manager-read-models.ts`, `manager-commands.ts`, and `manager-workers.ts`.
-- `providers.ts` -> shared helpers/contracts, guest bootstrap scripts, Incus CLI, sockets, and host probes.
+- `providers.ts` -> facade over `providers-contracts.ts` plus the heavy runtime in `providers-incus.ts`.
+- `providers-incus.ts` -> shared helpers/contracts, guest bootstrap scripts, Incus CLI, sockets, and host probes.
 - `store.ts` -> store composition and re-exports over `store-types.ts`, `store-normalize.ts`, `store-json.ts`, and `store-postgres.ts`.
 
 ## HTTP Surface Inventory
@@ -117,7 +118,9 @@ HTTP route groups are now split across `apps/control/src/server-routes-public.ts
 
 ## Provider Surface Inventory
 
-`apps/control/src/providers.ts` currently covers two implementations behind one interface:
+`apps/control/src/providers.ts` is now a small facade over `apps/control/src/providers-contracts.ts` and `apps/control/src/providers-incus.ts`.
+
+`apps/control/src/providers-incus.ts` still covers two implementations behind one interface:
 
 - Host probing and provider health:
   - `refreshState()`
@@ -158,7 +161,7 @@ Incus-specific internals still span networking ACLs, guest DNS profile sync, Inc
 
 ## Dashboard Surface Inventory
 
-`apps/web/src/DashboardApp.tsx` currently owns these feature areas in one file:
+`apps/web/src/DashboardApp.tsx` still owns these feature areas in one file, but some leaf surfaces now live beside it:
 
 - App shell:
   - initial boot, summary loading, health polling, release polling
@@ -173,7 +176,10 @@ Incus-specific internals still span networking ACLs, guest DNS profile sync, Inc
   - file browser, touched files, disk usage, snapshot launch/restore, template capture
   - repo-source editing for trusted collection metadata
 - Dialogs:
-  - create, clone VM, rename, template clone, template edit, VM logs
+  - create, clone VM, rename, template clone, template edit, and VM logs now render through `apps/web/src/dashboardDialogs.tsx`
+- Rail and shared UI:
+  - `apps/web/src/dashboardRail.tsx` now owns the rail tile/icon layer
+  - `apps/web/src/dashboardUi.tsx` now owns reusable popover, telemetry, class-name, and log-output helpers
 - Browser-only persistence:
   - `apps/web/src/dashboardPersistence.ts` now owns localStorage-backed rail width, sidepanel width, live preview preference, overview collapse, CPU thresholds, and resolution preferences
   - `apps/web/src/dashboardResolutionControl.ts` now owns browser-tab client IDs plus lease claim/release coordination
@@ -186,7 +192,7 @@ Incus-specific internals still span networking ACLs, guest DNS profile sync, Inc
 
 - Persisted state normalization belongs in `apps/control/src/store-normalize.ts` and future persistence-focused helpers. Callers should consume normalized state, not replicate migration rules.
 - Persistence adapters belong in `apps/control/src/store-json.ts` and `apps/control/src/store-postgres.ts`. Callers should stay on the `StateStore` interface exported by `apps/control/src/store.ts`.
-- Raw Incus CLI details belong in `apps/control/src/providers.ts` and future Incus-only submodules. `manager.ts`, `server.ts`, and `packages/shared` should only depend on provider contracts and provider state.
+- Raw Incus CLI details belong in `apps/control/src/providers-incus.ts` and future Incus-only submodules. `manager.ts`, `server.ts`, and `packages/shared` should only depend on provider contracts and provider state.
 - Browser-only storage, DOM, fullscreen, and visibility APIs belong in the web app only. Shared contracts and control-plane code should not know about them.
 - Browser fetch/SSE transport details belong in `apps/web/src/dashboardTransport.ts`, and fullscreen coordination belongs in `apps/web/src/dashboardFullscreen.ts`, not in shared contracts or control-plane code.
 - Browser-local storage/document helpers belong in `apps/web/src/dashboardPersistence.ts`, and resolution-control lease storage belongs in `apps/web/src/dashboardResolutionControl.ts`, not inline in `DashboardApp.tsx`.
@@ -216,7 +222,7 @@ High-risk behavior is already pinned by tests before major extractions:
 
 - Hotspot files move below rough budgets:
   - `DashboardApp.tsx` under 3k LOC
-  - `providers.ts` under 2.5k LOC
+  - `providers-incus.ts` under 2.5k LOC
   - `manager.ts` under 1.5k LOC
   - `server.ts` under 900 LOC
   - `styles.css` split into smaller feature files
@@ -233,15 +239,17 @@ High-risk behavior is already pinned by tests before major extractions:
   - Landed seam: `manager.ts` now composes `manager-core.ts`, `manager-read-models.ts`, `manager-commands.ts`, and `manager-workers.ts`.
   - Next extraction target: pull the remaining private job/publish glue out if the coordinator starts growing again.
 - `apps/control/src/providers.ts`
-  - Target seam: provider interface, mock provider, Incus lifecycle, Incus guest inspection, Incus network/ACL management, and command/streaming helpers.
+  - Landed seam: `providers.ts` is now a thin facade over `providers-contracts.ts` and `providers-incus.ts`.
+  - Next extraction target: peel host/network/guest/progress helper categories out of `providers-incus.ts`.
 - `apps/control/src/store.ts`
   - Landed seam: `store.ts` facade over store interface, JSON backend, PostgreSQL backend, and normalization/migration helpers.
 - `apps/web/src/DashboardApp.tsx`
-  - Landed seam: dashboard transport/fullscreen/persistence/resolution-control services extracted.
-  - Next extraction target: app-shell state, workspace stage, dialogs, and sidepanel feature components.
+  - Landed seam: dashboard transport/fullscreen/persistence/resolution-control services extracted, with dialogs in `dashboardDialogs.tsx`, rail tiles/icons in `dashboardRail.tsx`, and reusable UI in `dashboardUi.tsx`.
+  - Next extraction target: app-shell state, workspace stage, overview, and sidepanel feature components.
 - `apps/web/src/NoVncViewport.tsx`
   - Target seam: noVNC loader, connection-state reducer, clipboard helpers, and viewport observers.
 - `apps/web/src/styles.css`
-  - Target seam: tokens, shell layout, workspace layout, dialog styles, sidepanel styles, and feature-local styles.
+  - Landed seam: `styles.css` is now an import hub over `styles/tokens.css`, `styles/rail.css`, `styles/stage.css`, `styles/sidepanel.css`, and `styles/dialogs-novnc.css`.
+  - Next extraction target: keep feature-local rules moving closer to the components that own them if additional UI work grows those files again.
 - `apps/control/src/ubuntu-guest-init.ts`
   - Target seam: template-init scripts, desktop repair scripts, wallpaper/bootstrap helpers, and guest command snippets.

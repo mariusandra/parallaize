@@ -1,0 +1,531 @@
+.dialog-panel.dialog-panel--logs {
+  width: min(80vw, 100%);
+}
+
+.vm-logs__meta {
+  margin-bottom: 0.85rem;
+}
+
+.vm-logs__output {
+  --vm-log-bg: rgba(4, 7, 11, 0.92);
+  --vm-log-fg: rgba(255, 255, 255, 0.92);
+  margin: 0.85rem 0 0;
+  min-height: 20rem;
+  max-height: min(70vh, 46rem);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--vm-log-bg);
+  padding: 0.85rem 0.95rem;
+  color: var(--vm-log-fg);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 7, 10, 0.52);
+  padding: 1rem;
+}
+
+.dialog-panel {
+  width: min(660px, 100%);
+  border-radius: 1.4rem;
+  padding: 1rem;
+}
+
+.dialog-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.dialog-panel__title {
+  font-size: 2.1rem;
+  line-height: 1.5;
+}
+
+.dialog-panel__template {
+  display: grid;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--panel-muted);
+  padding: 0.85rem;
+}
+
+.loading-shell {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 1rem;
+}
+
+.loading-shell__panel,
+.login-shell {
+  width: min(520px, 100%);
+  border-radius: 1.4rem;
+  padding: 1.1rem;
+}
+
+.login-shell {
+  width: min(460px, 100%);
+}
+
+.login-shell__header,
+.login-shell__form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.login-shell__form {
+  margin-top: 1rem;
+}
+
+.login-shell__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.loading-shell__title {
+  margin-top: 0;
+  font-size: clamp(2.2rem, 6vw, 3rem);
+  line-height: 0.92;
+}
+
+.novnc-shell {
+  height: 100%;
+}
+
+.novnc-shell__overlay {
+  position: absolute;
+  top: 0.65rem;
+  left: 0.65rem;
+  z-index: 5;
+}
+
+.novnc-shell__status-pill {
+  min-height: 1.55rem;
+  border-color: transparent;
+  background: rgba(4, 7, 11, 0.74);
+  color: rgba(255, 255, 255, 0.88);
+  letter-spacing: 0.08em;
+}
+
+.novnc-shell__status-pill--connected {
+  background: rgba(16, 185, 129, 0.2);
+  color: #a7f3d0;
+}
+
+.novnc-shell__status-pill--connecting {
+  background: rgba(56, 189, 248, 0.2);
+  color: #bae6fd;
+}
+
+.novnc-shell__status-pill--disconnected {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fde68a;
+}
+
+.novnc-shell__status-pill--error {
+  background: rgba(244, 63, 94, 0.22);
+  color: #fecdd3;
+}
+
+.novnc-surface {
+  position: relative;
+  min-height: 100%;
+}
+
+.novnc-shell--remote {
+  overflow: auto;
+}
+
+.novnc-shell--fit {
+  overflow: hidden;
+}
+
+.novnc-surface--remote {
+  display: grid;
+  place-items: center;
+}
+
+.novnc-surface--fit {
+  display: grid;
+  place-items: center;
+}
+
+.novnc-surface canvas {
+  display: block;
+}
+
+.novnc-surface--remote canvas {
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+}
+
+.novnc-surface--fit canvas,
+.novnc-surface--scale canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.status-badge {
+  min-height: 1.65rem;
+}
+
+.status-badge--running {
+  border-color: rgba(34, 197, 94, 0.22);
+  background: rgba(34, 197, 94, 0.1);
+  color: #15803d;
+}
+
+.status-badge--stopped {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: rgba(245, 158, 11, 0.1);
+  color: #a16207;
+}
+
+.status-badge--creating {
+  border-color: rgba(56, 189, 248, 0.22);
+  background: rgba(56, 189, 248, 0.1);
+  color: #0369a1;
+}
+
+.status-badge--deleting {
+  border-color: rgba(251, 113, 133, 0.2);
+  background: rgba(251, 113, 133, 0.1);
+  color: #be123c;
+}
+
+.status-badge--error {
+  border-color: rgba(180, 35, 24, 0.24);
+  background: rgba(180, 35, 24, 0.1);
+  color: var(--danger);
+}
+
+.status-badge--default {
+  border-color: var(--line);
+  background: var(--panel-muted);
+  color: var(--ink-soft);
+}
+
+:root[data-theme="dark"] .status-badge--running {
+  color: #86efac;
+}
+
+:root[data-theme="dark"] .status-badge--stopped {
+  color: #fcd34d;
+}
+
+:root[data-theme="dark"] .status-badge--creating {
+  color: #7dd3fc;
+}
+
+.skeleton-shell {
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+@keyframes workspace-boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1380px) {
+  .workspace-shell {
+    grid-template-rows: 1fr; 
+    grid-template-columns: clamp(280px, 22vw, 340px) minmax(0, 1fr) auto;
+    height: 100%;
+  }
+
+  .workspace-sidepanel,
+  .workspace-sidepanel--overview {
+    width: min(348px, 30vw);
+    min-width: 296px;
+  }
+}
+
+@media (max-width: 1120px) {
+  body {
+    overflow: auto;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+    padding: 0;
+  }
+
+  .workspace-shell {
+    grid-template-rows: 1fr;
+    grid-template-columns: clamp(280px, 22vw, 340px) minmax(0, 1fr) auto;
+    height: 100%;
+    min-height: 100vh;
+  }
+
+  .workspace-rail {
+    grid-template-rows: auto auto auto minmax(200px, 34vh);
+  }
+
+  .vm-strip {
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  }
+
+  .workspace-sidepanel,
+  .workspace-sidepanel--overview,
+  .workspace-sidepanel--collapsed {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .workspace-sidepanel__resize-track {
+    display: none;
+  }
+
+  .workspace-rail__resize-track {
+    display: none;
+  }
+
+  .workspace-sidepanel--collapsed .workspace-sidepanel__handle {
+    writing-mode: horizontal-tb;
+    transform: none;
+    height: auto;
+  }
+}
+
+@media (max-width: 780px) {
+  .app-shell {
+    padding: 0;
+  }
+
+  .app-shell__notice-stack {
+    top: 0.75rem;
+    width: calc(100% - 1.5rem);
+  }
+
+  .workspace-rail,
+  .workspace-stage,
+  .workspace-sidepanel,
+  .workspace-sidepanel--overview,
+  .dialog-panel,
+  .loading-shell__panel,
+  .login-shell {
+    border-radius: 0;
+  }
+
+  .workspace-rail__meta,
+  .workspace-stage__empty-stats,
+  .compact-grid,
+  .compact-grid--double,
+  .compact-grid--triple,
+  .action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-rail__toolbar,
+  .workspace-stage__chrome-top,
+  .dialog-panel__header,
+  .sidepanel-summary__head {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workspace-stage__identity {
+    max-width: 100%;
+  }
+
+  .workspace-stage__title-row {
+    flex-wrap: wrap;
+  }
+
+  .workspace-stage__header-actions {
+    justify-content: flex-start;
+  }
+
+  .workspace-stage__empty-title {
+    font-size: clamp(2.2rem, 12vw, 3.6rem);
+  }
+
+  .vm-strip {
+    grid-template-columns: 1fr;
+  }
+}
+
+.novnc-shell__clipboard {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 4;
+  display: grid;
+  gap: 0.4rem;
+  justify-items: end;
+  max-width: min(30rem, calc(100% - 1.1rem));
+  pointer-events: none;
+}
+
+.novnc-shell__clipboard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  width: 100%;
+  pointer-events: auto;
+}
+
+.novnc-shell__clipboard-button {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(6, 10, 15, 0.72);
+  color: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(16px);
+}
+
+.novnc-shell__clipboard-button:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(10, 15, 21, 0.84);
+}
+
+.novnc-shell__clipboard-button:disabled {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(6, 10, 15, 0.42);
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.novnc-shell__clipboard-button--accent {
+  border-color: rgba(56, 189, 248, 0.2);
+  background: rgba(14, 116, 144, 0.72);
+  color: #ecfeff;
+}
+
+.novnc-shell__clipboard-dismiss {
+  min-width: 2rem;
+  padding-inline: 0.55rem;
+  font-size: 0.88rem;
+  text-transform: none;
+}
+
+.novnc-shell__clipboard-copy {
+  margin: 0;
+  width: min(30rem, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.95rem;
+  background: rgba(6, 10, 15, 0.68);
+  padding: 0.58rem 0.75rem;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  text-align: right;
+  backdrop-filter: blur(16px);
+  pointer-events: auto;
+}
+
+.novnc-shell__clipboard-copy--success {
+  border-color: rgba(16, 185, 129, 0.18);
+  color: #a7f3d0;
+}
+
+.novnc-shell__clipboard-copy--warning {
+  border-color: rgba(245, 158, 11, 0.18);
+  color: #fde68a;
+}
+
+.novnc-shell__clipboard-copy--muted {
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.novnc-shell__clipboard-panel {
+  display: grid;
+  gap: 0.45rem;
+  width: min(30rem, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  background: rgba(6, 10, 15, 0.82);
+  padding: 0.7rem;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(16px);
+  pointer-events: auto;
+}
+
+.novnc-shell__clipboard-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.novnc-shell__clipboard-input {
+  width: 100%;
+  min-height: 7rem;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.8rem;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.75rem 0.8rem;
+  color: #f8fafc;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.novnc-shell__clipboard-input::placeholder {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.novnc-shell__clipboard-input:focus {
+  outline: 2px solid rgba(56, 189, 248, 0.45);
+  outline-offset: 1px;
+  border-color: rgba(56, 189, 248, 0.38);
+}
+
+.novnc-shell__clipboard-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+@media (max-width: 780px) {
+  .novnc-shell__clipboard {
+    left: 0.45rem;
+    right: 0.45rem;
+    justify-items: stretch;
+    max-width: none;
+  }
+
+  .novnc-shell__clipboard-actions {
+    justify-content: stretch;
+  }
+
+  .novnc-shell__clipboard-actions .button {
+    flex: 1 1 10rem;
+  }
+
+  .novnc-shell__clipboard-copy {
+    width: 100%;
+    text-align: left;
+  }
+
+  .novnc-shell__clipboard-panel {
+    width: 100%;
+  }
+
+  .novnc-shell__clipboard-panel-actions {
+    justify-content: stretch;
+  }
+
+  .novnc-shell__clipboard-panel-actions .button {
+    flex: 1 1 auto;
+  }
+}
