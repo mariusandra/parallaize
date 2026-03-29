@@ -529,11 +529,21 @@
 }
 
 .vm-tile__preview > *,
+.vm-tile__preview .novnc-shell,
+.vm-tile__preview .novnc-surface,
+.vm-tile__preview canvas,
 .workspace-stage__surface > *,
 .workspace-fallback > *,
 .novnc-shell > .novnc-surface {
   width: 100%;
   height: 100%;
+}
+
+.vm-tile__preview > *,
+.vm-tile__preview .novnc-shell,
+.vm-tile__preview .novnc-surface,
+.vm-tile__preview canvas {
+  pointer-events: none;
 }
 
 .pattern-preview {
@@ -844,4 +854,3 @@
 .menu-action--danger {
   color: var(--danger);
 }
-

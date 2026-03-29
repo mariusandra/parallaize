@@ -5,7 +5,6 @@ import { cpus, freemem, loadavg, networkInterfaces, totalmem } from "node:os";
 import { slugify } from "../../../packages/shared/src/helpers.js";
 import type {
   EnvironmentTemplate,
-  ProviderKind,
   ProviderState,
   ResourceSpec,
   Snapshot,
@@ -26,384 +25,101 @@ import {
   buildEnsureGuestDesktopBootstrapScript,
   buildGuestDisplayDiscoveryScript,
   buildGuestVncCloudInit,
-  DEFAULT_GUEST_HOME,
   type GuestDesktopBootstrapRepairProfile,
 } from "./ubuntu-guest-init.js";
-
-const DEFAULT_GUEST_VNC_PORT = 5900;
-const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
-const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
-const DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 30_000;
-const REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 5_000;
-const DEFAULT_GUEST_AGENT_RETRY_MS = 5_000;
-const DEFAULT_GUEST_AGENT_RETRY_TIMEOUT_MS = 60_000;
-const DEFAULT_GUEST_WORKSPACE = "/root";
-const DEFAULT_GUEST_INIT_LOG_PATH = "/var/log/parallaize-template-init.log";
-const DEFAULT_VM_CREATE_HEARTBEAT_MS = 4000;
-const VM_CREATE_ALLOCATION_START_PERCENT = 18;
-const VM_CREATE_ALLOCATION_COMPLETE_PERCENT = 58;
-const VM_CREATE_CONFIGURE_PERCENT = 64;
-const VM_CREATE_GUEST_AGENT_PERCENT = 70;
-const VM_CREATE_BOOT_START_PERCENT = 76;
-const VM_CREATE_DESKTOP_WAIT_START_PERCENT = 84;
-const VM_CREATE_READY_PERCENT = 96;
-const VM_CLONE_COPY_START_PERCENT = 52;
-const VM_CLONE_CONFIGURE_PERCENT = 60;
-const VM_CLONE_NETWORK_PERCENT = 68;
-const SNAPSHOT_LAUNCH_COPY_START_PERCENT = 48;
-const SNAPSHOT_LAUNCH_CONFIGURE_PERCENT = 58;
-const SNAPSHOT_LAUNCH_NETWORK_PERCENT = 68;
-const DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS = 4000;
-const TEMPLATE_PUBLISH_START_PERCENT = 58;
-const TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT = 78;
-const TEMPLATE_PUBLISH_COMPLETE_PERCENT = 92;
-const BYTES_PER_GIB = 1024 ** 3;
-const VM_DISK_WARNING_FREE_BYTES = 4 * BYTES_PER_GIB;
-const VM_DISK_CRITICAL_FREE_BYTES = BYTES_PER_GIB;
-const INCUS_PROBE_TIMEOUT_MS = 1_000;
-const HOST_NETWORK_PROBE_CACHE_MS = 60_000;
-const HOST_DAEMON_PROBE_CACHE_MS = 60_000;
-const HOST_NETWORK_PROBE_TIMEOUT_MS = 2_500;
-const PARALLAIZE_DMZ_ACL_NAME = "parallaize-dmz";
-const LEGACY_PARALLAIZE_DMZ_ACL_NAME = "parallaize-airgap";
-const PARALLAIZE_DMZ_GUEST_DNS_DROPIN_PATH =
-  "/etc/systemd/resolved.conf.d/60-parallaize-dmz.conf";
-const PARALLAIZE_DMZ_PUBLIC_DNS_SERVERS = [
-  "1.1.1.1",
-  "1.0.0.1",
-  "2606:4700:4700::1111",
-  "2606:4700:4700::1001",
-];
-
-export interface CaptureTemplateTarget {
-  templateId: string;
-  name: string;
-}
-
-export interface CreateProviderOptions {
-  project?: string;
-  storagePool?: string;
-  guestVncPort?: number;
-  guestInotifyMaxUserWatches?: number;
-  guestInotifyMaxUserInstances?: number;
-  guestDesktopBootstrapRetryMs?: number;
-  guestAgentRetryMs?: number;
-  guestAgentRetryTimeoutMs?: number;
-  commandRunner?: IncusCommandRunner;
-  guestPortProbe?: GuestPortProbe;
-  hostNetworkProbe?: HostNetworkProbe;
-  hostDaemonProbe?: HostDaemonProbe;
-  templatePublishHeartbeatMs?: number;
-  templateCompression?: IncusImageCompression;
-}
-
-export type CaptureTemplateProgressReporter = (
-  message: string,
-  progressPercent: number | null,
-) => void;
-
-export type ProviderProgressReporter = (
-  message: string,
-  progressPercent: number | null,
-) => void;
-
-export interface VmLogsStreamListeners {
-  onAppend?(chunk: string): void;
-  onClose?(): void;
-  onError?(error: Error): void;
-}
-
-export interface VmLogsStreamHandle {
-  close(): void;
-}
-
-export interface VmFileContent {
-  content: Buffer;
-  name: string;
-  path: string;
-}
-
-export type IncusImageCompression =
-  | "bzip2"
-  | "gzip"
-  | "lz4"
-  | "lzma"
-  | "xz"
-  | "zstd"
-  | "none";
-
-export interface DesktopProvider {
-  state: ProviderState;
-  refreshState(): ProviderState;
-  sampleHostTelemetry(): ProviderTelemetrySample | null;
-  sampleVmTelemetry(vm: VmInstance): ProviderTelemetrySample | null;
-  observeVmPowerState(vm: VmInstance): ProviderVmPowerState | null;
-  refreshVmSession(vm: VmInstance): Promise<VmSession | null>;
-  createVm(
-    vm: VmInstance,
-    template: EnvironmentTemplate,
-    report?: ProviderProgressReporter,
-  ): Promise<ProviderMutation>;
-  cloneVm(
-    sourceVm: VmInstance,
-    targetVm: VmInstance,
-    template: EnvironmentTemplate,
-    report?: ProviderProgressReporter,
-  ): Promise<ProviderMutation>;
-  startVm(vm: VmInstance): Promise<ProviderMutation>;
-  stopVm(vm: VmInstance): Promise<ProviderMutation>;
-  deleteVm(vm: VmInstance): Promise<ProviderMutation>;
-  resizeVm(vm: VmInstance, resources: ResourceSpec): Promise<ProviderMutation>;
-  setNetworkMode(vm: VmInstance, networkMode: VmNetworkMode): Promise<ProviderMutation>;
-  setDisplayResolution(vm: VmInstance, width: number, height: number): Promise<void>;
-  snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot>;
-  launchVmFromSnapshot(
-    snapshot: Snapshot,
-    targetVm: VmInstance,
-    template: EnvironmentTemplate,
-    report?: ProviderProgressReporter,
-  ): Promise<ProviderMutation>;
-  restoreVmToSnapshot(
-    vm: VmInstance,
-    snapshot: Snapshot,
-  ): Promise<ProviderMutation>;
-  captureTemplate(
-    vm: VmInstance,
-    target: CaptureTemplateTarget,
-    report?: CaptureTemplateProgressReporter,
-  ): Promise<ProviderSnapshot>;
-  injectCommand(vm: VmInstance, command: string): Promise<ProviderMutation>;
-  readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot>;
-  streamVmLogs?(
-    vm: VmInstance,
-    listeners: VmLogsStreamListeners,
-  ): VmLogsStreamHandle;
-  readVmDiskUsage?(vm: VmInstance): Promise<VmDiskUsageSnapshot>;
-  browseVmFiles(vm: VmInstance, path?: string | null): Promise<VmFileBrowserSnapshot>;
-  readVmFile(vm: VmInstance, path: string): Promise<VmFileContent>;
-  readVmTouchedFiles(vm: VmInstance): Promise<VmTouchedFilesSnapshot>;
-  tickVm(vm: VmInstance, template: EnvironmentTemplate): ProviderTick | null;
-  renderFrame(
-    vm: VmInstance,
-    template: EnvironmentTemplate | null,
-    mode: "tile" | "detail",
-  ): string;
-}
-
-export interface ProviderMutation {
-  lastAction: string;
-  activity: string[];
-  activeWindow?: VmWindow;
-  workspacePath?: string;
-  session?: VmSession | null;
-  commandResult?: ProviderCommandResult;
-}
-
-export interface ProviderSnapshot {
-  providerRef: string;
-  summary: string;
-  launchSource?: string;
-}
-
-export interface ProviderTick {
-  activity?: string;
-  activeWindow?: VmWindow;
-}
-
-interface ProviderCommandResult {
-  command: string;
-  output: string[];
-  workspacePath: string;
-}
-
-export interface ProviderTelemetrySample {
-  cpuPercent: number | null;
-  ramPercent: number | null;
-}
-
-export interface ProviderVmPowerState {
-  status: "running" | "stopped";
-}
-
-interface ResolveSessionOptions {
-  requireBootstrapRepairBeforeReady?: boolean;
-  guestWallpaperName?: string;
-  bootstrapRepairProfile?: GuestDesktopBootstrapRepairProfile;
-  bootstrapRepairRetryMs?: number;
-}
-
-interface IncusCommandRunner {
-  execute(args: string[], options?: CommandExecutionOptions): CommandResult;
-  executeStreaming?(
-    args: string[],
-    listeners?: CommandStreamListeners,
-  ): Promise<CommandResult>;
-  startStreaming?(
-    args: string[],
-    listeners?: CommandStreamListeners,
-  ): CommandStreamHandle;
-}
-
-interface CommandResult {
-  args: string[];
-  status: number | null;
-  stdout: string;
-  stderr: string;
-  error?: Error;
-}
-
-interface CommandExecutionOptions {
-  timeoutMs?: number;
-}
-
-interface CommandStreamListeners {
-  onStdout?(chunk: string): void;
-  onStderr?(chunk: string): void;
-}
-
-interface CommandStreamHandle {
-  close(): void;
-  completed: Promise<CommandResult>;
-}
-
-interface GuestPortProbe {
-  probe(host: string, port: number): Promise<boolean>;
-}
-
-interface HostNetworkProbe {
-  probe(): HostNetworkDiagnostic;
-}
-
-interface HostNetworkDiagnostic {
-  status: "ready" | "unreachable" | "unknown";
-  detail: string | null;
-  nextSteps: string[];
-}
-
-interface HostDaemonProbe {
-  probe(): HostDaemonDiagnostic;
-}
-
-interface HostDaemonDiagnostic {
-  status: "ready" | "conflict" | "unknown";
-  detail: string | null;
-  nextSteps: string[];
-}
-
-interface IncusDaemonOwnershipSnapshot {
-  processLines: string[];
-  socketActive: boolean | null;
-  socketEnabled: boolean | null;
-  serviceActive: boolean | null;
-  serviceEnabled: boolean | null;
-}
-
-interface IncusListInstance {
-  name?: string;
-  status?: string;
-  devices?: Record<string, IncusInstanceDevice>;
-  expanded_devices?: Record<string, IncusInstanceDevice>;
-  state?: {
-    status?: string;
-    network?: Record<
-      string,
-      {
-        host_name?: string;
-        type?: string;
-        addresses?: Array<{
-          family?: string;
-          address?: string;
-          scope?: string;
-        }>;
-      }
-    >;
-    memory?: {
-      usage?: number;
-      total?: number;
-    };
-    cpu?: {
-      usage?: number;
-      allocated_time?: number;
-    };
-  };
-}
-
-interface IncusInstanceDevice {
-  path?: string;
-  network?: string;
-  parent?: string;
-  pool?: string;
-  source?: string;
-  type?: string;
-}
-
-interface IncusNetwork {
-  config?: Record<string, string>;
-  managed?: boolean;
-  name?: string;
-  type?: string;
-}
-
-interface IncusNetworkAclRule {
-  action: "allow" | "drop";
-  destination?: string;
-  destination_port?: string;
-  protocol?: string;
-  source?: string;
-  state: "enabled";
-}
-
-interface IncusNetworkAclPayload {
-  config: Record<string, string>;
-  description: string;
-  egress: IncusNetworkAclRule[];
-  ingress: IncusNetworkAclRule[];
-}
-
-interface IncusOperationProgressMetadata {
-  percent?: string;
-  processed?: string;
-  speed?: string;
-  stage?: string;
-}
-
-interface IncusOperation {
-  id?: string;
-  created_at?: string;
-  metadata?: {
-    create_image_from_container_pack_progress?: string;
-    progress?: IncusOperationProgressMetadata;
-  };
-}
-
-interface IncusOperationListResponse {
-  running?: IncusOperation[];
-}
-
-type TemplatePublishProgressSample =
-  | {
-      kind: "export";
-      percent: number;
-      detail: string;
-    }
-  | {
-      kind: "pack";
-      processedBytes: number;
-      speedBytesPerSecond: number | null;
-      detail: string;
-    };
-
-export function createProvider(
-  kind: ProviderKind,
-  incusBinary: string,
-  options: CreateProviderOptions = {},
-): DesktopProvider {
-  if (kind === "incus") {
-    return new IncusProvider(incusBinary, options);
-  }
-
-  return new MockProvider();
-}
+import {
+  BYTES_PER_GIB,
+  DEFAULT_GUEST_AGENT_RETRY_MS,
+  DEFAULT_GUEST_AGENT_RETRY_TIMEOUT_MS,
+  DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
+  DEFAULT_GUEST_HOME,
+  DEFAULT_GUEST_INIT_LOG_PATH,
+  DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES,
+  DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES,
+  DEFAULT_GUEST_VNC_PORT,
+  DEFAULT_GUEST_WORKSPACE,
+  DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS,
+  DEFAULT_VM_CREATE_HEARTBEAT_MS,
+  HOST_DAEMON_PROBE_CACHE_MS,
+  HOST_NETWORK_PROBE_CACHE_MS,
+  HOST_NETWORK_PROBE_TIMEOUT_MS,
+  INCUS_PROBE_TIMEOUT_MS,
+  LEGACY_PARALLAIZE_DMZ_ACL_NAME,
+  PARALLAIZE_DMZ_ACL_NAME,
+  PARALLAIZE_DMZ_GUEST_DNS_DROPIN_PATH,
+  PARALLAIZE_DMZ_PUBLIC_DNS_SERVERS,
+  REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
+  SNAPSHOT_LAUNCH_CONFIGURE_PERCENT,
+  SNAPSHOT_LAUNCH_COPY_START_PERCENT,
+  SNAPSHOT_LAUNCH_NETWORK_PERCENT,
+  TEMPLATE_PUBLISH_COMPLETE_PERCENT,
+  TEMPLATE_PUBLISH_START_PERCENT,
+  VM_CLONE_CONFIGURE_PERCENT,
+  VM_CLONE_COPY_START_PERCENT,
+  VM_CLONE_NETWORK_PERCENT,
+  VM_CREATE_ALLOCATION_COMPLETE_PERCENT,
+  VM_CREATE_ALLOCATION_START_PERCENT,
+  VM_CREATE_BOOT_START_PERCENT,
+  VM_CREATE_CONFIGURE_PERCENT,
+  VM_CREATE_DESKTOP_WAIT_START_PERCENT,
+  VM_CREATE_GUEST_AGENT_PERCENT,
+  VM_CREATE_READY_PERCENT,
+  VM_DISK_CRITICAL_FREE_BYTES,
+  VM_DISK_WARNING_FREE_BYTES,
+} from "./providers-contracts.js";
+import type {
+  CaptureTemplateProgressReporter,
+  CaptureTemplateTarget,
+  CommandExecutionOptions,
+  CommandResult,
+  CommandStreamHandle,
+  CommandStreamListeners,
+  CreateProviderOptions,
+  DesktopProvider,
+  GuestPortProbe,
+  HostDaemonDiagnostic,
+  HostDaemonProbe,
+  HostNetworkDiagnostic,
+  HostNetworkProbe,
+  IncusCommandRunner,
+  IncusDaemonOwnershipSnapshot,
+  IncusInstanceDevice,
+  IncusImageCompression,
+  IncusListInstance,
+  IncusNetwork,
+  IncusNetworkAclPayload,
+  IncusNetworkAclRule,
+  IncusOperation,
+  IncusOperationListResponse,
+  ProviderMutation,
+  ProviderProgressReporter,
+  ProviderSnapshot,
+  ProviderTelemetrySample,
+  ProviderTick,
+  ProviderVmPowerState,
+  ResolveSessionOptions,
+  TemplatePublishProgressSample,
+  VmFileContent,
+  VmLogsStreamHandle,
+  VmLogsStreamListeners,
+} from "./providers-contracts.js";
+import {
+  buildProgressEmitter,
+  describeTemplatePublishActivity,
+  estimateTemplatePublishProgress,
+  estimateVmCreateAllocationProgress,
+  estimateVmCreateDesktopWaitProgress,
+  formatByteCount,
+  mapPercentToRange,
+  mapTemplatePublishProgress,
+  normalizeStatus,
+  normalizeVmLogContent,
+  parseTemplatePublishOperation,
+  parseTemplatePublishProgressChunk,
+  parseVmCreateProgressChunk,
+  pickTemplatePublishOperation,
+  shouldRequireGuestBootstrapRepairBeforeReady,
+} from "./providers-incus-progress.js";
 
 export class MockProvider implements DesktopProvider {
   state: ProviderState = buildMockProviderState();
@@ -3507,369 +3223,6 @@ function resolveGuestWallpaperName(vm: Pick<VmInstance, "name" | "wallpaperName"
     typeof vm.wallpaperName === "string" ? vm.wallpaperName.trim() : "";
 
   return wallpaperName || vm.name;
-}
-
-function describeTemplatePublishActivity(
-  compression: IncusImageCompression | null,
-): string {
-  switch (compression) {
-    case "bzip2":
-    case "gzip":
-    case "lz4":
-    case "lzma":
-    case "xz":
-    case "zstd":
-      return `${compression} compression in progress`;
-    case "none":
-    case null:
-    default:
-      return "uncompressed export in progress";
-  }
-}
-
-function estimateTemplatePublishProgress(
-  startedAt: number,
-  heartbeatMs: number,
-  diskGb: number,
-): number {
-  const elapsedMs = Date.now() - startedAt;
-  const durationMs = estimateTemplatePublishDurationMs(diskGb);
-  const span = TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT - TEMPLATE_PUBLISH_START_PERCENT;
-  const estimatedByDuration = Math.round((elapsedMs / Math.max(durationMs, 1)) * span);
-  const heartbeatFloor =
-    elapsedMs >= heartbeatMs
-      ? 1
-      : 0;
-
-  return Math.min(
-    TEMPLATE_PUBLISH_START_PERCENT + Math.max(estimatedByDuration, heartbeatFloor),
-    TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT - 1,
-  );
-}
-
-function estimateTemplatePublishDurationMs(diskGb: number): number {
-  const safeDiskGb = Math.max(diskGb, 1);
-  return 15_000 + safeDiskGb * 2_000;
-}
-
-function parseTemplatePublishProgressChunk(chunk: string): TemplatePublishProgressSample | null {
-  const normalized = stripAnsi(chunk).replace(/\r/g, "\n");
-  const packMatches = [...normalized.matchAll(
-    /Image pack:\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]i?B)(?:\s*\(([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]i?B)\/s\))?/gi,
-  )];
-  const packMatch = packMatches.at(-1);
-
-  if (packMatch) {
-    const processedBytes = parseByteSize(packMatch[1], packMatch[2]);
-
-    if (processedBytes !== null) {
-      const speedBytesPerSecond =
-        packMatch[3] && packMatch[4]
-          ? parseByteSize(packMatch[3], packMatch[4])
-          : null;
-
-      return {
-        kind: "pack",
-        processedBytes,
-        speedBytesPerSecond,
-        detail: buildTemplatePackDetail(processedBytes, speedBytesPerSecond),
-      };
-    }
-  }
-
-  const exportMatches = [...normalized.matchAll(/Exporting:\s*(\d{1,3})%/gi)];
-  const rawValue = exportMatches.at(-1)?.[1];
-
-  if (!rawValue) {
-    return null;
-  }
-
-  const percent = Number.parseInt(rawValue, 10);
-
-  if (!Number.isFinite(percent)) {
-    return null;
-  }
-
-  return {
-    kind: "export",
-    percent: Math.min(Math.max(percent, 0), 100),
-    detail: `Exporting: ${Math.min(Math.max(percent, 0), 100)}%`,
-  };
-}
-
-function mapTemplatePublishProgress(
-  sample: TemplatePublishProgressSample,
-  diskGb: number,
-): number {
-  if (sample.kind === "export") {
-    return mapTemplatePublishExportPercent(sample.percent);
-  }
-
-  return mapTemplatePublishPackProgress(sample.processedBytes, diskGb);
-}
-
-function mapTemplatePublishExportPercent(percent: number): number {
-  const bounded = Math.min(Math.max(percent, 0), 100);
-  const span = TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT - TEMPLATE_PUBLISH_START_PERCENT;
-  return TEMPLATE_PUBLISH_START_PERCENT + Math.round((bounded / 100) * span);
-}
-
-function mapTemplatePublishPackProgress(processedBytes: number, diskGb: number): number {
-  const estimatedTotalBytes = Math.max(Math.round(Math.max(diskGb, 1) * BYTES_PER_GIB), 1);
-  const completedFraction = Math.min(Math.max(processedBytes / estimatedTotalBytes, 0), 0.95);
-  const span = TEMPLATE_PUBLISH_COMPLETE_PERCENT - TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT;
-  return TEMPLATE_PUBLISH_EXPORT_COMPLETE_PERCENT + Math.round(completedFraction * span);
-}
-
-function buildTemplatePackDetail(
-  processedBytes: number,
-  speedBytesPerSecond: number | null,
-): string {
-  const processedLabel = formatByteCount(processedBytes);
-
-  if (speedBytesPerSecond && speedBytesPerSecond > 0) {
-    return `Image pack: ${processedLabel} (${formatByteCount(speedBytesPerSecond)}/s)`;
-  }
-
-  return `Image pack: ${processedLabel}`;
-}
-
-function formatByteCount(bytes: number): string {
-  const absBytes = Math.max(bytes, 0);
-  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-  let unitIndex = 0;
-  let value = absBytes;
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-
-  const fractionDigits = value >= 100 || unitIndex === 0
-    ? 0
-    : value >= 10
-      ? 1
-      : 2;
-
-  return `${value.toFixed(fractionDigits)} ${units[unitIndex]}`;
-}
-
-function parseByteSize(rawValue: string, rawUnit: string): number | null {
-  const value = Number.parseFloat(rawValue);
-
-  if (!Number.isFinite(value) || value < 0) {
-    return null;
-  }
-
-  const normalizedUnit = rawUnit.trim().toUpperCase();
-  const multipliers: Record<string, number> = {
-    B: 1,
-    KB: 1000,
-    MB: 1000 ** 2,
-    GB: 1000 ** 3,
-    TB: 1000 ** 4,
-    PB: 1000 ** 5,
-    KIB: 1024,
-    MIB: 1024 ** 2,
-    GIB: 1024 ** 3,
-    TIB: 1024 ** 4,
-    PIB: 1024 ** 5,
-  };
-  const multiplier = multipliers[normalizedUnit];
-
-  if (!multiplier) {
-    return null;
-  }
-
-  return Math.round(value * multiplier);
-}
-
-function buildProgressEmitter(
-  report?: ProviderProgressReporter,
-): ProviderProgressReporter {
-  let lastKey = "";
-
-  return (message, progressPercent) => {
-    if (!report) {
-      return;
-    }
-
-    const normalizedPercent =
-      progressPercent === null || !Number.isFinite(progressPercent)
-        ? null
-        : Math.min(Math.max(Math.round(progressPercent), 0), 100);
-    const key = `${message}\u0000${normalizedPercent ?? "null"}`;
-
-    if (key === lastKey) {
-      return;
-    }
-
-    lastKey = key;
-    report(message, normalizedPercent);
-  };
-}
-
-function parseVmCreateProgressChunk(
-  chunk: string,
-): { detail: string | null; percent: number | null } | null {
-  const detail = stripAnsi(chunk)
-    .split(/[\r\n]+/u)
-    .map((line) => line.trim().replace(/\s+/gu, " "))
-    .filter((line) => line.length > 0)
-    .at(-1);
-
-  if (!detail) {
-    return null;
-  }
-
-  const percentMatch = detail.match(/(\d{1,3})%/u);
-
-  return {
-    detail,
-    percent:
-      percentMatch && Number.isFinite(Number(percentMatch[1]))
-        ? Math.min(Math.max(Number(percentMatch[1]), 0), 100)
-        : null,
-  };
-}
-
-function estimateVmCreateAllocationProgress(
-  startedAt: number,
-  diskGb: number,
-): number {
-  const elapsedMs = Math.max(0, Date.now() - startedAt);
-  const estimatedDurationMs = Math.max(45_000, 15_000 + diskGb * 2_250);
-  const fraction = Math.min(elapsedMs / estimatedDurationMs, 0.92);
-
-  return VM_CREATE_ALLOCATION_START_PERCENT + (
-    fraction * (VM_CREATE_ALLOCATION_COMPLETE_PERCENT - VM_CREATE_ALLOCATION_START_PERCENT)
-  );
-}
-
-function estimateVmCreateDesktopWaitProgress(startedAt: number): number {
-  const elapsedMs = Math.max(0, Date.now() - startedAt);
-  const fraction = Math.min(elapsedMs / (60 * 5_000), 0.96);
-
-  return VM_CREATE_DESKTOP_WAIT_START_PERCENT + (
-    fraction * (VM_CREATE_READY_PERCENT - VM_CREATE_DESKTOP_WAIT_START_PERCENT)
-  );
-}
-
-function normalizeVmLogContent(content: string): string {
-  return content.replace(/\r\n?/g, "\n");
-}
-
-function shouldRequireGuestBootstrapRepairBeforeReady(
-  template: EnvironmentTemplate,
-): boolean {
-  return template.launchSource.startsWith("parallaize-template-");
-}
-
-function mapPercentToRange(percent: number, start: number, end: number): number {
-  const clampedPercent = Math.min(Math.max(percent, 0), 100);
-  return start + (((end - start) * clampedPercent) / 100);
-}
-
-function pickTemplatePublishOperation(
-  operations: IncusOperation[],
-  publishStartedAt: number,
-  knownOperationIds: Set<string>,
-): IncusOperation | null {
-  const candidates = operations
-    .filter((operation) => {
-      if (!operation.id || knownOperationIds.has(operation.id)) {
-        return false;
-      }
-
-      if (!parseTemplatePublishOperation(operation)) {
-        return false;
-      }
-
-      const createdAt = parseTimestamp(operation.created_at);
-
-      if (createdAt === null) {
-        return true;
-      }
-
-      return createdAt >= publishStartedAt - 5_000;
-    })
-    .sort((left, right) => {
-      const leftCreatedAt = parseTimestamp(left.created_at) ?? Number.POSITIVE_INFINITY;
-      const rightCreatedAt = parseTimestamp(right.created_at) ?? Number.POSITIVE_INFINITY;
-      return Math.abs(leftCreatedAt - publishStartedAt) - Math.abs(rightCreatedAt - publishStartedAt);
-    });
-
-  return candidates[0] ?? null;
-}
-
-function parseTemplatePublishOperation(
-  operation: IncusOperation,
-): TemplatePublishProgressSample | null {
-  const progress = operation.metadata?.progress;
-  const detail = operation.metadata?.create_image_from_container_pack_progress;
-
-  if (progress?.stage !== "create_image_from_container_pack") {
-    return null;
-  }
-
-  const percent = parseInteger(progress.percent);
-
-  if (percent !== null) {
-    return {
-      kind: "export",
-      percent: Math.min(Math.max(percent, 0), 100),
-      detail: typeof detail === "string" && detail.trim().length > 0
-        ? detail.trim()
-        : `Exporting: ${Math.min(Math.max(percent, 0), 100)}%`,
-    };
-  }
-
-  const processedBytes = parseInteger(progress.processed);
-
-  if (processedBytes === null) {
-    return null;
-  }
-
-  const speedBytesPerSecond = parseInteger(progress.speed);
-
-  return {
-    kind: "pack",
-    processedBytes,
-    speedBytesPerSecond,
-    detail: typeof detail === "string" && detail.trim().length > 0
-      ? detail.trim()
-      : buildTemplatePackDetail(processedBytes, speedBytesPerSecond),
-  };
-}
-
-function parseInteger(value: string | undefined): number | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed)
-    ? parsed
-    : null;
-}
-
-function parseTimestamp(value: string | undefined): number | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed)
-    ? parsed
-    : null;
-}
-
-function stripAnsi(value: string): string {
-  return value.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
-}
-
-function normalizeStatus(value: string | undefined): string {
-  return value?.trim().toLowerCase() ?? "";
 }
 
 function buildMockVmFileBrowserSnapshot(

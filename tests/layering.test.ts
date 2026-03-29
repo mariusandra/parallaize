@@ -14,6 +14,7 @@ const dashboardResolutionControlPath = resolve(
   webRoot,
   "dashboardResolutionControl.ts",
 );
+const dashboardShellPath = resolve(webRoot, "dashboardShell.ts");
 const storeNormalizePath = resolve(controlRoot, "store-normalize.ts");
 const storeJsonPath = resolve(controlRoot, "store-json.ts");
 const storePostgresPath = resolve(controlRoot, "store-postgres.ts");
@@ -93,6 +94,12 @@ test("extracted runtime helpers keep transport and persistence boundaries narrow
   for (const specifier of readImportSpecifiers(dashboardResolutionControlPath)) {
     if (specifier === "react" || specifier.startsWith("react/")) {
       violations.push("apps/web/src/dashboardResolutionControl.ts imports React");
+    }
+  }
+
+  for (const specifier of readImportSpecifiers(dashboardShellPath)) {
+    if (specifier === "react" || specifier.startsWith("react/")) {
+      violations.push("apps/web/src/dashboardShell.ts imports React");
     }
   }
 

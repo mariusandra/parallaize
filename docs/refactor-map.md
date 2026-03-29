@@ -21,7 +21,7 @@ Target direction:
 Current enforcement:
 
 - `tests/layering.test.ts` blocks web-to-control imports, control-to-web imports, and Node/React imports from `packages/shared`.
-- `tests/layering.test.ts` also keeps `dashboardTransport.ts`, `dashboardFullscreen.ts`, `dashboardPersistence.ts`, and `dashboardResolutionControl.ts` React-free, keeps `store-normalize.ts` free of Node/pg adapters, and prevents cross-pollination between the JSON and PostgreSQL persistence backends.
+- `tests/layering.test.ts` also keeps `dashboardTransport.ts`, `dashboardFullscreen.ts`, `dashboardPersistence.ts`, `dashboardResolutionControl.ts`, and `dashboardShell.ts` React-free, keeps `store-normalize.ts` free of Node/pg adapters, and prevents cross-pollination between the JSON and PostgreSQL persistence backends.
 
 ## Entrypoints And Runtime Flows
 
@@ -120,7 +120,7 @@ HTTP route groups are now split across `apps/control/src/server-routes-public.ts
 
 `apps/control/src/providers.ts` is now a small facade over `apps/control/src/providers-contracts.ts` and `apps/control/src/providers-incus.ts`.
 
-`apps/control/src/providers-incus.ts` still covers two implementations behind one interface:
+`apps/control/src/providers-incus.ts` still covers two implementations behind one interface, but it now delegates template-publish and VM-create progress parsing/status normalization to `apps/control/src/providers-incus-progress.ts`:
 
 - Host probing and provider health:
   - `refreshState()`
@@ -161,7 +161,7 @@ Incus-specific internals still span networking ACLs, guest DNS profile sync, Inc
 
 ## Dashboard Surface Inventory
 
-`apps/web/src/DashboardApp.tsx` still owns these feature areas in one file, but some leaf surfaces now live beside it:
+`apps/web/src/DashboardApp.tsx` still owns these feature areas in one file, but more shell state and surfaces now live beside it:
 
 - App shell:
   - initial boot, summary loading, health polling, release polling
@@ -180,6 +180,11 @@ Incus-specific internals still span networking ACLs, guest DNS profile sync, Inc
 - Rail and shared UI:
   - `apps/web/src/dashboardRail.tsx` now owns the rail tile/icon layer
   - `apps/web/src/dashboardUi.tsx` now owns reusable popover, telemetry, class-name, and log-output helpers
+- Shell and stage helpers:
+  - `apps/web/src/dashboardShell.ts` now owns shell-state types plus pure rail-width, sidepanel-width, and desktop-resolution helpers
+  - `apps/web/src/dashboardStage.tsx` now owns empty/boot/log/fallback stage surfaces plus the viewport-control lock overlay
+- Inspector and overview panels:
+  - `apps/web/src/dashboardSidepanel.tsx` now owns the VM inspector, overview panel, resize handles, and template cards
 - Browser-only persistence:
   - `apps/web/src/dashboardPersistence.ts` now owns localStorage-backed rail width, sidepanel width, live preview preference, overview collapse, CPU thresholds, and resolution preferences
   - `apps/web/src/dashboardResolutionControl.ts` now owns browser-tab client IDs plus lease claim/release coordination
@@ -240,12 +245,13 @@ High-risk behavior is already pinned by tests before major extractions:
   - Next extraction target: pull the remaining private job/publish glue out if the coordinator starts growing again.
 - `apps/control/src/providers.ts`
   - Landed seam: `providers.ts` is now a thin facade over `providers-contracts.ts` and `providers-incus.ts`.
-  - Next extraction target: peel host/network/guest/progress helper categories out of `providers-incus.ts`.
+  - Additional seam: shared provider contracts/constants now live in `providers-contracts.ts`, while publish/create progress parsing and status normalization live in `providers-incus-progress.ts`.
+  - Next extraction target: peel host/network/guest/file-inspection helper categories out of `providers-incus.ts`.
 - `apps/control/src/store.ts`
   - Landed seam: `store.ts` facade over store interface, JSON backend, PostgreSQL backend, and normalization/migration helpers.
 - `apps/web/src/DashboardApp.tsx`
-  - Landed seam: dashboard transport/fullscreen/persistence/resolution-control services extracted, with dialogs in `dashboardDialogs.tsx`, rail tiles/icons in `dashboardRail.tsx`, and reusable UI in `dashboardUi.tsx`.
-  - Next extraction target: app-shell state, workspace stage, overview, and sidepanel feature components.
+  - Landed seam: dashboard transport/fullscreen/persistence/resolution-control services extracted, with dialogs in `dashboardDialogs.tsx`, rail tiles/icons in `dashboardRail.tsx`, reusable UI in `dashboardUi.tsx`, pure shell helpers in `dashboardShell.ts`, stage surfaces in `dashboardStage.tsx`, and overview/inspector panels in `dashboardSidepanel.tsx`.
+  - Next extraction target: the remaining app-shell orchestration, shell menu logic, and residual inline render branches.
 - `apps/web/src/NoVncViewport.tsx`
   - Target seam: noVNC loader, connection-state reducer, clipboard helpers, and viewport observers.
 - `apps/web/src/styles.css`

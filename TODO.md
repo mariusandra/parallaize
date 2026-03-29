@@ -4,7 +4,7 @@ Last updated: 2026-03-29
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
-Current focus: finish peeling helper categories out of `apps/control/src/providers-incus.ts` and keep shrinking the remaining app-shell, stage, and inspector state still concentrated in `DashboardApp.tsx` after the dialog, rail, shared-UI, and stylesheet splits.
+Current focus: keep peeling helper categories out of `apps/control/src/providers-incus.ts` and shrink the remaining app-shell orchestration still concentrated in `DashboardApp.tsx` now that shell helpers, stage surfaces, and inspector/overview panels live outside the monolith.
 
 Untrusted AI workflow work is deferred until the cleanup slices below are in materially better shape.
 
@@ -38,7 +38,7 @@ Goal: reduce file size, cross-cutting state, and duplicated helper logic in the 
 
 - [x] Extract create/template workflow helpers, VM browser/touched-file formatting, job/progress selectors, and health/status label helpers out of `apps/web/src/DashboardApp.tsx` into `apps/web/src/dashboardHelpers.ts`.
 - [x] Extract leaf dashboard primitives from `apps/web/src/DashboardApp.tsx` into `apps/web/src/dashboardPrimitives.tsx`.
-- [ ] Move the remaining app shell, overview, workspace stage, and sidepanel sections into focused components now that dialog surfaces and rail components live outside `DashboardApp.tsx`.
+- [ ] Finish moving the remaining app-shell orchestration and any residual inline sections out of `apps/web/src/DashboardApp.tsx` now that overview, workspace stage, and inspector panels live in focused modules.
 - [x] Pull browser-only fetch/SSE plumbing and fullscreen handling into dedicated services.
 - [x] Pull browser-only persistence and resolution-control coordination into dedicated hooks/services.
 - [x] Split `apps/web/src/styles.css` into tokens, shell layout, workspace layout, dialogs, sidepanel, and feature-local sections/files.
