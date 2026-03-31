@@ -409,7 +409,7 @@ export class DesktopManager {
     return updateTemplate(this.runtime, templateId, input);
   }
 
-  updateVm(vmId: string, input: UpdateVmInput): VmInstance {
+  async updateVm(vmId: string, input: UpdateVmInput): Promise<VmInstance> {
     return updateVm(this.runtime, vmId, input);
   }
 

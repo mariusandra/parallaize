@@ -989,15 +989,45 @@ export function updateTemplate(
   return updatedTemplate;
 }
 
-export function updateVm(
+export async function updateVm(
   runtime: DesktopManagerRuntime,
   vmId: string,
   input: UpdateVmInput,
-): VmInstance {
+): Promise<VmInstance> {
   const nextName = input.name.trim();
 
   if (!nextName) {
     throw new Error("VM name is required.");
+  }
+
+  const currentVm = runtime.getVmDetail(vmId).vm;
+
+  if (currentVm.name === nextName) {
+    return currentVm;
+  }
+
+  let guestHostname: string | null = null;
+
+  if (currentVm.status === "running") {
+    runtime.ensureActiveProvider(currentVm);
+    guestHostname = await runtime.provider.syncVmHostname({
+      ...currentVm,
+      name: nextName,
+      resources: { ...currentVm.resources },
+      session: cloneVmSession(currentVm.session),
+      forwardedPorts: currentVm.forwardedPorts.map((forward) => ({ ...forward })),
+      activityLog: [...currentVm.activityLog],
+      snapshotIds: [...currentVm.snapshotIds],
+      commandHistory: currentVm.commandHistory?.map((entry) => ({ ...entry })),
+      telemetry: currentVm.telemetry
+        ? {
+            cpuHistory: [...currentVm.telemetry.cpuHistory],
+            cpuPercent: currentVm.telemetry.cpuPercent,
+            ramHistory: [...currentVm.telemetry.ramHistory],
+            ramPercent: currentVm.telemetry.ramPercent,
+          }
+        : undefined,
+    });
   }
 
   let updatedVm: VmInstance | null = null;
@@ -1015,6 +1045,9 @@ export function updateVm(
     vm.lastAction = `Renamed workspace to ${nextName}`;
     vm.updatedAt = nowIso();
     appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+    if (guestHostname) {
+      appendActivity(vm, `guest-hostname: ${guestHostname}`);
+    }
     updatedVm = vm;
     return true;
   });

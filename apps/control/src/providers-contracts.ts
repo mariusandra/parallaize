@@ -161,6 +161,7 @@ export interface DesktopProvider {
   deleteVm(vm: VmInstance): Promise<ProviderMutation>;
   resizeVm(vm: VmInstance, resources: ResourceSpec): Promise<ProviderMutation>;
   setNetworkMode(vm: VmInstance, networkMode: VmNetworkMode): Promise<ProviderMutation>;
+  syncVmHostname(vm: VmInstance): Promise<string | null>;
   setDisplayResolution(vm: VmInstance, width: number, height: number): Promise<void>;
   snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot>;
   deleteVmSnapshot(vm: VmInstance, snapshot: Snapshot): Promise<void>;

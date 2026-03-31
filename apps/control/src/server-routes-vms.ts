@@ -200,7 +200,7 @@ export async function handleVmRoute({
     const payload = await readJsonBody<UpdateVmInput>(request);
     writeJson(response, 200, {
       ok: true,
-      data: manager.updateVm(vmUpdateMatch[1], payload),
+      data: await manager.updateVm(vmUpdateMatch[1], payload),
     });
     return true;
   }

@@ -26,12 +26,14 @@ import type {
 import {
   buildExpectedGuestDesktopBridgeVersionRecord,
   buildEnsureGuestDesktopBootstrapScript,
+  buildEnsureGuestHostnameScript,
   DEFAULT_GUEST_DESKTOP_BRIDGE_VERSION_FILE,
   DEFAULT_GUEST_SELKIES_ARCHIVE_URL,
   DEFAULT_GUEST_SELKIES_VERSION,
   buildGuestSelkiesCloudInit,
   buildGuestVncCloudInit,
   type GuestDesktopBootstrapRepairProfile,
+  resolveGuestHostname,
 } from "./ubuntu-guest-init.js";
 import {
   DEFAULT_GUEST_AGENT_RETRY_MS,
@@ -648,6 +650,7 @@ export class IncusProvider implements DesktopProvider {
           }
         : {}),
     });
+    const guestHostname = await this.syncVmHostname(vm);
     await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
 
     if (template.initCommands.length > 0) {
@@ -668,6 +671,7 @@ export class IncusProvider implements DesktopProvider {
           : []),
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
+        ...(guestHostname ? [`guest-hostname: ${guestHostname}`] : []),
         ...sessionActivity,
         this.describeSessionActivity(session, desktopTransport),
         ...(readyMs === null
@@ -731,6 +735,7 @@ export class IncusProvider implements DesktopProvider {
       bootstrapRepairProfile: "aggressive",
       bootstrapRepairRetryMs: REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
     });
+    const guestHostname = await this.syncVmHostname(targetVm);
     await this.syncGuestDnsProfileAsync(targetVm.providerRef, networkMode);
 
     return {
@@ -740,6 +745,7 @@ export class IncusProvider implements DesktopProvider {
         `template: ${template.name}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
+        ...(guestHostname ? [`guest-hostname: ${guestHostname}`] : []),
         ...sessionActivity,
         this.describeSessionActivity(session, desktopTransport),
         ...(readyMs === null
@@ -777,6 +783,7 @@ export class IncusProvider implements DesktopProvider {
     const { activity: sessionActivity, readyMs, session } = await this.resolveSession(vm, undefined, {
       guestWallpaperName: resolveGuestWallpaperName(vm),
     });
+    const guestHostname = await this.syncVmHostname(vm);
     await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
 
     return {
@@ -785,6 +792,7 @@ export class IncusProvider implements DesktopProvider {
         `incus: started ${vm.providerRef}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
+        ...(guestHostname ? [`guest-hostname: ${guestHostname}`] : []),
         ...sessionActivity,
         this.describeSessionActivity(session, desktopTransport),
         ...(readyMs === null
@@ -909,6 +917,23 @@ export class IncusProvider implements DesktopProvider {
     };
   }
 
+  async syncVmHostname(vm: VmInstance): Promise<string | null> {
+    this.assertAvailable();
+
+    const guestHostname = resolveGuestHostname(vm.name);
+    await this.runGuestExecWithRetryAsync([
+      "exec",
+      vm.providerRef,
+      "--",
+      "sh",
+      "-s",
+    ], undefined, {
+      input: buildEnsureGuestHostnameScript(vm.name),
+    });
+
+    return guestHostname;
+  }
+
   async setDisplayResolution(
     vm: VmInstance,
     width: number,
@@ -1002,6 +1027,7 @@ export class IncusProvider implements DesktopProvider {
       bootstrapRepairProfile: "aggressive",
       bootstrapRepairRetryMs: REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
     });
+    const guestHostname = await this.syncVmHostname(targetVm);
     await this.syncGuestDnsProfileAsync(targetVm.providerRef, networkMode);
 
     return {
@@ -1011,6 +1037,7 @@ export class IncusProvider implements DesktopProvider {
         `template: ${template.name}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
+        ...(guestHostname ? [`guest-hostname: ${guestHostname}`] : []),
         ...sessionActivity,
         this.describeSessionActivity(session, desktopTransport),
         ...(readyMs === null
@@ -1051,6 +1078,10 @@ export class IncusProvider implements DesktopProvider {
       ({ activity: sessionActivity, readyMs, session } = await this.resolveSession(vm, undefined, {
         guestWallpaperName: resolveGuestWallpaperName(vm),
       }));
+      const guestHostname = await this.syncVmHostname(vm);
+      if (guestHostname) {
+        sessionActivity = [`guest-hostname: ${guestHostname}`, ...sessionActivity];
+      }
       await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
     }
 

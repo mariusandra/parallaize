@@ -262,7 +262,7 @@ test("snapshot launch jobs surface provider boot progress instead of a stale cop
   assert.equal(job?.progressPercent, 76);
 });
 
-test("manager preserves the generated wallpaper name across later renames", (context) => {
+test("manager preserves the generated wallpaper name across later renames", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-wallpaper-name-"));
   context.after(() => {
     rmSync(tempDir, { recursive: true, force: true });
@@ -287,7 +287,7 @@ test("manager preserves the generated wallpaper name across later renames", (con
 
   assert.equal(manager.getVmDetail(vm.id).vm.wallpaperName, "angry-puffin");
 
-  const updated = manager.updateVm(vm.id, {
+  const updated = await manager.updateVm(vm.id, {
     name: "renamed-client-name",
   });
 
@@ -832,6 +832,101 @@ test("manager treats an already-running incus start as a successful resume", asy
   );
 });
 
+test("incus provider reapplies the guest hostname on start", async () => {
+  const calls: string[][] = [];
+  const commandInputs = new Map<string[], string>();
+  const instanceName = "parallaize-vm-0106-start-hostname";
+  const runner = {
+    execute(args: string[], options?: { input?: Buffer | string }) {
+      calls.push(args);
+      commandInputs.set(args, readCommandInput(options));
+
+      if (
+        args[0] === "list" &&
+        ((args[1] === "--format" && args[2] === "json") || args[1] === instanceName)
+      ) {
+        return ok(
+          JSON.stringify([
+            {
+              name: instanceName,
+              status: "Running",
+              state: {
+                status: "Running",
+                network: {
+                  enp5s0: {
+                    addresses: [
+                      {
+                        family: "inet",
+                        scope: "global",
+                        address: "10.55.0.106",
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          args,
+        );
+      }
+
+      return ok("", args);
+    },
+  };
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+    guestPortProbe: {
+      async probe() {
+        return true;
+      },
+    },
+  });
+  const vm: VmInstance = {
+    id: "vm-0106",
+    name: "restart-persistent-hostname",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "stopped",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Workspace stopped",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 106,
+    activeWindow: "terminal",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+    commandHistory: [],
+  };
+
+  const mutation = await provider.startVm(vm);
+
+  assert.ok(mutation.activity.includes("guest-hostname: restart-persistent-hostname"));
+  const hostnameSyncCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      args[2] === "--" &&
+      args[3] === "sh" &&
+      args[4] === "-s",
+  );
+  assert.ok(hostnameSyncCall);
+
+  const hostnameSyncInput = commandInputs.get(hostnameSyncCall ?? []) ?? "";
+  assert.match(hostnameSyncInput, /DESIRED_HOSTNAME="restart-persistent-hostname"/);
+  assert.match(hostnameSyncInput, /parallaize-hostname-sync/);
+  assert.match(hostnameSyncInput, /systemctl enable "\$HOSTNAME_SYNC_SERVICE_NAME"/);
+});
+
 test("restart runs as a single queued action that stops before booting again", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-restart-"));
   context.after(() => {
@@ -1135,6 +1230,9 @@ test("manager falls back to the newest compatible template snapshot when a captu
     async deleteVm() {
       throw new Error("not implemented");
     },
+    async syncVmHostname() {
+      return null;
+    },
     async deleteVmSnapshot() {
       throw new Error("not implemented");
     },
@@ -1260,7 +1358,7 @@ test("manager falls back to the newest compatible template snapshot when a captu
   assert.equal(detail.recentJobs[0]?.status, "succeeded");
 });
 
-test("vms can be renamed without changing their provider identity", (context) => {
+test("vms can be renamed without changing their provider identity", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-rename-vm-"));
   context.after(() => {
     rmSync(tempDir, { recursive: true, force: true });
@@ -1273,7 +1371,7 @@ test("vms can be renamed without changing their provider identity", (context) =>
   const manager = new DesktopManager(store, provider);
   const originalProviderRef = manager.getVmDetail("vm-0001").vm.providerRef;
 
-  const updated = manager.updateVm("vm-0001", {
+  const updated = await manager.updateVm("vm-0001", {
     name: "alpha-renamed",
   });
 
@@ -1284,6 +1382,97 @@ test("vms can be renamed without changing their provider identity", (context) =>
     manager.getVmDetail("vm-0001").vm.lastAction,
     "Renamed workspace to alpha-renamed",
   );
+});
+
+test("renaming a running incus vm syncs the guest hostname without changing provider identity", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-rename-running-incus-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const calls: string[][] = [];
+  const commandInputs = new Map<string[], string>();
+  const instanceName = "parallaize-vm-0105-running-rename";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[], options?: { input?: Buffer | string }) {
+        calls.push(args);
+        commandInputs.set(args, readCommandInput(options));
+
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  const seed = createSeedState(provider.state);
+  const now = new Date().toISOString();
+  const state: AppState = {
+    ...seed,
+    vms: [
+      {
+        id: "vm-0105",
+        name: "rename-source",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: instanceName,
+        status: "running",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: now,
+        lastAction: "Workspace resumed",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 105,
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        session: {
+          kind: "vnc",
+          host: "10.55.0.105",
+          port: 5900,
+          webSocketPath: "/api/vms/vm-0105/vnc",
+          browserPath: "/?vm=vm-0105",
+          display: "10.55.0.105:5900",
+        },
+        forwardedPorts: [],
+        activityLog: [],
+        commandHistory: [],
+      },
+    ],
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  const manager = new DesktopManager(store, provider);
+
+  const updated = await manager.updateVm("vm-0105", {
+    name: "direct-hostname-lab",
+  });
+
+  assert.equal(updated.name, "direct-hostname-lab");
+  assert.equal(updated.providerRef, instanceName);
+  assert.ok(updated.activityLog.includes("guest-hostname: direct-hostname-lab"));
+
+  const hostnameSyncCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      args[2] === "--" &&
+      args[3] === "sh" &&
+      args[4] === "-s",
+  );
+  assert.ok(hostnameSyncCall);
+
+  const hostnameSyncInput = commandInputs.get(hostnameSyncCall ?? []) ?? "";
+  assert.match(hostnameSyncInput, /DESIRED_HOSTNAME="direct-hostname-lab"/);
+  assert.match(hostnameSyncInput, /hostnamectl set-hostname "\$DESIRED_HOSTNAME"/);
+  assert.match(hostnameSyncInput, /desired-hostname/);
+  assert.doesNotMatch(hostnameSyncInput, /parallaize-vm-0105-running-rename/);
 });
 
 test("vms can be reordered and the new order is reflected in summary output", (context) => {
@@ -1681,6 +1870,9 @@ test("manager recovers interrupted create jobs when the VM is already running af
     },
     async deleteVm() {
       throw new Error("not implemented");
+    },
+    async syncVmHostname() {
+      return null;
     },
     async deleteVmSnapshot() {
       throw new Error("not implemented");
@@ -5826,6 +6018,9 @@ test("manager periodically refreshes reachable Selkies sessions for maintenance"
     async deleteVm() {
       throw new Error("not implemented");
     },
+    async syncVmHostname() {
+      return null;
+    },
     async deleteVmSnapshot() {
       throw new Error("not implemented");
     },
@@ -6028,6 +6223,9 @@ test("manager keeps refreshing newly created VMs while guest VNC is still pendin
     },
     async deleteVm() {
       throw new Error("not implemented");
+    },
+    async syncVmHostname() {
+      return null;
     },
     async deleteVmSnapshot() {
       throw new Error("not implemented");

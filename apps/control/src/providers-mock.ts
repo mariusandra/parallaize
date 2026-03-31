@@ -208,6 +208,11 @@ export class MockProvider implements DesktopProvider {
     };
   }
 
+  async syncVmHostname(vm: VmInstance): Promise<string | null> {
+    void vm;
+    return null;
+  }
+
   async setDisplayResolution(
     vm: VmInstance,
     width: number,

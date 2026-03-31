@@ -18,6 +18,12 @@ export const DEFAULT_GUEST_DESKTOP_BRIDGE_VERSION_FILE =
   "/var/lib/parallaize/desktop-bridge-version.json";
 const DEFAULT_GUEST_WALLPAPER = "Monument_valley_by_orbitelambda.jpg";
 const DEFAULT_GUEST_WALLPAPER_BASE_URL = "https://wallpapers.parallaize.com/24.04";
+const DEFAULT_GUEST_HOSTNAME_STATE_DIR = "/etc/parallaize";
+const DEFAULT_GUEST_HOSTNAME_STATE_FILE =
+  `${DEFAULT_GUEST_HOSTNAME_STATE_DIR}/desired-hostname`;
+const DEFAULT_GUEST_HOSTNAME_SYNC_FILE = "/usr/local/bin/parallaize-hostname-sync";
+const DEFAULT_GUEST_HOSTNAME_SYNC_SERVICE_FILE =
+  "/etc/systemd/system/parallaize-hostname-sync.service";
 const DEFAULT_GUEST_DESKTOP_HEALTH_GRACE_SECONDS = 30;
 const DEFAULT_GUEST_DESKTOP_GDM_RESTART_COOLDOWN_SECONDS = 30;
 const AGGRESSIVE_GUEST_DESKTOP_HEALTH_GRACE_SECONDS = 10;
@@ -138,6 +144,45 @@ fi
 systemctl daemon-reload
 systemctl enable parallaize-desktop-bootstrap.service >/dev/null 2>&1 || true
 "$BOOTSTRAP_FILE"${strictStart ? "" : " || true"}`;
+}
+
+export function buildEnsureGuestHostnameScript(vmName?: string): string {
+  const guestHostname = resolveGuestHostname(vmName) ?? "";
+
+  return `HOSTNAME_STATE_DIR="${DEFAULT_GUEST_HOSTNAME_STATE_DIR}"
+HOSTNAME_STATE_FILE="${DEFAULT_GUEST_HOSTNAME_STATE_FILE}"
+HOSTNAME_SYNC_FILE="${DEFAULT_GUEST_HOSTNAME_SYNC_FILE}"
+HOSTNAME_SYNC_SERVICE_NAME="parallaize-hostname-sync.service"
+HOSTNAME_SYNC_SERVICE_FILE="${DEFAULT_GUEST_HOSTNAME_SYNC_SERVICE_FILE}"
+CURRENT_HOSTNAME_SYNC="$(cat "$HOSTNAME_SYNC_FILE" 2>/dev/null || true)"
+DESIRED_HOSTNAME_SYNC="$(cat <<'PARALLAIZE_HOSTNAME_SYNC_SCRIPT'
+${buildGuestHostnameSyncScript()}
+PARALLAIZE_HOSTNAME_SYNC_SCRIPT
+)"
+CURRENT_HOSTNAME_SYNC_SERVICE="$(cat "$HOSTNAME_SYNC_SERVICE_FILE" 2>/dev/null || true)"
+DESIRED_HOSTNAME_SYNC_SERVICE="$(cat <<'PARALLAIZE_HOSTNAME_SYNC_UNIT'
+${buildGuestHostnameSyncServiceUnit()}
+PARALLAIZE_HOSTNAME_SYNC_UNIT
+)"
+DESIRED_HOSTNAME="${guestHostname}"
+CURRENT_DESIRED_HOSTNAME="$(cat "$HOSTNAME_STATE_FILE" 2>/dev/null || true)"
+if [ "$CURRENT_HOSTNAME_SYNC" != "$DESIRED_HOSTNAME_SYNC" ] || [ "$CURRENT_HOSTNAME_SYNC_SERVICE" != "$DESIRED_HOSTNAME_SYNC_SERVICE" ]; then
+  mkdir -p /usr/local/bin /etc/systemd/system
+  cat > "$HOSTNAME_SYNC_FILE" <<'PARALLAIZE_HOSTNAME_SYNC_SCRIPT'
+${buildGuestHostnameSyncScript()}
+PARALLAIZE_HOSTNAME_SYNC_SCRIPT
+  chmod 0755 "$HOSTNAME_SYNC_FILE"
+  cat > "$HOSTNAME_SYNC_SERVICE_FILE" <<'PARALLAIZE_HOSTNAME_SYNC_UNIT'
+${buildGuestHostnameSyncServiceUnit()}
+PARALLAIZE_HOSTNAME_SYNC_UNIT
+fi
+if [ "$CURRENT_DESIRED_HOSTNAME" != "$DESIRED_HOSTNAME" ]; then
+  mkdir -p "$HOSTNAME_STATE_DIR"
+  printf '%s\\n' "$DESIRED_HOSTNAME" > "$HOSTNAME_STATE_FILE"
+fi
+systemctl daemon-reload
+systemctl enable "$HOSTNAME_SYNC_SERVICE_NAME" >/dev/null 2>&1 || true
+"$HOSTNAME_SYNC_FILE" || true`;
 }
 
 export function buildGuestDisplayDiscoveryScript(): string {
@@ -3801,6 +3846,25 @@ export function buildGuestWallpaperUrl(vmName?: string): string | null {
   return `${DEFAULT_GUEST_WALLPAPER_BASE_URL}/${slug}.jpg`;
 }
 
+export function resolveGuestHostname(vmName?: string): string | null {
+  const normalized =
+    typeof vmName === "string"
+      ? vmName
+          .trim()
+          .normalize("NFKD")
+          .replace(/[^\x00-\x7F]+/g, "")
+          .toLowerCase()
+      : "";
+  const hostname = normalized
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63)
+    .replace(/^-+|-+$/g, "");
+
+  return hostname || null;
+}
+
 function buildGuestDesktopBootstrapScript(
   port: number,
   vmName?: string,
@@ -4214,6 +4278,19 @@ RestartSec=15
 WantedBy=multi-user.target`;
 }
 
+function buildGuestHostnameSyncServiceUnit(): string {
+  return `[Unit]
+Description=Parallaize guest hostname sync
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=${DEFAULT_GUEST_HOSTNAME_SYNC_FILE}
+
+[Install]
+WantedBy=multi-user.target`;
+}
+
 function buildGuestNetworkWaitOnlineOverride(): string {
   return `[Service]
 ExecStart=
@@ -4239,6 +4316,41 @@ CONF
 systemctl daemon-reload || true
 systemctl restart systemd-networkd-wait-online.service || true
 systemctl stop --no-block plymouth-quit-wait.service || true`;
+}
+
+function buildGuestHostnameSyncScript(): string {
+  return `#!/bin/sh
+set -eu
+HOSTNAME_STATE_FILE="${DEFAULT_GUEST_HOSTNAME_STATE_FILE}"
+HOSTS_FILE="/etc/hosts"
+if [ ! -s "$HOSTNAME_STATE_FILE" ]; then
+  exit 0
+fi
+DESIRED_HOSTNAME="$(tr -d '\\r\\n' < "$HOSTNAME_STATE_FILE")"
+DESIRED_HOSTNAME="$(printf '%s' "$DESIRED_HOSTNAME" | tr '[:upper:]' '[:lower:]')"
+case "$DESIRED_HOSTNAME" in
+  ''|*[!a-z0-9-]*)
+    exit 0
+    ;;
+esac
+CURRENT_HOSTNAME="$(cat /etc/hostname 2>/dev/null || hostname 2>/dev/null || true)"
+if [ "$CURRENT_HOSTNAME" != "$DESIRED_HOSTNAME" ]; then
+  if command -v hostnamectl >/dev/null 2>&1; then
+    hostnamectl set-hostname "$DESIRED_HOSTNAME" || true
+  else
+    printf '%s\\n' "$DESIRED_HOSTNAME" > /etc/hostname
+    hostname "$DESIRED_HOSTNAME" || true
+  fi
+fi
+CURRENT_HOSTS="$(cat "$HOSTS_FILE" 2>/dev/null || true)"
+if printf '%s\\n' "$CURRENT_HOSTS" | grep -Eq '^127\\.0\\.1\\.1([[:space:]]|$)'; then
+  NEXT_HOSTS="$(printf '%s\\n' "$CURRENT_HOSTS" | sed -E "s/^127\\.0\\.1\\.1([[:space:]].*)?$/127.0.1.1 $DESIRED_HOSTNAME/")"
+else
+  NEXT_HOSTS="$(printf '%s\\n127.0.1.1 %s\\n' "$CURRENT_HOSTS" "$DESIRED_HOSTNAME")"
+fi
+if [ "$CURRENT_HOSTS" != "$NEXT_HOSTS" ]; then
+  printf '%s\\n' "$NEXT_HOSTS" > "$HOSTS_FILE"
+fi`;
 }
 
 function buildGuestIncusAgentInstallScript(): string {
