@@ -1,6 +1,8 @@
 import {
   formatTimestamp,
   minimumCreateDiskGb,
+  normalizeTemplateDesktopTransport,
+  normalizeVmDesktopTransport,
   normalizeVmNetworkMode,
 } from "../../../packages/shared/src/helpers.js";
 import type {
@@ -10,6 +12,7 @@ import type {
   Snapshot,
   TemplatePortForward,
   VmDetail,
+  VmDesktopTransport,
   VmDiskUsageSnapshot,
   VmFileEntry,
   VmInstance,
@@ -18,7 +21,10 @@ import type {
   VmTouchedFile,
   VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
-import { hasBrowserVncSession } from "./desktopSession.js";
+import {
+  hasBrowserDesktopSession,
+  hasBrowserVncSession,
+} from "./desktopSession.js";
 import { buildRandomVmName } from "./vmNames.js";
 
 export type CreateSourceKind = "template" | "snapshot" | "vm";
@@ -35,6 +41,7 @@ export interface CreateDraft {
   cpu: string;
   ramGb: string;
   diskGb: string;
+  desktopTransport: VmDesktopTransport;
   networkMode: VmNetworkMode;
   initCommands: string;
   shutdownSourceBeforeClone: boolean;
@@ -290,6 +297,12 @@ export function buildCreateLaunchValidationError(
   }
 
   return `${source.template.name} was captured from a ${minimumTemplateDiskGb} GB workspace and needs at least ${minimumTemplateDiskGb} GB disk to launch cleanly.`;
+}
+
+export function createSourceSupportsDesktopTransportChoice(
+  source: CreateSourceSelection | null,
+): boolean {
+  return source?.kind === "template" && isSystemTemplate(source.template);
 }
 
 export function formatRamDraftValue(ramMb: number): string {
@@ -780,13 +793,13 @@ export function desktopFallbackBadge(detail: VmDetail): string {
     return `${capitalizeWord(detail.vm.status)} desktop`;
   }
 
-  return "Waiting for guest VNC";
+  return `Waiting for guest ${resolveDesktopTransportLabel(detail.vm)}`;
 }
 
 export function shouldShowWorkspaceLogsSurface(detail: VmDetail): boolean {
   return detail.provider.desktopTransport === "novnc" &&
     detail.vm.status === "running" &&
-    !hasBrowserVncSession(detail.vm.session);
+    !hasBrowserDesktopSession(detail.vm.session);
 }
 
 export function workspaceLogsTitle(detail: VmDetail): string {
@@ -794,7 +807,9 @@ export function workspaceLogsTitle(detail: VmDetail): string {
     (job) => isDesktopBootJobKind(job.kind) && job.status === "failed",
   );
 
-  return failedBootJob ? "Desktop bridge failed" : "Waiting for guest VNC";
+  return failedBootJob
+    ? "Desktop bridge failed"
+    : `Waiting for guest ${resolveDesktopTransportLabel(detail.vm)}`;
 }
 
 export function workspaceLogsMessage(detail: VmDetail): string {
@@ -806,7 +821,7 @@ export function workspaceLogsMessage(detail: VmDetail): string {
     return `${failedBootJob.message} Showing the latest guest logs while the running VM stays attached to the host.`;
   }
 
-  return "This VM is running, but the browser VNC bridge is not ready yet. Showing the latest guest logs until the desktop attaches.";
+  return `This VM is running, but the browser ${resolveDesktopTransportLabel(detail.vm)} session is not ready yet. Showing the latest guest logs until the desktop attaches.`;
 }
 
 export function desktopFallbackMessage(detail: VmDetail): string {
@@ -822,14 +837,14 @@ export function desktopFallbackMessage(detail: VmDetail): string {
     detail.provider.desktopTransport === "synthetic" ||
     detail.vm.session?.kind === "synthetic"
   ) {
-    return "This server is running the mock provider, so the dashboard renders generated desktop frames instead of a live browser VNC session.";
+    return "This server is running the mock provider, so the dashboard renders generated desktop frames instead of a live browser desktop session.";
   }
 
   if (detail.vm.status !== "running") {
     return "Start the VM to attach a browser desktop.";
   }
 
-  return "This VM does not have a browser VNC session yet. The synthetic frame stays here until the guest publishes a reachable desktop endpoint.";
+  return `This VM does not have a browser ${resolveDesktopTransportLabel(detail.vm)} session yet. The synthetic frame stays here until the guest publishes a reachable desktop endpoint.`;
 }
 
 export function workspaceFallbackTitle(detail: VmDetail): string {
@@ -847,7 +862,11 @@ export function workspaceFallbackTitle(detail: VmDetail): string {
   return "Desktop not attached";
 }
 
-export function vmTilePreviewLabel(vm: VmInstance, showLivePreview: boolean): string {
+export function vmTilePreviewLabel(
+  vm: VmInstance,
+  showLivePreview: boolean,
+  selected = false,
+): string {
   if (vm.session?.kind === "synthetic") {
     return "Synthetic preview";
   }
@@ -856,11 +875,50 @@ export function vmTilePreviewLabel(vm: VmInstance, showLivePreview: boolean): st
     return capitalizeWord(vm.status);
   }
 
+  if (
+    showLivePreview &&
+    (vm.session?.kind === "selkies" || vm.desktopTransport === "selkies")
+  ) {
+    return selected ? "Live on stage" : "Connecting preview";
+  }
+
   if (showLivePreview) {
     return "Waiting for VNC";
   }
 
+  if (vm.desktopTransport === "selkies" || vm.session?.kind === "selkies") {
+    return "Selkies desktop";
+  }
+
   return "Static preview";
+}
+
+export function formatDesktopTransportLabel(
+  vm: Pick<VmInstance, "desktopTransport" | "session">,
+): string {
+  if (vm.session?.kind === "synthetic") {
+    return "Synthetic";
+  }
+
+  return resolveDesktopTransportLabel(vm);
+}
+
+export function formatDesktopReadyMs(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Pending";
+  }
+
+  if (value < 1000) {
+    return `${Math.max(0, Math.round(value))} ms`;
+  }
+
+  if (value < 60_000) {
+    return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} s`;
+  }
+
+  const minutes = Math.floor(value / 60_000);
+  const seconds = Math.round((value % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
 }
 
 export function buildCreateDraftFromTemplate(
@@ -877,6 +935,7 @@ export function buildCreateDraftFromTemplate(
     cpu: String(template.defaultResources.cpu),
     ramGb: formatRamDraftValue(template.defaultResources.ramMb),
     diskGb: String(template.defaultResources.diskGb),
+    desktopTransport: normalizeTemplateDesktopTransport(template.defaultDesktopTransport),
     networkMode: template.defaultNetworkMode ?? "default",
     initCommands: formatInitCommandsDraft(template.initCommands),
     shutdownSourceBeforeClone: false,
@@ -899,6 +958,7 @@ export function buildCreateDraftFromSnapshot(
     cpu: String(snapshot.resources.cpu),
     ramGb: formatRamDraftValue(snapshot.resources.ramMb),
     diskGb: String(snapshot.resources.diskGb),
+    desktopTransport: resolveCreateDraftDesktopTransport(template, sourceVm),
     networkMode: normalizeVmNetworkMode(sourceVm?.networkMode ?? template.defaultNetworkMode),
     initCommands: "",
     shutdownSourceBeforeClone: false,
@@ -920,6 +980,7 @@ export function buildCreateDraftFromVm(
     cpu: String(sourceVm.resources.cpu),
     ramGb: formatRamDraftValue(sourceVm.resources.ramMb),
     diskGb: String(sourceVm.resources.diskGb),
+    desktopTransport: resolveCreateDraftDesktopTransport(template, sourceVm),
     networkMode: normalizeVmNetworkMode(sourceVm.networkMode ?? template.defaultNetworkMode),
     initCommands: "",
     shutdownSourceBeforeClone: sourceVm.status === "running",
@@ -928,6 +989,19 @@ export function buildCreateDraftFromVm(
 
 function formatInitCommandsDraft(commands: string[]): string {
   return commands.join("\n");
+}
+
+function resolveCreateDraftDesktopTransport(
+  template: EnvironmentTemplate,
+  sourceVm?: VmInstance | null,
+): VmDesktopTransport {
+  if (sourceVm) {
+    return normalizeVmDesktopTransport(
+      sourceVm.desktopTransport ?? template.defaultDesktopTransport,
+    );
+  }
+
+  return normalizeTemplateDesktopTransport(template.defaultDesktopTransport);
 }
 
 function buildCreateSourceValue(kind: CreateSourceKind, id: string): string {
@@ -1168,6 +1242,16 @@ function formatDurationShort(durationMs: number): string {
   }
 
   return `${seconds}s`;
+}
+
+function resolveDesktopTransportLabel(
+  vm: Pick<VmInstance, "desktopTransport" | "session">,
+): string {
+  if (vm.session?.kind === "selkies" || vm.desktopTransport === "selkies") {
+    return "Selkies";
+  }
+
+  return "VNC";
 }
 
 function capitalizeWord(value: string): string {

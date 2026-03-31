@@ -11,17 +11,62 @@ export interface RetainedDesktopSession {
   vmId: string;
 }
 
+export function hasBrowserDesktopSession(
+  session: VmInstance["session"] | null | undefined,
+): boolean {
+  if (!session) {
+    return false;
+  }
+
+  if (session.kind === "vnc") {
+    return Boolean(session.webSocketPath);
+  }
+
+  if (session.kind === "selkies") {
+    return Boolean(session.browserPath);
+  }
+
+  return false;
+}
+
 export function hasBrowserVncSession(
   session: VmInstance["session"] | null | undefined,
 ): boolean {
-  return session?.kind === "vnc" && Boolean(session.webSocketPath);
+  return session?.kind === "vnc" && hasBrowserDesktopSession(session);
+}
+
+export function hasBrowserSelkiesSession(
+  session: VmInstance["session"] | null | undefined,
+): boolean {
+  return session?.kind === "selkies" && hasBrowserDesktopSession(session);
+}
+
+export function buildSelkiesPreviewBrowserPath(
+  session: VmInstance["session"] | null | undefined,
+): string | null {
+  if (!session || !hasBrowserSelkiesSession(session) || !session.browserPath) {
+    return null;
+  }
+
+  return appendQueryParam(session.browserPath, "parallaize_preview", "1");
 }
 
 export function shouldShowLiveVmPreview(
   vm: Pick<VmInstance, "status" | "session">,
   showLivePreview: boolean,
+  selected = false,
 ): boolean {
-  return showLivePreview && vm.status === "running" && hasBrowserVncSession(vm.session);
+  void selected;
+
+  if (!showLivePreview || vm.status !== "running") {
+    return false;
+  }
+
+  if (hasBrowserVncSession(vm.session)) {
+    return true;
+  }
+
+  return hasBrowserSelkiesSession(vm.session);
 }
 
 export function mergeSelectedVmDetail(
@@ -69,7 +114,7 @@ export function shouldRefreshSelectedVmDetail(
   }
 
   if (
-    hasBrowserVncSession(selectedVm.session) &&
+    hasBrowserDesktopSession(selectedVm.session) &&
     !sameVmSession(selectedVm.session, detail.vm.session)
   ) {
     return true;
@@ -111,7 +156,7 @@ export function resolveDisplayedDesktopSession(
   currentStageSession: VmInstance["session"] | null,
   retainedSession: RetainedDesktopSession | null | undefined,
 ): VmInstance["session"] | null {
-  if (hasBrowserVncSession(currentStageSession)) {
+  if (hasBrowserDesktopSession(currentStageSession)) {
     return currentStageSession;
   }
 
@@ -119,7 +164,7 @@ export function resolveDisplayedDesktopSession(
     !currentStageVm ||
     currentStageVm.status !== "running" ||
     retainedSession?.vmId !== currentStageVm.id ||
-    !hasBrowserVncSession(retainedSession.session)
+    !hasBrowserDesktopSession(retainedSession.session)
   ) {
     return currentStageSession ?? null;
   }
@@ -143,11 +188,11 @@ function sessionRank(session: VmInstance["session"] | null | undefined): number 
     return 0;
   }
 
-  if (hasBrowserVncSession(session)) {
+  if (hasBrowserDesktopSession(session)) {
     return 3;
   }
 
-  if (session.kind === "vnc") {
+  if (session.kind === "vnc" || session.kind === "selkies") {
     return 2;
   }
 
@@ -179,4 +224,12 @@ function sameVmSession(
     left.browserPath === right.browserPath &&
     left.display === right.display
   );
+}
+
+function appendQueryParam(path: string, key: string, value: string): string {
+  const hashIndex = path.indexOf("#");
+  const hash = hashIndex >= 0 ? path.slice(hashIndex) : "";
+  const basePath = hashIndex >= 0 ? path.slice(0, hashIndex) : path;
+  const separator = basePath.includes("?") ? "&" : "?";
+  return `${basePath}${separator}${key}=${encodeURIComponent(value)}${hash}`;
 }

@@ -57,6 +57,13 @@ Ubuntu example:
 sudo apt-get install -y attr ovmf qemu-system-x86 qemu-utils genisoimage
 ```
 
+For local development on macOS, you can run Incus through Colima:
+
+```bash
+brew install colima
+colima start --runtime incus
+```
+
 For the full live-host setup flow, including Incus bootstrap and networking notes, see [docs/live-incus-setup.md](docs/live-incus-setup.md).
 
 ## Basic Configuration

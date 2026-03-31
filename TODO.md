@@ -1,10 +1,10 @@
 # Parallaize TODO
 
-Last updated: 2026-03-29
+Last updated: 2026-03-31
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
-Current focus: the maintainability cleanup slice is complete. Keep the extracted control-plane seams, dashboard seams, and package-asset generation green while the next feature slice is scoped.
+Current focus: Selkies now ships as the default desktop path for newly created Incus VMs, with live guest bootstrap keeping launches aligned to the selected base image instead of publishing derived prepared images, periodic maintenance refreshes repairing already-running browser desktops, and aggressive bridge repair clearing stale GNOME monitor layouts that older guests can accumulate. Keep the dual-transport control-plane and dashboard slices green while the remaining warm-boot issues are measured and the strengthened Chromium/Playwright browser coverage stays reliable around create, sidebar preview, session resume, and same-VM tab handoff paths.
 
 The Blocks 1-4 cleanup details now live in `docs/refactor-map.md` and the surrounding tests/docs. Only deferred work remains here.
 
@@ -20,5 +20,9 @@ Completed implementation details now live in:
 
 ## Deferred Until Next Slice
 
-- [ ] Resume the trusted/untrusted collection architecture only after the control plane and dashboard seams above are smaller and better tested.
-- [ ] Evaluate Selkies as an alternative browser desktop transport once the current runtime boundaries are cleaner.
+- [ ] Run side-by-side live benchmarks for create, start, clone, and snapshot-launch flows using `desktopReadyMs`, then publish the Selkies vs VNC delta in docs.
+- [ ] Publish a tested production TURN deployment recipe and live validation flow for Selkies remote access now that host-to-guest relay env plumbing exists.
+- [ ] Surface the new desktop-bridge version and repair API in the dashboard so stale guest helpers can be updated from the UI instead of only through the backend route.
+- [ ] Add to the installation instructions how to get incus running on a macos; brew install colima; colima start --runtime incus
+- [ ] When the user starts incus with the "dir" mode, guide them to enable lvm thin single-file mode. say what commands to run and what to add to the env file. Show this in the middle panel
+- [ ] Add a little "reload" icon to the end of the "name" textfield when adding a new vm. This would generate a new random name (and background image string)

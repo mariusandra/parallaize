@@ -15,5 +15,5 @@ export function createProvider(
     return new IncusProvider(incusBinary, options);
   }
 
-  return new MockProvider();
+  return new MockProvider(options);
 }

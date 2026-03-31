@@ -20,7 +20,8 @@ export type VmStatus =
 
 export type VmWindow = "editor" | "terminal" | "browser" | "logs";
 
-export type VmSessionKind = "synthetic" | "vnc";
+export type VmDesktopTransport = "vnc" | "selkies";
+export type VmSessionKind = "synthetic" | "vnc" | "selkies";
 export type VmForwardProtocol = "http";
 export type VmPowerAction = "start" | "stop" | "restart";
 export type VmNetworkMode = "default" | "dmz";
@@ -138,6 +139,7 @@ export interface EnvironmentTemplate {
   launchSource: string;
   defaultResources: ResourceSpec;
   defaultForwardedPorts: TemplatePortForward[];
+  defaultDesktopTransport?: VmDesktopTransport;
   defaultNetworkMode?: VmNetworkMode;
   initCommands: string[];
   tags: string[];
@@ -167,8 +169,11 @@ export interface VmInstance {
   screenSeed: number;
   activeWindow: VmWindow;
   workspacePath: string;
+  desktopTransport?: VmDesktopTransport;
   networkMode?: VmNetworkMode;
   session: VmSession | null;
+  desktopReadyAt?: string | null;
+  desktopReadyMs?: number | null;
   forwardedPorts: VmPortForward[];
   activityLog: string[];
   commandHistory?: VmCommandResult[];
@@ -281,6 +286,18 @@ export interface VmDetail {
   generatedAt: string;
 }
 
+export type VmDesktopBridgeVersionStatus = "current" | "outdated" | "unknown";
+
+export interface VmDesktopBridgeVersion {
+  checkedAt: string;
+  currentLabel: string | null;
+  expectedLabel: string;
+  runtimePatchLevel: string | null;
+  runtimeVersion: string | null;
+  status: VmDesktopBridgeVersionStatus;
+  transport: VmDesktopTransport;
+}
+
 export interface VmLogsSnapshot {
   provider: ProviderKind;
   providerRef: string;
@@ -356,6 +373,7 @@ export interface CreateVmInput {
   name: string;
   wallpaperName?: string;
   resources: ResourceSpec;
+  desktopTransport?: VmDesktopTransport;
   forwardedPorts?: TemplatePortForward[];
   networkMode?: VmNetworkMode;
   initCommands?: string[];

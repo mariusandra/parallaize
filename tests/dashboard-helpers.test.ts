@@ -13,7 +13,10 @@ import type {
 } from "../packages/shared/src/types.js";
 import {
   buildCreateLaunchValidationError,
+  buildCreateDraftFromTemplate,
+  buildCreateDraftFromVm,
   buildCreateSourceGroups,
+  createSourceSupportsDesktopTransportChoice,
   diskUsageSummaryText,
   findProminentJob,
   getVmDesktopBootState,
@@ -105,6 +108,33 @@ test("buildCreateLaunchValidationError blocks launching captured templates below
     buildCreateLaunchValidationError(selection, "32"),
     "Captured Template was captured from a 64 GB workspace and needs at least 64 GB disk to launch cleanly.",
   );
+});
+
+test("system template launches default to Selkies and expose the transport choice", () => {
+  const template = buildTemplate("template-seed", {
+    provenance: {
+      kind: "seed",
+      summary: "Seeded image",
+    },
+  });
+  const selection = buildCreateSourceGroups([template], [], [])[0]?.options[0] ?? null;
+  const draft = buildCreateDraftFromTemplate(template);
+
+  assert.equal(draft.desktopTransport, "selkies");
+  assert.equal(createSourceSupportsDesktopTransportChoice(selection), true);
+});
+
+test("clone drafts preserve the source VM desktop transport", () => {
+  const template = buildTemplate("template-1", {
+    defaultDesktopTransport: "selkies",
+  });
+  const sourceVm = buildVm("vm-1", {
+    desktopTransport: "vnc",
+    templateId: template.id,
+  });
+  const draft = buildCreateDraftFromVm(sourceVm, template);
+
+  assert.equal(draft.desktopTransport, "vnc");
 });
 
 test("normalizeActiveCpuThreshold clamps and rounds to two decimals", () => {

@@ -17,6 +17,16 @@ import { createProvider } from "../apps/control/src/providers.js";
 import { createSeedState } from "../apps/control/src/seed.js";
 import { JsonStateStore } from "../apps/control/src/store.js";
 
+function readCommandInput(
+  options?: { input?: Buffer | string },
+): string {
+  if (typeof options?.input === "string") {
+    return options.input;
+  }
+
+  return Buffer.isBuffer(options?.input) ? options.input.toString("utf8") : "";
+}
+
 test("mock provider supports create, snapshot, and template capture flows", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-"));
   context.after(() => {
@@ -94,6 +104,68 @@ test("create jobs expose staged progress while the desktop boots", async (contex
   assert.equal(job?.status, "running");
   assert.ok((job?.progressPercent ?? 0) > 0);
   assert.ok((job?.progressPercent ?? 100) < 100);
+});
+
+test("manager exposes preview images for running VMs", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-preview-image-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "preview-image-lab",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  await wait(700);
+
+  const preview = await manager.getVmPreviewImage(vm.id);
+  assert.equal(preview.contentType, "image/svg+xml; charset=utf-8");
+  assert.match(preview.content.toString("utf8"), /<svg[\s>]/);
+});
+
+test("manager falls back to a synthetic preview image when live capture fails", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-preview-fallback-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "preview-fallback-lab",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  await wait(700);
+
+  provider.readVmPreviewImage = async () => {
+    throw new Error("Incus guest agent is unavailable for preview capture.");
+  };
+
+  const preview = await manager.getVmPreviewImage(vm.id);
+  assert.equal(preview.contentType, "image/svg+xml; charset=utf-8");
+  assert.match(preview.content.toString("utf8"), /<svg[\s>]/);
 });
 
 test("clone jobs surface provider boot progress instead of a stale copy label", async (context) => {
@@ -1063,6 +1135,9 @@ test("manager falls back to the newest compatible template snapshot when a captu
     async deleteVm() {
       throw new Error("not implemented");
     },
+    async deleteVmSnapshot() {
+      throw new Error("not implemented");
+    },
     async resizeVm() {
       throw new Error("not implemented");
     },
@@ -1288,6 +1363,29 @@ test("command output is retained and snapshots can launch or restore VMs", async
     restoredDetail.recentJobs.some(
       (job) => job.kind === "restore-snapshot" && job.status === "succeeded",
     ),
+  );
+  const snapshotCountBeforeDelete = restoredDetail.snapshots.length;
+
+  manager.deleteVmSnapshot("vm-0001", snapshot!.id);
+  await wait(700);
+
+  const afterDeleteDetail = manager.getVmDetail("vm-0001");
+  assert.equal(afterDeleteDetail.snapshots.length, snapshotCountBeforeDelete - 1);
+  assert.equal(afterDeleteDetail.snapshots.some((entry) => entry.id === snapshot!.id), false);
+  assert.ok(afterDeleteDetail.vm.snapshotIds.every((entry) => entry !== snapshot!.id));
+  assert.ok(
+    afterDeleteDetail.recentJobs.some(
+      (job) => job.kind === "delete" && job.status === "succeeded",
+    ),
+  );
+  assert.match(afterDeleteDetail.vm.lastAction, /Snapshot deleted: checkpoint/);
+  assert.equal(
+    manager.getSummary().snapshots.some((entry) => entry.id === snapshot!.id),
+    false,
+  );
+  assert.equal(
+    afterDeleteDetail.template?.snapshotIds.some((entry) => entry === snapshot!.id),
+    false,
   );
 });
 
@@ -1540,6 +1638,9 @@ test("manager recovers interrupted create jobs when the VM is already running af
     async deleteVm() {
       throw new Error("not implemented");
     },
+    async deleteVmSnapshot() {
+      throw new Error("not implemented");
+    },
     async resizeVm() {
       throw new Error("not implemented");
     },
@@ -1775,6 +1876,7 @@ test("frame renderer emits SVG markup for a seeded VM", () => {
 
 test("incus provider builds real lifecycle commands and VNC metadata", async () => {
   const calls: string[][] = [];
+  const commandInputs = new Map<string[], string>();
   const instanceName = "parallaize-vm-0099-delta-lab";
   const reports: Array<{ message: string; progressPercent: number | null }> = [];
   const executeResult = (args: string[]) => {
@@ -1815,15 +1917,18 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     return ok("", args);
   };
   const runner = {
-    execute(args: string[]) {
+    execute(args: string[], options?: { input?: Buffer | string }) {
       calls.push(args);
+      commandInputs.set(args, readCommandInput(options));
       return executeResult(args);
     },
     async executeStreaming(
       args: string[],
       listeners?: { onStdout?(chunk: string): void; onStderr?(chunk: string): void },
+      options?: { input?: Buffer | string },
     ) {
       calls.push(args);
+      commandInputs.set(args, readCommandInput(options));
 
       if (args[0] === "init") {
         listeners?.onStderr?.("Allocating image: 20%\r");
@@ -1964,86 +2069,75 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     "osdisk",
     "size=60GiB",
   ]);
-  assert.ok(configSetCall);
-  assert.match(configSetCall?.[4] ?? "", /x11vnc/);
-  assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-x11vnc/);
-  assert.match(configSetCall?.[4] ?? "", /\/usr\/local\/bin\/parallaize-desktop-bootstrap/);
-  assert.match(
-    configSetCall?.[4] ?? "",
-    /\/etc\/environment\.d\/90-parallaize-rendering\.conf/,
-  );
-  assert.match(
-    configSetCall?.[4] ?? "",
-    /\/usr\/local\/bin\/parallaize-desktop-health-check/,
-  );
-  assert.match(
-    configSetCall?.[4] ?? "",
-    /\/usr\/local\/bin\/parallaize-desktop-session-setup/,
-  );
-  assert.match(configSetCall?.[4] ?? "", /parallaize-desktop-bootstrap\.service/);
-  assert.match(
-    configSetCall?.[4] ?? "",
-    /parallaize-desktop-session-setup\.desktop/,
-  );
-  assert.match(configSetCall?.[4] ?? "", /find_guest_auth_file\(\)/);
-  assert.match(configSetCall?.[4] ?? "", /find_guest_display_number\(\)/);
-  assert.match(configSetCall?.[4] ?? "", /guest_desktop_has_visible_stage\(\)/);
-  assert.match(configSetCall?.[4] ?? "", /guest_desktop_session_ready\(\)/);
-  assert.match(configSetCall?.[4] ?? "", /pgrep -u ubuntu -x gnome-shell/);
-  assert.match(configSetCall?.[4] ?? "", /\/usr\/libexec\/gnome-session-binary/);
-  assert.match(configSetCall?.[4] ?? "", /xwininfo -root -tree/);
-  assert.match(configSetCall?.[4] ?? "", /mutter guard window/);
-  assert.match(configSetCall?.[4] ?? "", /loginctl list-sessions --no-legend/);
-  assert.match(configSetCall?.[4] ?? "", /-p Class --value/);
-  assert.match(configSetCall?.[4] ?? "", /ps -C x11vnc -o args=/);
-  assert.match(configSetCall?.[4] ?? "", /ps -C Xwayland -o args=/);
-  assert.match(configSetCall?.[4] ?? "", /\.mutter-Xwaylandauth\.\*/);
-  assert.match(configSetCall?.[4] ?? "", /\/var\/run\/gdm3\/auth-for-\*\/database/);
-  assert.match(configSetCall?.[4] ?? "", /Acquire::ForceIPv4=true/);
-  assert.match(configSetCall?.[4] ?? "", /LIBGL_ALWAYS_SOFTWARE=1/);
-  assert.match(configSetCall?.[4] ?? "", /GALLIUM_DRIVER=llvmpipe/);
-  assert.match(configSetCall?.[4] ?? "", /-noxdamage/);
-  assert.match(configSetCall?.[4] ?? "", /indicator-multiload/);
-  assert.match(configSetCall?.[4] ?? "", /dock-position RIGHT/);
-  assert.match(configSetCall?.[4] ?? "", /dash-max-icon-size 32/);
-  assert.match(configSetCall?.[4] ?? "", /idle-delay 'uint32 0'/);
-  assert.match(configSetCall?.[4] ?? "", /sleep-inactive-ac-type 'nothing'/);
-  assert.match(configSetCall?.[4] ?? "", /sleep-inactive-ac-timeout 'uint32 0'/);
-  assert.match(configSetCall?.[4] ?? "", /sleep-inactive-battery-type 'nothing'/);
-  assert.match(configSetCall?.[4] ?? "", /sleep-inactive-battery-timeout 'uint32 0'/);
-  assert.match(
-    configSetCall?.[4] ?? "",
-    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/angry-puffin\.jpg/,
-  );
-  assert.match(configSetCall?.[4] ?? "", /download_remote_wallpaper\(\)/);
-  assert.match(configSetCall?.[4] ?? "", /resolve_first_boot_wallpaper_uri\(\)/);
-  assert.match(configSetCall?.[4] ?? "", /Monument_valley_by_orbitelambda\.jpg/);
-  assert.match(configSetCall?.[4] ?? "", /desktop-wallpaper-initialized/);
-  assert.match(configSetCall?.[4] ?? "", /desktop-wallpaper-source/);
-  assert.match(configSetCall?.[4] ?? "", /current_wallpaper_state/);
-  assert.match(configSetCall?.[4] ?? "", /desired_wallpaper_state/);
-  assert.match(configSetCall?.[4] ?? "", /picture-uri-dark/);
-  assert.doesNotMatch(configSetCall?.[4] ?? "", /shuf -n 1/);
-  assert.match(configSetCall?.[4] ?? "", /desktop-session-unhealthy-at/);
-  assert.match(configSetCall?.[4] ?? "", /desktop-session-last-gdm-restart/);
-  assert.match(configSetCall?.[4] ?? "", /DESKTOP_HEALTH_GRACE_SECONDS=30/);
-  assert.match(configSetCall?.[4] ?? "", /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=30/);
-  assert.match(configSetCall?.[4] ?? "", /repair_guest_desktop_if_unhealthy\(\)/);
-  assert.match(configSetCall?.[4] ?? "", /systemctl restart gdm3 \|\| true/);
-  assert.match(configSetCall?.[4] ?? "", /gnome-initial-setup-done/);
-  assert.match(
-    configSetCall?.[4] ?? "",
-    /gnome-initial-setup-first-login\.desktop/,
-  );
-  assert.match(configSetCall?.[4] ?? "", /-xrandr newfbsize/);
-  assert.match(configSetCall?.[4] ?? "", /-noshm/);
-  assert.match(configSetCall?.[4] ?? "", /xset r on \|\| true/);
-  assert.match(configSetCall?.[4] ?? "", /-repeat/);
-  assert.match(configSetCall?.[4] ?? "", /fs\.inotify\.max_user_watches=2097152/);
-  assert.match(configSetCall?.[4] ?? "", /fs\.inotify\.max_user_instances=4096/);
-  assert.match(configSetCall?.[4] ?? "", /sysctl --load \/etc\/sysctl\.d\/60-parallaize-inotify\.conf/);
-  assert.match(configSetCall?.[4] ?? "", /incus-agent\.service/);
-  assert.match(configSetCall?.[4] ?? "", /systemctl enable parallaize-desktop-bootstrap\.service/);
+  assert.deepEqual(configSetCall, [
+    "config",
+    "set",
+    instanceName,
+    "cloud-init.user-data",
+    "-",
+  ]);
+  const configSetInput = commandInputs.get(configSetCall ?? []) ?? "";
+  assert.match(configSetInput, /x11vnc/);
+  assert.match(configSetInput, /\/usr\/local\/bin\/parallaize-x11vnc/);
+  assert.match(configSetInput, /\/usr\/local\/bin\/parallaize-desktop-bootstrap/);
+  assert.match(configSetInput, /\/etc\/environment\.d\/90-parallaize-rendering\.conf/);
+  assert.match(configSetInput, /\/usr\/local\/bin\/parallaize-desktop-health-check/);
+  assert.match(configSetInput, /\/usr\/local\/bin\/parallaize-desktop-session-setup/);
+  assert.match(configSetInput, /parallaize-desktop-bootstrap\.service/);
+  assert.match(configSetInput, /parallaize-desktop-session-setup\.desktop/);
+  assert.match(configSetInput, /find_guest_auth_file\(\)/);
+  assert.match(configSetInput, /find_guest_display_number\(\)/);
+  assert.match(configSetInput, /guest_desktop_has_visible_stage\(\)/);
+  assert.match(configSetInput, /guest_desktop_session_ready\(\)/);
+  assert.match(configSetInput, /pgrep -u ubuntu -x gnome-shell/);
+  assert.match(configSetInput, /\/usr\/libexec\/gnome-session-binary/);
+  assert.match(configSetInput, /xwininfo -root -tree/);
+  assert.match(configSetInput, /mutter guard window/);
+  assert.match(configSetInput, /loginctl list-sessions --no-legend/);
+  assert.match(configSetInput, /-p Class --value/);
+  assert.match(configSetInput, /ps -C x11vnc -o args=/);
+  assert.match(configSetInput, /ps -C Xwayland -o args=/);
+  assert.match(configSetInput, /\.mutter-Xwaylandauth\.\*/);
+  assert.match(configSetInput, /\/var\/run\/gdm3\/auth-for-\*\/database/);
+  assert.match(configSetInput, /Acquire::ForceIPv4=true/);
+  assert.match(configSetInput, /LIBGL_ALWAYS_SOFTWARE=1/);
+  assert.match(configSetInput, /GALLIUM_DRIVER=llvmpipe/);
+  assert.match(configSetInput, /-noxdamage/);
+  assert.match(configSetInput, /indicator-multiload/);
+  assert.match(configSetInput, /dock-position RIGHT/);
+  assert.match(configSetInput, /dash-max-icon-size 32/);
+  assert.match(configSetInput, /idle-delay 'uint32 0'/);
+  assert.match(configSetInput, /sleep-inactive-ac-type 'nothing'/);
+  assert.match(configSetInput, /sleep-inactive-ac-timeout 'uint32 0'/);
+  assert.match(configSetInput, /sleep-inactive-battery-type 'nothing'/);
+  assert.match(configSetInput, /sleep-inactive-battery-timeout 'uint32 0'/);
+  assert.match(configSetInput, /https:\/\/wallpapers\.parallaize\.com\/24\.04\/angry-puffin\.jpg/);
+  assert.match(configSetInput, /download_remote_wallpaper\(\)/);
+  assert.match(configSetInput, /resolve_first_boot_wallpaper_uri\(\)/);
+  assert.match(configSetInput, /Monument_valley_by_orbitelambda\.jpg/);
+  assert.match(configSetInput, /desktop-wallpaper-initialized/);
+  assert.match(configSetInput, /desktop-wallpaper-source/);
+  assert.match(configSetInput, /current_wallpaper_state/);
+  assert.match(configSetInput, /desired_wallpaper_state/);
+  assert.match(configSetInput, /picture-uri-dark/);
+  assert.doesNotMatch(configSetInput, /shuf -n 1/);
+  assert.match(configSetInput, /desktop-session-unhealthy-at/);
+  assert.match(configSetInput, /desktop-session-last-gdm-restart/);
+  assert.match(configSetInput, /DESKTOP_HEALTH_GRACE_SECONDS=30/);
+  assert.match(configSetInput, /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=30/);
+  assert.match(configSetInput, /repair_guest_desktop_if_unhealthy\(\)/);
+  assert.match(configSetInput, /systemctl restart gdm3 \|\| true/);
+  assert.match(configSetInput, /gnome-initial-setup-done/);
+  assert.match(configSetInput, /gnome-initial-setup-first-login\.desktop/);
+  assert.match(configSetInput, /-xrandr newfbsize/);
+  assert.match(configSetInput, /-noshm/);
+  assert.match(configSetInput, /xset r on \|\| true/);
+  assert.match(configSetInput, /-repeat/);
+  assert.match(configSetInput, /fs\.inotify\.max_user_watches=2097152/);
+  assert.match(configSetInput, /fs\.inotify\.max_user_instances=4096/);
+  assert.match(configSetInput, /sysctl --load \/etc\/sysctl\.d\/60-parallaize-inotify\.conf/);
+  assert.match(configSetInput, /incus-agent\.service/);
+  assert.match(configSetInput, /systemctl enable parallaize-desktop-bootstrap\.service/);
   assert.deepEqual(agentDeviceCall, [
     "config",
     "device",
@@ -2398,10 +2492,12 @@ test("incus provider degrades health when host internet checks fail", () => {
 test("incus provider repairs captured-template desktops before trusting guest VNC", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0100-captured-bootstrap";
+  let bootstrapScript = "";
   const provider = createProvider("incus", "incus", {
     commandRunner: {
-      execute(args: string[]) {
+      execute(args: string[], options?: { input?: Buffer | string }) {
         calls.push(args);
+        const input = readCommandInput(options);
 
         if (
           args[0] === "list" &&
@@ -2439,8 +2535,9 @@ test("incus provider repairs captured-template desktops before trusting guest VN
         if (
           args[0] === "exec" &&
           args[1] === instanceName &&
-          (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+          input.includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
         ) {
+          bootstrapScript = input;
           return ok("", args);
         }
 
@@ -2498,23 +2595,17 @@ test("incus provider repairs captured-template desktops before trusting guest VN
   };
 
   const mutation = await provider.createVm(vm, template);
-  const bootstrapExecCall = calls.find(
-    (args) =>
-      args[0] === "exec" &&
-      args[1] === instanceName &&
-      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
-  );
 
-  assert.ok(bootstrapExecCall);
+  assert.notEqual(bootstrapScript, "");
   assert.equal(
     spawnSync("sh", ["-n"], {
-      input: bootstrapExecCall?.[5] ?? "",
+      input: bootstrapScript,
       encoding: "utf8",
     }).status,
     0,
   );
-  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_HEALTH_GRACE_SECONDS=10/);
-  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
+  assert.match(bootstrapScript, /DESKTOP_HEALTH_GRACE_SECONDS=10/);
+  assert.match(bootstrapScript, /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
   assert.equal(mutation.session?.display, "10.55.0.44:5900");
 });
 
@@ -2523,8 +2614,9 @@ test("incus provider fails fast when captured-template bootstrap repair cannot r
   const instanceName = "parallaize-vm-0100-captured-agent-missing";
   const provider = createProvider("incus", "incus", {
     commandRunner: {
-      execute(args: string[]) {
+      execute(args: string[], options?: { input?: Buffer | string }) {
         calls.push(args);
+        const input = readCommandInput(options);
 
         if (
           args[0] === "list" &&
@@ -2562,7 +2654,7 @@ test("incus provider fails fast when captured-template bootstrap repair cannot r
         if (
           args[0] === "exec" &&
           args[1] === instanceName &&
-          (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+          input.includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
         ) {
           return {
             args,
@@ -2909,6 +3001,17 @@ test("incus provider applies guest display resolution through xrandr", async () 
 
   const provider = createProvider("incus", "incus", {
     commandRunner: runner,
+    guestSelkiesRtcConfig: {
+      stunHost: "stun.example.com",
+      stunPort: 3478,
+      turnHost: "turn.example.com",
+      turnPort: 5349,
+      turnProtocol: "tcp",
+      turnTls: true,
+      turnSharedSecret: "shared-secret",
+      turnRestUri: "https://turn.example.com/api",
+      turnRestUsername: "selkies-host",
+    },
   });
 
   const vm: VmInstance = {
@@ -3027,17 +3130,159 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /-noshm/);
   assert.match(execCall?.[5] ?? "", /xset r on \|\| true/);
   assert.match(execCall?.[5] ?? "", /-repeat/);
-  assert.match(execCall?.[5] ?? "", /RESTART_VNC=0/);
+  assert.match(execCall?.[5] ?? "", /RESTART_DESKTOP=0/);
   assert.match(
     execCall?.[5] ?? "",
-    /if \[ "\$RESTART_VNC" -eq 1 \] \|\| ! systemctl is-active --quiet parallaize-x11vnc\.service; then/,
+    /if \[ "\$RESTART_DESKTOP" -eq 1 \] \|\| ! systemctl is-active --quiet "\$DESKTOP_SERVICE_NAME"; then/,
   );
-  assert.match(execCall?.[5] ?? "", /systemctl restart --no-block parallaize-x11vnc\.service/);
+  assert.match(
+    execCall?.[5] ?? "",
+    /systemctl restart --no-block "\$DESKTOP_SERVICE_NAME"/,
+  );
   assert.match(execCall?.[5] ?? "", /TARGET_MODE="1366x768"/);
   assert.match(execCall?.[5] ?? "", /xrandr --query/);
   assert.match(execCall?.[5] ?? "", /cvt "\$WIDTH" "\$HEIGHT" 60/);
   assert.match(execCall?.[5] ?? "", /MODE_TO_APPLY=/);
   assert.match(execCall?.[5] ?? "", /xrandr --output "\$OUTPUT" --mode "\$MODE_TO_APPLY"/);
+});
+
+test("incus provider applies guest display resolution through the Selkies bootstrap path", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0201-resolution-selkies";
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+    guestSelkiesRtcConfig: {
+      stunHost: "stun.example.com",
+      stunPort: 3478,
+      turnHost: "turn.example.com",
+      turnPort: 5349,
+      turnProtocol: "tcp",
+      turnTls: true,
+      turnSharedSecret: "shared-secret",
+      turnRestUri: "https://turn.example.com/api",
+      turnRestUsername: "selkies-host",
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0201",
+    name: "resolution-selkies",
+    wallpaperName: "silver-heron",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 101,
+    activeWindow: "editor",
+    workspacePath: "/root",
+    desktopTransport: "selkies",
+    session: {
+      kind: "selkies",
+      host: "10.55.0.88",
+      port: 6080,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: "/selkies-vm-0201/",
+      display: "10.55.0.88:6080",
+    },
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  await provider.setDisplayResolution(vm, 1441, 901);
+
+  const execCall = calls.find(
+    (args) =>
+      args[0] === "exec" &&
+      args[1] === instanceName &&
+      (args[5] ?? "").includes('TARGET_MODE="1441x901"'),
+  );
+
+  assert.ok(execCall);
+  assert.match(execCall?.[5] ?? "", /LAUNCHER_FILE="\/usr\/local\/bin\/parallaize-selkies"/);
+  assert.match(execCall?.[5] ?? "", /DESKTOP_SERVICE_NAME="parallaize-selkies\.service"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_PORT="6080"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_ENABLE_RESIZE="true"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_STUN_HOST="stun\.example\.com"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_STUN_PORT="3478"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_TURN_HOST="turn\.example\.com"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_TURN_PORT="5349"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_TURN_PROTOCOL="tcp"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_TURN_TLS="true"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_TURN_SHARED_SECRET="shared-secret"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_TURN_REST_URI="https:\/\/turn\.example\.com\/api"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_TURN_REST_USERNAME="selkies-host"/);
+  assert.doesNotMatch(execCall?.[5] ?? "", /parallaize-x11vnc\.service/);
+});
+
+test("manager allows running Selkies desktops to apply display resolution changes", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-selkies-resolution-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  let capturedResolution: { height: number; vmId: string; width: number } | null = null;
+  provider.setDisplayResolution = async (vm, width, height) => {
+    capturedResolution = {
+      height,
+      vmId: vm.id,
+      width,
+    };
+  };
+
+  const state = createSeedState(provider.state);
+  state.vms[0] = {
+    ...state.vms[0]!,
+    desktopTransport: "selkies",
+    session: {
+      kind: "selkies",
+      host: "10.55.0.42",
+      port: 6080,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: "/selkies-vm-0001/",
+      display: "10.55.0.42:6080",
+    },
+  };
+
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  store.save(state);
+  const manager = new DesktopManager(store, provider);
+
+  await manager.setVmResolution("vm-0001", {
+    width: 1365,
+    height: 767,
+  });
+
+  assert.deepEqual(capturedResolution, {
+    height: 767,
+    vmId: "vm-0001",
+    width: 1365,
+  });
 });
 
 test("incus provider reads VM logs from the console stream and falls back to info output", async () => {
@@ -3181,6 +3426,81 @@ test("incus provider streams live VM log chunks from the console", async () => {
 
   handle.close();
   assert.equal(closeCalled, true);
+});
+
+test("incus provider treats non-tty console tail failures as a quiet close", async () => {
+  const instanceName = "parallaize-vm-0201-live-log-ioctl";
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+      startStreaming(args: string[]) {
+        assert.deepEqual(args, ["console", instanceName]);
+
+        return {
+          close() {},
+          completed: Promise.resolve({
+            args,
+            status: 1,
+            stdout: "",
+            stderr: "Error: inappropriate ioctl for device",
+          }),
+        };
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0201",
+    name: "live-log-ioctl",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 202,
+    activeWindow: "logs",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const errors: string[] = [];
+  let closed = false;
+
+  if (!provider.streamVmLogs) {
+    throw new Error("Expected the Incus provider to expose a live log stream.");
+  }
+
+  provider.streamVmLogs(vm, {
+    onClose() {
+      closed = true;
+    },
+    onError(error) {
+      errors.push(error.message);
+    },
+  });
+
+  await Promise.resolve();
+
+  assert.equal(closed, true);
+  assert.deepEqual(errors, []);
 });
 
 test("incus provider parses guest disk usage snapshots and flags low free space", async () => {
@@ -3852,14 +4172,16 @@ test("incus provider launches and restores snapshots with VM commands", async ()
   const calls: string[][] = [];
   const sourceInstanceName = "parallaize-vm-0109-snap-origin";
   const targetInstanceName = "parallaize-vm-0110-snap-launch";
+  let bootstrapScript = "";
   const addAttempts = new Map<string, number>();
   const instanceAddresses = new Map<string, string>([
     [sourceInstanceName, "10.55.0.21"],
     [targetInstanceName, "10.55.0.22"],
   ]);
   const runner = {
-    execute(args: string[]) {
+    execute(args: string[], options?: { input?: Buffer | string }) {
       calls.push(args);
+      const input = readCommandInput(options);
 
       if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
         return ok("[]", args);
@@ -3899,6 +4221,15 @@ test("incus provider launches and restores snapshots with VM commands", async ()
 
       if (args[0] === "query" && args[1] === `/1.0/instances/${targetInstanceName}`) {
         return expandedRootDevice(args, "disk0");
+      }
+
+      if (
+        args[0] === "exec" &&
+        args[1] === targetInstanceName &&
+        input.includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+      ) {
+        bootstrapScript = input;
+        return ok("", args);
       }
 
       if (
@@ -4019,26 +4350,17 @@ test("incus provider launches and restores snapshots with VM commands", async ()
 
   const launchMutation = await provider.launchVmFromSnapshot(snapshot, targetVm, template);
   assert.equal(launchMutation.session?.display, "10.55.0.22:5901");
-  const bootstrapExecCall = calls.find(
-    (args) =>
-      args[0] === "exec" &&
-      args[1] === targetInstanceName &&
-      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
-  );
   const copyCall = calls.find(
     (args) =>
       args[0] === "copy" &&
       args[1] === snapshot.providerRef &&
       args[2] === targetInstanceName,
   );
-  assert.ok(bootstrapExecCall);
-  assert.match(
-    bootstrapExecCall?.[5] ?? "",
-    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/silver-falcon\.jpg/,
-  );
-  assert.match(bootstrapExecCall?.[5] ?? "", /desktop-wallpaper-source/);
-  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_HEALTH_GRACE_SECONDS=10/);
-  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
+  assert.notEqual(bootstrapScript, "");
+  assert.match(bootstrapScript, /https:\/\/wallpapers\.parallaize\.com\/24\.04\/silver-falcon\.jpg/);
+  assert.match(bootstrapScript, /desktop-wallpaper-source/);
+  assert.match(bootstrapScript, /DESKTOP_HEALTH_GRACE_SECONDS=10/);
+  assert.match(bootstrapScript, /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
   assert.ok(copyCall);
   assert.ok(!copyCall?.includes("--instance-only"));
   assert.ok(
@@ -4467,6 +4789,90 @@ test("incus provider treats a missing instance during delete as already removed"
   );
 });
 
+test("incus provider treats a completed competing delete operation as already removed", async () => {
+  const calls: string[][] = [];
+  const instanceName = "parallaize-vm-0103-raced-delete";
+
+  const runner = {
+    execute(args: string[]) {
+      calls.push(args);
+
+      if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+        return ok("[]", args);
+      }
+
+      if (args[0] === "delete" && args[1] === instanceName) {
+        return {
+          args,
+          status: 1,
+          stdout: "",
+          stderr:
+            `Error: Failed deleting instance "${instanceName}" in project "default": Failed to create instance delete operation: A matching non-reusable operation has now succeeded`,
+        };
+      }
+
+      if (
+        args[0] === "list" &&
+        args[1] === instanceName &&
+        args[2] === "--format" &&
+        args[3] === "json"
+      ) {
+        return ok("[]", args);
+      }
+
+      return ok("", args);
+    },
+  };
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: runner,
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0103",
+    name: "raced-delete",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "deleting",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: null,
+    lastAction: "Delete requested",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 103,
+    activeWindow: "logs",
+    workspacePath: "/root",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const mutation = await provider.deleteVm(vm);
+
+  assert.equal(mutation.lastAction, "Workspace raced-delete deleted");
+  assert.ok(
+    calls.some(
+      (args) => args[0] === "delete" && args[1] === instanceName && args[2] === "--force",
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "list" &&
+        args[1] === instanceName &&
+        args[2] === "--format" &&
+        args[3] === "json",
+    ),
+  );
+});
+
 test("manager derives browser VNC and forwarded service routes for incus VMs", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-incus-forwarding-"));
   context.after(() => {
@@ -4549,6 +4955,7 @@ test("manager derives browser VNC and forwarded service routes for incus VMs", a
         description: "Primary guest web app",
       },
     ],
+    desktopTransport: "vnc",
   });
 
   await wait(700);
@@ -4586,13 +4993,15 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
   const calls: string[][] = [];
   const sourceInstanceName = "parallaize-vm-0055-origin";
   const cloneInstanceName = "parallaize-vm-0056-origin-clone";
+  let bootstrapScript = "";
   const instanceAddresses = new Map<string, string>([
     [sourceInstanceName, "10.55.0.12"],
     [cloneInstanceName, "10.55.0.13"],
   ]);
   const runner = {
-    execute(args: string[]) {
+    execute(args: string[], options?: { input?: Buffer | string }) {
       calls.push(args);
+      const input = readCommandInput(options);
 
       if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
         return ok("[]", args);
@@ -4639,6 +5048,15 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
         );
       }
 
+      if (
+        args[0] === "exec" &&
+        args[1] === cloneInstanceName &&
+        input.includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+      ) {
+        bootstrapScript = input;
+        return ok("", args);
+      }
+
       return ok("", args);
     },
   };
@@ -4665,6 +5083,7 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
       diskGb: 60,
     },
     defaultForwardedPorts: [],
+    defaultDesktopTransport: "selkies",
     initCommands: [],
     tags: [],
     notes: [],
@@ -4698,6 +5117,7 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
         screenSeed: 55,
         activeWindow: "terminal",
         workspacePath: "/root",
+        desktopTransport: "vnc",
         session: {
           kind: "vnc",
           host: "10.55.0.12",
@@ -4737,25 +5157,16 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
   await wait(700);
 
   const detail = manager.getVmDetail(clone.id);
-  const bootstrapExecCall = calls.find(
-    (args) =>
-      args[0] === "exec" &&
-      args[1] === cloneInstanceName &&
-      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
-  );
   assert.equal(detail.vm.status, "running");
   assert.equal(detail.vm.wallpaperName, "silver-falcon");
   assert.equal(detail.vm.session?.host, "10.55.0.13");
   assert.equal(detail.vm.session?.webSocketPath, `/api/vms/${clone.id}/vnc`);
   assert.equal(detail.vm.session?.browserPath, `/?vm=${clone.id}`);
-  assert.ok(bootstrapExecCall);
-  assert.match(
-    bootstrapExecCall?.[5] ?? "",
-    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/silver-falcon\.jpg/,
-  );
-  assert.match(bootstrapExecCall?.[5] ?? "", /desktop-wallpaper-source/);
-  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_HEALTH_GRACE_SECONDS=10/);
-  assert.match(bootstrapExecCall?.[5] ?? "", /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
+  assert.notEqual(bootstrapScript, "");
+  assert.match(bootstrapScript, /https:\/\/wallpapers\.parallaize\.com\/24\.04\/silver-falcon\.jpg/);
+  assert.match(bootstrapScript, /desktop-wallpaper-source/);
+  assert.match(bootstrapScript, /DESKTOP_HEALTH_GRACE_SECONDS=10/);
+  assert.match(bootstrapScript, /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
   assert.ok(
     calls.some(
       (args) =>
@@ -4922,10 +5333,12 @@ test("incus provider refreshes an existing agent device before resuming a VM", a
 test("incus provider triggers guest desktop bootstrap while waiting for VNC", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0110-bootstrap-retry";
+  let bootstrapScript = "";
   let probeAttempts = 0;
   const runner = {
-    execute(args: string[]) {
+    execute(args: string[], options?: { input?: Buffer | string }) {
       calls.push(args);
+      const input = readCommandInput(options);
 
       if (
         args[0] === "list" &&
@@ -4954,6 +5367,15 @@ test("incus provider triggers guest desktop bootstrap while waiting for VNC", as
           ]),
           args,
         );
+      }
+
+      if (
+        args[0] === "exec" &&
+        args[1] === instanceName &&
+        input.includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+      ) {
+        bootstrapScript = input;
+        return ok("", args);
       }
 
       return ok("", args);
@@ -4998,19 +5420,10 @@ test("incus provider triggers guest desktop bootstrap while waiting for VNC", as
   };
 
   const mutation = await provider.startVm(vm);
-  const bootstrapExecCall = calls.find(
-    (args) =>
-      args[0] === "exec" &&
-      args[1] === instanceName &&
-      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
-  );
 
   assert.equal(mutation.session?.display, "10.55.0.111:5901");
-  assert.ok(bootstrapExecCall);
-  assert.match(
-    bootstrapExecCall?.[5] ?? "",
-    /"\$BOOTSTRAP_FILE" \|\| true/,
-  );
+  assert.notEqual(bootstrapScript, "");
+  assert.match(bootstrapScript, /"\$BOOTSTRAP_FILE" \|\| true/);
 });
 
 test("incus provider treats an already-running instance as a successful resume", async () => {
@@ -5310,6 +5723,191 @@ test("manager reattaches reachable VNC sessions for running incus VMs after star
   assert.equal(detail.vm.session?.browserPath, "/?vm=vm-0201");
 });
 
+test("manager periodically refreshes reachable Selkies sessions for maintenance", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-selkies-maintenance-refresh-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let refreshCalls = 0;
+  const providerState = {
+    kind: "incus" as const,
+    available: true,
+    detail: "Incus is reachable.",
+    hostStatus: "ready" as const,
+    binaryPath: "incus",
+    project: null,
+    desktopTransport: "novnc" as const,
+    nextSteps: [],
+  };
+  const reachableSession = {
+    kind: "selkies" as const,
+    host: "10.55.0.204",
+    port: 6080,
+    reachable: true,
+    webSocketPath: null,
+    browserPath: "/selkies-vm-0204/",
+    display: "10.55.0.204:6080",
+  };
+  const provider: DesktopProvider = {
+    state: providerState,
+    refreshState() {
+      return this.state;
+    },
+    sampleHostTelemetry() {
+      return null;
+    },
+    sampleVmTelemetry() {
+      return null;
+    },
+    observeVmPowerState() {
+      return null;
+    },
+    async refreshVmSession() {
+      refreshCalls += 1;
+      return reachableSession;
+    },
+    async createVm() {
+      throw new Error("not implemented");
+    },
+    async cloneVm() {
+      throw new Error("not implemented");
+    },
+    async startVm() {
+      throw new Error("not implemented");
+    },
+    async stopVm() {
+      throw new Error("not implemented");
+    },
+    async deleteVm() {
+      throw new Error("not implemented");
+    },
+    async deleteVmSnapshot() {
+      throw new Error("not implemented");
+    },
+    async resizeVm() {
+      throw new Error("not implemented");
+    },
+    async setNetworkMode() {
+      throw new Error("not implemented");
+    },
+    async setDisplayResolution() {
+      throw new Error("not implemented");
+    },
+    async snapshotVm() {
+      throw new Error("not implemented");
+    },
+    async launchVmFromSnapshot() {
+      throw new Error("not implemented");
+    },
+    async restoreVmToSnapshot() {
+      throw new Error("not implemented");
+    },
+    async captureTemplate() {
+      throw new Error("not implemented");
+    },
+    async injectCommand() {
+      throw new Error("not implemented");
+    },
+    async readVmLogs() {
+      throw new Error("not implemented");
+    },
+    async browseVmFiles() {
+      throw new Error("not implemented");
+    },
+    async readVmFile() {
+      throw new Error("not implemented");
+    },
+    async readVmTouchedFiles() {
+      throw new Error("not implemented");
+    },
+    tickVm() {
+      return null;
+    },
+    renderFrame() {
+      return "";
+    },
+  };
+  const now = new Date().toISOString();
+  const state: AppState = {
+    sequence: 2,
+    provider: provider.state,
+    templates: [
+      {
+        id: "tpl-0001",
+        name: "Ubuntu Agent Forge",
+        description: "Seeded Ubuntu desktop template",
+        launchSource: "parallaize-template-tpl-0001",
+        defaultResources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        defaultForwardedPorts: [],
+        defaultDesktopTransport: "selkies",
+        initCommands: [],
+        tags: [],
+        notes: [],
+        snapshotIds: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    vms: [
+      {
+        id: "vm-0204",
+        name: "steady-otter",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: "parallaize-vm-0204-steady-otter",
+        status: "running",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: now,
+        lastAction: "Workspace resumed",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 204,
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        desktopTransport: "selkies",
+        session: reachableSession,
+        forwardedPorts: [],
+        activityLog: ["selkies: 10.55.0.204:6080"],
+        commandHistory: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [],
+    adminSessions: [],
+    lastUpdated: now,
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  store.save(state);
+
+  const manager = new DesktopManager(store, provider, {
+    vmSessionMaintenanceRefreshMs: 1_000,
+  });
+
+  context.after(() => {
+    manager.stop();
+  });
+
+  await wait(100);
+  assert.ok(refreshCalls >= 1);
+  const initialRefreshCalls = refreshCalls;
+
+  manager.start();
+  await wait(2_700);
+
+  assert.ok(refreshCalls >= initialRefreshCalls + 1);
+});
+
 test("manager keeps refreshing newly created VMs while guest VNC is still pending", async (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-pending-vnc-refresh-"));
   context.after(() => {
@@ -5385,6 +5983,9 @@ test("manager keeps refreshing newly created VMs while guest VNC is still pendin
       throw new Error("not implemented");
     },
     async deleteVm() {
+      throw new Error("not implemented");
+    },
+    async deleteVmSnapshot() {
       throw new Error("not implemented");
     },
     async resizeVm() {
@@ -5471,12 +6072,14 @@ test("manager keeps refreshing newly created VMs while guest VNC is still pendin
 test("incus provider refresh reruns guest desktop bootstrap when VNC is still missing", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0202-refresh-bootstrap";
+  let bootstrapScript = "";
   let probeAttempts = 0;
   const provider = createProvider("incus", "incus", {
     guestVncPort: 5900,
     commandRunner: {
-      execute(args: string[]) {
+      execute(args: string[], options?: { input?: Buffer | string }) {
         calls.push(args);
+        const input = readCommandInput(options);
 
         if (
           args[0] === "list" &&
@@ -5510,8 +6113,9 @@ test("incus provider refresh reruns guest desktop bootstrap when VNC is still mi
         if (
           args[0] === "exec" &&
           args[1] === instanceName &&
-          (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+          input.includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
         ) {
+          bootstrapScript = input;
           return ok("", args);
         }
 
@@ -5554,29 +6158,29 @@ test("incus provider refresh reruns guest desktop bootstrap when VNC is still mi
     commandHistory: [],
   });
 
-  const bootstrapExecCall = calls.find(
-    (args) =>
-      args[0] === "exec" &&
-      args[1] === instanceName &&
-      (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
-  );
-
-  assert.ok(bootstrapExecCall);
-  assert.match(
-    bootstrapExecCall?.[5] ?? "",
-    /https:\/\/wallpapers\.parallaize\.com\/24\.04\/angry-puffin\.jpg/,
-  );
+  assert.notEqual(bootstrapScript, "");
+  assert.match(bootstrapScript, /https:\/\/wallpapers\.parallaize\.com\/24\.04\/angry-puffin\.jpg/);
   assert.equal(session?.display, "10.55.0.202:5900");
 });
 
 test("incus provider refresh accepts a reachable VNC session without waiting for guest desktop health", async () => {
   const calls: string[][] = [];
   const instanceName = "parallaize-vm-0203-refresh-health";
+  let sawBootstrapRepair = false;
   const provider = createProvider("incus", "incus", {
     guestVncPort: 5900,
     commandRunner: {
-      execute(args: string[]) {
+      execute(args: string[], options?: { input?: Buffer | string }) {
         calls.push(args);
+        const input = readCommandInput(options);
+
+        if (
+          args[0] === "exec" &&
+          args[1] === instanceName &&
+          input.includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
+        ) {
+          sawBootstrapRepair = true;
+        }
 
         if (
           args[0] === "list" &&
@@ -5655,12 +6259,7 @@ test("incus provider refresh accepts a reachable VNC session without waiting for
     false,
   );
   assert.equal(
-    calls.some(
-      (args) =>
-        args[0] === "exec" &&
-        args[1] === instanceName &&
-        (args[5] ?? "").includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"'),
-    ),
+    sawBootstrapRepair,
     false,
   );
   assert.equal(session?.display, "10.55.0.203:5900");

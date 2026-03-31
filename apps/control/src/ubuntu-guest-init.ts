@@ -1,3 +1,4 @@
+import type { VmDesktopTransport } from "../../../packages/shared/src/types.js";
 import { slugify } from "../../../packages/shared/src/helpers.js";
 
 const DEFAULT_GUEST_USERNAME = "ubuntu";
@@ -5,6 +6,16 @@ export const DEFAULT_GUEST_HOME = `/home/${DEFAULT_GUEST_USERNAME}`;
 export const DEFAULT_GUEST_DESKTOP_HEALTH_CHECK =
   "/usr/local/bin/parallaize-desktop-health-check";
 export type GuestDesktopBootstrapRepairProfile = "standard" | "aggressive";
+const DEFAULT_GUEST_SELKIES_PORT = 6080;
+export const DEFAULT_GUEST_SELKIES_VERSION = "1.6.2";
+export const DEFAULT_GUEST_SELKIES_ARCHIVE_URL =
+  `https://github.com/selkies-project/selkies/releases/download/v${DEFAULT_GUEST_SELKIES_VERSION}/selkies-gstreamer-portable-v${DEFAULT_GUEST_SELKIES_VERSION}_amd64.tar.gz`;
+export const DEFAULT_GUEST_SELKIES_ARCHIVE_FILE =
+  `/var/cache/parallaize/selkies/v${DEFAULT_GUEST_SELKIES_VERSION}.tar.gz`;
+const DEFAULT_GUEST_SELKIES_PATCH_LEVEL = "2026-03-31-6";
+export const DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL = "2026-03-31-2";
+export const DEFAULT_GUEST_DESKTOP_BRIDGE_VERSION_FILE =
+  "/var/lib/parallaize/desktop-bridge-version.json";
 const DEFAULT_GUEST_WALLPAPER = "Monument_valley_by_orbitelambda.jpg";
 const DEFAULT_GUEST_WALLPAPER_BASE_URL = "https://wallpapers.parallaize.com/24.04";
 const DEFAULT_GUEST_DESKTOP_HEALTH_GRACE_SECONDS = 30;
@@ -15,6 +26,52 @@ const AGGRESSIVE_GUEST_DESKTOP_GDM_RESTART_COOLDOWN_SECONDS = 15;
 export interface GuestInotifySettings {
   maxUserWatches: number;
   maxUserInstances: number;
+}
+
+export interface GuestSelkiesRtcConfig {
+  stunHost?: string | null;
+  stunPort?: number | null;
+  turnHost?: string | null;
+  turnPort?: number | null;
+  turnProtocol?: "tcp" | "udp" | null;
+  turnTls?: boolean | null;
+  turnSharedSecret?: string | null;
+  turnUsername?: string | null;
+  turnPassword?: string | null;
+  turnRestUri?: string | null;
+  turnRestUsername?: string | null;
+  turnRestUsernameAuthHeader?: string | null;
+  turnRestProtocolHeader?: string | null;
+  turnRestTlsHeader?: string | null;
+}
+
+export interface GuestDesktopBridgeVersionRecord {
+  bridgePatchLevel: string;
+  label: string;
+  selkiesPatchLevel: string | null;
+  selkiesVersion: string | null;
+  transport: VmDesktopTransport;
+}
+
+export function buildExpectedGuestDesktopBridgeVersionRecord(
+  transport: VmDesktopTransport,
+): GuestDesktopBridgeVersionRecord {
+  const selkiesVersion =
+    transport === "selkies" ? `v${DEFAULT_GUEST_SELKIES_VERSION}` : null;
+  const selkiesPatchLevel =
+    transport === "selkies" ? DEFAULT_GUEST_SELKIES_PATCH_LEVEL : null;
+  const label =
+    transport === "selkies"
+      ? `bridge:${DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL};selkies:${selkiesVersion}+${selkiesPatchLevel}`
+      : `bridge:${DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL};transport:${transport}`;
+
+  return {
+    bridgePatchLevel: DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL,
+    label,
+    selkiesPatchLevel,
+    selkiesVersion,
+    transport,
+  };
 }
 
 function buildGuestGdmCustomConfig(): string {
@@ -29,12 +86,22 @@ export function buildEnsureGuestDesktopBootstrapScript(
   strictStart: boolean,
   vmName?: string,
   repairProfile: GuestDesktopBootstrapRepairProfile = "standard",
+  transport: VmDesktopTransport = "vnc",
+  selkiesPort: number = DEFAULT_GUEST_SELKIES_PORT,
+  selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
 ): string {
   return `BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"
 BOOTSTRAP_SERVICE_FILE="/etc/systemd/system/parallaize-desktop-bootstrap.service"
 CURRENT_BOOTSTRAP="$(cat "$BOOTSTRAP_FILE" 2>/dev/null || true)"
 DESIRED_BOOTSTRAP="$(cat <<'PARALLAIZE_BOOTSTRAP_SCRIPT'
-${buildGuestDesktopBootstrapScript(port, vmName, repairProfile)}
+${buildGuestDesktopBootstrapScript(
+    port,
+    vmName,
+    repairProfile,
+    transport,
+    selkiesPort,
+    selkiesRtcConfig,
+  )}
 PARALLAIZE_BOOTSTRAP_SCRIPT
 )"
 CURRENT_BOOTSTRAP_SERVICE="$(cat "$BOOTSTRAP_SERVICE_FILE" 2>/dev/null || true)"
@@ -45,7 +112,14 @@ PARALLAIZE_BOOTSTRAP_UNIT
 if [ "$CURRENT_BOOTSTRAP" != "$DESIRED_BOOTSTRAP" ] || [ "$CURRENT_BOOTSTRAP_SERVICE" != "$DESIRED_BOOTSTRAP_SERVICE" ]; then
   mkdir -p /usr/local/bin /etc/systemd/system
   cat > "$BOOTSTRAP_FILE" <<'PARALLAIZE_BOOTSTRAP_SCRIPT'
-${buildGuestDesktopBootstrapScript(port, vmName, repairProfile)}
+${buildGuestDesktopBootstrapScript(
+    port,
+    vmName,
+    repairProfile,
+    transport,
+    selkiesPort,
+    selkiesRtcConfig,
+  )}
 PARALLAIZE_BOOTSTRAP_SCRIPT
   chmod 0755 "$BOOTSTRAP_FILE"
   cat > "$BOOTSTRAP_SERVICE_FILE" <<'PARALLAIZE_BOOTSTRAP_UNIT'
@@ -242,7 +316,7 @@ exec /usr/bin/x11vnc -display "$DISPLAY_NUMBER" -auth "$AUTH_FILE" -forever -sha
 function buildGuestVncServiceUnit(): string {
   return `[Unit]
 Description=Parallaize x11vnc bridge
-After=display-manager.service parallaize-desktop-bootstrap.service
+After=display-manager.service
 Wants=display-manager.service
 ConditionPathExists=/usr/bin/x11vnc
 
@@ -254,6 +328,3088 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target`;
+}
+
+function escapeShellDoubleQuoted(value: string): string {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("$", "\\$")
+    .replaceAll("`", "\\`");
+}
+
+function buildGuestSelkiesRtcEnvironment(
+  config: GuestSelkiesRtcConfig | null = null,
+): string {
+  if (!config) {
+    return "";
+  }
+
+  const lines: string[] = [];
+
+  const pushString = (name: string, value: string | null | undefined): void => {
+    if (!value) {
+      return;
+    }
+
+    lines.push(`export ${name}="${escapeShellDoubleQuoted(value)}"`);
+  };
+
+  const pushNumber = (name: string, value: number | null | undefined): void => {
+    if (!Number.isFinite(value)) {
+      return;
+    }
+
+    lines.push(`export ${name}="${Math.trunc(value ?? 0)}"`);
+  };
+
+  const pushBoolean = (name: string, value: boolean | null | undefined): void => {
+    if (typeof value !== "boolean") {
+      return;
+    }
+
+    lines.push(`export ${name}="${value ? "true" : "false"}"`);
+  };
+
+  pushString("SELKIES_STUN_HOST", config.stunHost);
+  pushNumber("SELKIES_STUN_PORT", config.stunPort);
+  pushString("SELKIES_TURN_HOST", config.turnHost);
+  pushNumber("SELKIES_TURN_PORT", config.turnPort);
+  pushString("SELKIES_TURN_PROTOCOL", config.turnProtocol);
+  pushBoolean("SELKIES_TURN_TLS", config.turnTls);
+  pushString("SELKIES_TURN_SHARED_SECRET", config.turnSharedSecret);
+  pushString("SELKIES_TURN_USERNAME", config.turnUsername);
+  pushString("SELKIES_TURN_PASSWORD", config.turnPassword);
+  pushString("SELKIES_TURN_REST_URI", config.turnRestUri);
+  pushString("SELKIES_TURN_REST_USERNAME", config.turnRestUsername);
+  pushString(
+    "SELKIES_TURN_REST_USERNAME_AUTH_HEADER",
+    config.turnRestUsernameAuthHeader,
+  );
+  pushString(
+    "SELKIES_TURN_REST_PROTOCOL_HEADER",
+    config.turnRestProtocolHeader,
+  );
+  pushString("SELKIES_TURN_REST_TLS_HEADER", config.turnRestTlsHeader);
+
+  return lines.join("\n");
+}
+
+function buildGuestSelkiesLauncherScript(
+  port: number,
+  rtcConfig: GuestSelkiesRtcConfig | null = null,
+): string {
+  const rtcEnvironment = buildGuestSelkiesRtcEnvironment(rtcConfig);
+
+  return `#!/bin/sh
+set -eu
+SELKIES_DIR="/opt/parallaize/selkies-gstreamer"
+SELKIES_RUNNER="$SELKIES_DIR/bin/selkies-gstreamer-run"
+${buildGuestDisplayDiscoveryScript()}
+ATTEMPT=0
+AUTH_FILE=""
+DISPLAY_NUMBER=":0"
+while [ "$ATTEMPT" -lt 45 ]; do
+  DISPLAY_NUMBER="$(find_guest_display_number)"
+  AUTH_FILE="$(find_guest_auth_file || true)"
+  if [ -n "$AUTH_FILE" ] && [ -f "$AUTH_FILE" ]; then
+    break
+  fi
+  ATTEMPT=$((ATTEMPT + 1))
+  sleep 2
+done
+if [ ! -x "$SELKIES_RUNNER" ]; then
+  echo "Selkies portable runtime is missing at $SELKIES_RUNNER." >&2
+  exit 1
+fi
+if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
+  echo "Unable to locate an Xauthority file for the desktop session." >&2
+  exit 1
+fi
+export DISPLAY="$DISPLAY_NUMBER"
+export XAUTHORITY="$AUTH_FILE"
+export HOME="\${HOME:-/root}"
+export SELKIES_ADDR="0.0.0.0"
+export SELKIES_PORT="${port}"
+export SELKIES_ENABLE_HTTPS="false"
+export SELKIES_ENABLE_BASIC_AUTH="false"
+export SELKIES_ENABLE_RESIZE="true"
+export SELKIES_CURSOR_SIZE="\${SELKIES_CURSOR_SIZE:-24}"
+export SELKIES_ENABLE_WEBRTC_STATISTICS="false"
+export SELKIES_ENABLE_METRICS_HTTP="false"
+export SELKIES_ENCODER="\${SELKIES_ENCODER:-x264enc}"
+export SELKIES_WEB_ROOT="$SELKIES_DIR/share/selkies-web"
+${rtcEnvironment ? `${rtcEnvironment}
+` : ""}exec "$SELKIES_RUNNER" --addr "$SELKIES_ADDR" --port "$SELKIES_PORT" --enable_basic_auth "$SELKIES_ENABLE_BASIC_AUTH" --enable_resize "$SELKIES_ENABLE_RESIZE"`;
+}
+
+function buildGuestSelkiesServiceUnit(): string {
+  return `[Unit]
+Description=Parallaize Selkies bridge
+After=display-manager.service
+Wants=display-manager.service
+ConditionPathExists=/usr/local/bin/parallaize-selkies
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/parallaize-selkies
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target`;
+}
+
+function buildGuestSelkiesInstallScript(): string {
+  return `patch_selkies_bundle() {
+  SELKIES_MAIN_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/__main__.py"
+  if [ -f "$SELKIES_MAIN_FILE" ]; then
+    python3 - "$SELKIES_MAIN_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+contents = contents.replace(
+    "           time.sleep(2)\\n           await signalling.setup_call()",
+    "           await asyncio.sleep(1.5)\\n           await signalling.setup_call()",
+)
+contents = contents.replace(
+    "           time.sleep(2)\\n           await audio_signalling.setup_call()",
+    "           await asyncio.sleep(1.5)\\n           await audio_signalling.setup_call()",
+)
+if "preview_peer_id = 11" not in contents:
+    contents = contents.replace(
+        '''    my_id = 0
+    peer_id = 1
+    my_audio_id = 2
+    audio_peer_id = 3
+''',
+        '''    my_id = 0
+    peer_id = 1
+    preview_my_id = 10
+    preview_peer_id = 11
+    my_audio_id = 2
+    audio_peer_id = 3
+''',
+    )
+if "preview_signalling = WebRTCSignalling" not in contents:
+    contents = contents.replace(
+        '''    audio_signalling = WebRTCSignalling('%s//127.0.0.1:%s/ws' % (ws_protocol, args.port), my_audio_id, audio_peer_id,
+        enable_https=using_https,
+        enable_basic_auth=using_basic_auth,
+        basic_auth_user=args.basic_auth_user,
+        basic_auth_password=args.basic_auth_password)
+''',
+        '''    audio_signalling = WebRTCSignalling('%s//127.0.0.1:%s/ws' % (ws_protocol, args.port), my_audio_id, audio_peer_id,
+        enable_https=using_https,
+        enable_basic_auth=using_basic_auth,
+        basic_auth_user=args.basic_auth_user,
+        basic_auth_password=args.basic_auth_password)
+    preview_signalling = WebRTCSignalling('%s//127.0.0.1:%s/ws' % (ws_protocol, args.port), preview_my_id, preview_peer_id,
+        enable_https=using_https,
+        enable_basic_auth=using_basic_auth,
+        basic_auth_user=args.basic_auth_user,
+        basic_auth_password=args.basic_auth_password)
+''',
+    )
+if "async def on_preview_signalling_error" not in contents:
+    contents = contents.replace(
+        '''    signalling.on_error = on_signalling_error
+    audio_signalling.on_error = on_audio_signalling_error
+''',
+        '''    async def on_preview_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           await asyncio.sleep(1.5)
+           await preview_signalling.setup_call()
+       else:
+           logger.error("preview signalling error: %s", str(e))
+           app.stop_pipeline()
+    signalling.on_error = on_signalling_error
+    audio_signalling.on_error = on_audio_signalling_error
+    preview_signalling.on_error = on_preview_signalling_error
+''',
+    )
+if "preview_signalling.on_disconnect = lambda: app.stop_pipeline()" not in contents:
+    contents = contents.replace(
+        '''    signalling.on_disconnect = lambda: app.stop_pipeline()
+    audio_signalling.on_disconnect = lambda: audio_app.stop_pipeline()
+''',
+        '''    signalling.on_disconnect = lambda: app.stop_pipeline()
+    audio_signalling.on_disconnect = lambda: audio_app.stop_pipeline()
+    preview_signalling.on_disconnect = lambda: app.stop_pipeline()
+''',
+    )
+if "preview_signalling.on_connect = preview_signalling.setup_call" not in contents:
+    contents = contents.replace(
+        '''    signalling.on_connect = signalling.setup_call
+    audio_signalling.on_connect = audio_signalling.setup_call
+''',
+        '''    signalling.on_connect = signalling.setup_call
+    audio_signalling.on_connect = audio_signalling.setup_call
+    preview_signalling.on_connect = preview_signalling.setup_call
+''',
+    )
+if "def schedule_setup_call(signalling_client, retry_key, delay=0.0):" not in contents:
+    contents = contents.replace(
+        '''    # Handle errors from the signalling server
+    async def on_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           # Waiting for peer to connect, retry in 2 seconds.
+           await asyncio.sleep(1.5)
+           await signalling.setup_call()
+       else:
+           logger.error("signalling error: %s", str(e))
+           app.stop_pipeline()
+    async def on_audio_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           # Waiting for peer to connect, retry in 2 seconds.
+           await asyncio.sleep(1.5)
+           await audio_signalling.setup_call()
+       else:
+           logger.error("signalling error: %s", str(e))
+           audio_app.stop_pipeline()
+    async def on_preview_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           await asyncio.sleep(1.5)
+           await preview_signalling.setup_call()
+       else:
+           logger.error("preview signalling error: %s", str(e))
+           app.stop_pipeline()
+    signalling.on_error = on_signalling_error
+    audio_signalling.on_error = on_audio_signalling_error
+    preview_signalling.on_error = on_preview_signalling_error
+
+    signalling.on_disconnect = lambda: app.stop_pipeline()
+    audio_signalling.on_disconnect = lambda: audio_app.stop_pipeline()
+    preview_signalling.on_disconnect = lambda: app.stop_pipeline()
+
+    # After connecting, attempt to setup call to peer
+    signalling.on_connect = signalling.setup_call
+    audio_signalling.on_connect = audio_signalling.setup_call
+    preview_signalling.on_connect = preview_signalling.setup_call
+''',
+        '''    setup_call_retry_tasks = {}
+
+    def schedule_setup_call(signalling_client, retry_key, delay=0.0):
+        existing_task = setup_call_retry_tasks.get(retry_key)
+        if existing_task is not None and not existing_task.done():
+            return existing_task
+
+        async def run_setup_call():
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await signalling_client.setup_call()
+            except Exception as exc:
+                logger.warning("setup call for %s failed: %s", retry_key, str(exc))
+            finally:
+                current_task = setup_call_retry_tasks.get(retry_key)
+                if current_task is asyncio.current_task():
+                    setup_call_retry_tasks.pop(retry_key, None)
+
+        task = asyncio.ensure_future(run_setup_call())
+        setup_call_retry_tasks[retry_key] = task
+        return task
+
+    def clear_setup_call_retry(retry_key):
+        task = setup_call_retry_tasks.pop(retry_key, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    # Handle errors from the signalling server
+    async def on_signalling_connect():
+       await schedule_setup_call(signalling, "video")
+    async def on_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(signalling, "video", 1.5)
+       else:
+           logger.error("signalling error: %s", str(e))
+           app.stop_pipeline()
+    async def on_audio_signalling_connect():
+       await schedule_setup_call(audio_signalling, "audio")
+    async def on_audio_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(audio_signalling, "audio", 1.5)
+       else:
+           logger.error("signalling error: %s", str(e))
+           audio_app.stop_pipeline()
+    async def on_preview_signalling_connect():
+       await schedule_setup_call(preview_signalling, "preview")
+    async def on_preview_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(preview_signalling, "preview", 1.5)
+       else:
+           logger.error("preview signalling error: %s", str(e))
+           app.stop_pipeline()
+    signalling.on_error = on_signalling_error
+    audio_signalling.on_error = on_audio_signalling_error
+    preview_signalling.on_error = on_preview_signalling_error
+
+    signalling.on_disconnect = lambda: app.stop_pipeline()
+    audio_signalling.on_disconnect = lambda: audio_app.stop_pipeline()
+    preview_signalling.on_disconnect = lambda: app.stop_pipeline()
+
+    # After connecting, attempt to setup call to peer
+    signalling.on_connect = on_signalling_connect
+    audio_signalling.on_connect = on_audio_signalling_connect
+    preview_signalling.on_connect = on_preview_signalling_connect
+''',
+    )
+    contents = contents.replace(
+        '''    # Handle errors from the signalling server
+    async def on_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           # Waiting for peer to connect, retry in 2 seconds.
+           await asyncio.sleep(0.2)
+           await signalling.setup_call()
+       else:
+           logger.error("signalling error: %s", str(e))
+           app.stop_pipeline()
+    async def on_audio_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           # Waiting for peer to connect, retry in 2 seconds.
+           await asyncio.sleep(0.2)
+           await audio_signalling.setup_call()
+       else:
+           logger.error("signalling error: %s", str(e))
+           audio_app.stop_pipeline()
+    async def on_preview_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           await asyncio.sleep(0.2)
+           await preview_signalling.setup_call()
+       else:
+           logger.error("preview signalling error: %s", str(e))
+           app.stop_pipeline()
+    signalling.on_error = on_signalling_error
+    audio_signalling.on_error = on_audio_signalling_error
+    preview_signalling.on_error = on_preview_signalling_error
+
+    signalling.on_disconnect = lambda: app.stop_pipeline()
+    audio_signalling.on_disconnect = lambda: audio_app.stop_pipeline()
+    preview_signalling.on_disconnect = lambda: app.stop_pipeline()
+
+    # After connecting, attempt to setup call to peer
+    signalling.on_connect = signalling.setup_call
+    audio_signalling.on_connect = audio_signalling.setup_call
+    preview_signalling.on_connect = preview_signalling.setup_call
+''',
+        '''    setup_call_retry_tasks = {}
+
+    def schedule_setup_call(signalling_client, retry_key, delay=0.0):
+        existing_task = setup_call_retry_tasks.get(retry_key)
+        if existing_task is not None and not existing_task.done():
+            return existing_task
+
+        async def run_setup_call():
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await signalling_client.setup_call()
+            except Exception as exc:
+                logger.warning("setup call for %s failed: %s", retry_key, str(exc))
+            finally:
+                current_task = setup_call_retry_tasks.get(retry_key)
+                if current_task is asyncio.current_task():
+                    setup_call_retry_tasks.pop(retry_key, None)
+
+        task = asyncio.ensure_future(run_setup_call())
+        setup_call_retry_tasks[retry_key] = task
+        return task
+
+    def clear_setup_call_retry(retry_key):
+        task = setup_call_retry_tasks.pop(retry_key, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    # Handle errors from the signalling server
+    async def on_signalling_connect():
+       await schedule_setup_call(signalling, "video")
+    async def on_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(signalling, "video", 1.5)
+       else:
+           logger.error("signalling error: %s", str(e))
+           app.stop_pipeline()
+    async def on_audio_signalling_connect():
+       await schedule_setup_call(audio_signalling, "audio")
+    async def on_audio_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(audio_signalling, "audio", 1.5)
+       else:
+           logger.error("signalling error: %s", str(e))
+           audio_app.stop_pipeline()
+    async def on_preview_signalling_connect():
+       await schedule_setup_call(preview_signalling, "preview")
+    async def on_preview_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(preview_signalling, "preview", 1.5)
+       else:
+           logger.error("preview signalling error: %s", str(e))
+           app.stop_pipeline()
+    signalling.on_error = on_signalling_error
+    audio_signalling.on_error = on_audio_signalling_error
+    preview_signalling.on_error = on_preview_signalling_error
+
+    signalling.on_disconnect = lambda: app.stop_pipeline()
+    audio_signalling.on_disconnect = lambda: audio_app.stop_pipeline()
+    preview_signalling.on_disconnect = lambda: app.stop_pipeline()
+
+    # After connecting, attempt to setup call to peer
+    signalling.on_connect = on_signalling_connect
+    audio_signalling.on_connect = on_audio_signalling_connect
+    preview_signalling.on_connect = on_preview_signalling_connect
+''',
+    )
+if "def schedule_signalling_restart(signalling_client, retry_key, delay=0.0):" not in contents:
+    contents = contents.replace(
+        '''    setup_call_retry_tasks = {}
+
+    def schedule_setup_call(signalling_client, retry_key, delay=0.0):
+        existing_task = setup_call_retry_tasks.get(retry_key)
+        if existing_task is not None and not existing_task.done():
+            return existing_task
+
+        async def run_setup_call():
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await signalling_client.setup_call()
+            except Exception as exc:
+                logger.warning("setup call for %s failed: %s", retry_key, str(exc))
+            finally:
+                current_task = setup_call_retry_tasks.get(retry_key)
+                if current_task is asyncio.current_task():
+                    setup_call_retry_tasks.pop(retry_key, None)
+
+        task = asyncio.ensure_future(run_setup_call())
+        setup_call_retry_tasks[retry_key] = task
+        return task
+
+    def clear_setup_call_retry(retry_key):
+        task = setup_call_retry_tasks.pop(retry_key, None)
+        if task is not None and not task.done():
+            task.cancel()
+''',
+        '''    main_loop = asyncio.get_event_loop()
+    setup_call_retry_tasks = {}
+    signalling_reconnect_tasks = {}
+
+    def schedule_setup_call(signalling_client, retry_key, delay=0.0):
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            if not main_loop.is_closed():
+                main_loop.call_soon_threadsafe(
+                    schedule_setup_call,
+                    signalling_client,
+                    retry_key,
+                    delay,
+                )
+            return None
+
+        if running_loop is not main_loop:
+            if not main_loop.is_closed():
+                main_loop.call_soon_threadsafe(
+                    schedule_setup_call,
+                    signalling_client,
+                    retry_key,
+                    delay,
+                )
+            return None
+
+        existing_task = setup_call_retry_tasks.get(retry_key)
+        if existing_task is not None and not existing_task.done():
+            return existing_task
+
+        async def run_setup_call():
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await signalling_client.setup_call()
+            except Exception as exc:
+                logger.warning("setup call for %s failed: %s", retry_key, str(exc))
+            finally:
+                current_task = setup_call_retry_tasks.get(retry_key)
+                if current_task is asyncio.current_task():
+                    setup_call_retry_tasks.pop(retry_key, None)
+
+        task = main_loop.create_task(run_setup_call())
+        setup_call_retry_tasks[retry_key] = task
+        return task
+
+    def clear_setup_call_retry(retry_key):
+        task = setup_call_retry_tasks.pop(retry_key, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def schedule_signalling_restart(signalling_client, retry_key, delay=0.0):
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            if not main_loop.is_closed():
+                main_loop.call_soon_threadsafe(
+                    schedule_signalling_restart,
+                    signalling_client,
+                    retry_key,
+                    delay,
+                )
+            return None
+
+        if running_loop is not main_loop:
+            if not main_loop.is_closed():
+                main_loop.call_soon_threadsafe(
+                    schedule_signalling_restart,
+                    signalling_client,
+                    retry_key,
+                    delay,
+                )
+            return None
+
+        existing_task = signalling_reconnect_tasks.get(retry_key)
+        if existing_task is not None and not existing_task.done():
+            return existing_task
+
+        async def run_signalling_restart():
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await signalling_client.connect()
+                main_loop.create_task(signalling_client.start())
+            except Exception as exc:
+                logger.warning("signalling restart for %s failed: %s", retry_key, str(exc))
+            finally:
+                current_task = signalling_reconnect_tasks.get(retry_key)
+                if current_task is asyncio.current_task():
+                    signalling_reconnect_tasks.pop(retry_key, None)
+
+        task = main_loop.create_task(run_signalling_restart())
+        signalling_reconnect_tasks[retry_key] = task
+        return task
+''',
+    )
+if "preview_signalling.on_sdp = app.set_sdp" not in contents:
+    contents = contents.replace(
+        '''    signalling.on_sdp = app.set_sdp
+    audio_signalling.on_sdp = audio_app.set_sdp
+''',
+        '''    signalling.on_sdp = app.set_sdp
+    preview_signalling.on_sdp = app.set_sdp
+    audio_signalling.on_sdp = audio_app.set_sdp
+''',
+    )
+if "preview_signalling.on_ice = app.set_ice" not in contents:
+    contents = contents.replace(
+        '''    signalling.on_ice = app.set_ice
+    audio_signalling.on_ice = audio_app.set_ice
+''',
+        '''    signalling.on_ice = app.set_ice
+    preview_signalling.on_ice = app.set_ice
+    audio_signalling.on_ice = audio_app.set_ice
+''',
+    )
+if "elif str(session_peer_id) == str(preview_peer_id):" not in contents:
+    session_handler_start = contents.find(
+        '''    def on_session_handler(session_peer_id, meta=None):
+'''
+    )
+    session_handler_end = contents.find(
+        '''
+    signalling.on_session = on_session_handler
+''',
+        session_handler_start,
+    )
+    if session_handler_start < 0 or session_handler_end < 0:
+        raise RuntimeError("failed to locate Selkies session handler for preview support")
+    contents = (
+        contents[:session_handler_start]
+        + '''    def on_session_handler(session_peer_id, meta=None):
+        logger.info("starting session for peer id {} with meta: {}".format(session_peer_id, meta))
+        if str(session_peer_id) == str(peer_id):
+            app.on_sdp = signalling.send_sdp
+            app.on_ice = signalling.send_ice
+            app.stop_pipeline()
+            if meta:
+                if enable_resize:
+                    if meta["res"]:
+                        on_resize_handler(meta["res"])
+                    if meta["scale"]:
+                        on_scaling_ratio_handler(meta["scale"])
+                else:
+                    logger.info("setting cursor to default size")
+                    set_cursor_size(16)
+            logger.info("starting video pipeline")
+            app.start_pipeline()
+        elif str(session_peer_id) == str(preview_peer_id):
+            app.on_sdp = preview_signalling.send_sdp
+            app.on_ice = preview_signalling.send_ice
+            app.stop_pipeline()
+            logger.info("starting preview video pipeline")
+            app.start_pipeline()
+        elif str(session_peer_id) == str(audio_peer_id):
+            logger.info("starting audio pipeline")
+            audio_app.stop_pipeline()
+            audio_app.start_pipeline(audio_only=True)
+        else:
+            logger.error("failed to start pipeline for peer_id: %s" % peer_id)
+
+'''
+        + contents[session_handler_end:]
+    )
+elif "audio_app.stop_pipeline()" not in contents:
+    contents = contents.replace(
+        '''            logger.info("starting audio pipeline")
+            audio_app.start_pipeline(audio_only=True)''',
+        '''            logger.info("starting audio pipeline")
+            audio_app.stop_pipeline()
+            audio_app.start_pipeline(audio_only=True)''',
+    )
+if 'clear_setup_call_retry("video")' not in contents:
+    contents = contents.replace(
+        '''        if str(session_peer_id) == str(peer_id):
+            app.on_sdp = signalling.send_sdp
+''',
+        '''        if str(session_peer_id) == str(peer_id):
+            clear_setup_call_retry("video")
+            app.on_sdp = signalling.send_sdp
+''',
+    )
+if 'clear_setup_call_retry("preview")' not in contents:
+    contents = contents.replace(
+        '''        elif str(session_peer_id) == str(preview_peer_id):
+            app.on_sdp = preview_signalling.send_sdp
+''',
+        '''        elif str(session_peer_id) == str(preview_peer_id):
+            clear_setup_call_retry("preview")
+            app.on_sdp = preview_signalling.send_sdp
+''',
+    )
+if 'clear_setup_call_retry("audio")' not in contents:
+    contents = contents.replace(
+        '''        elif str(session_peer_id) == str(audio_peer_id):
+            logger.info("starting audio pipeline")
+''',
+        '''        elif str(session_peer_id) == str(audio_peer_id):
+            clear_setup_call_retry("audio")
+            logger.info("starting audio pipeline")
+''',
+    )
+if "loop.run_until_complete(preview_signalling.connect())" not in contents:
+    contents = contents.replace(
+        '''            loop.run_until_complete(signalling.connect())
+            loop.run_until_complete(audio_signalling.connect())
+''',
+        '''            loop.run_until_complete(signalling.connect())
+            loop.run_until_complete(preview_signalling.connect())
+            loop.run_until_complete(audio_signalling.connect())
+''',
+    )
+if "asyncio.ensure_future(preview_signalling.start(), loop=loop)" not in contents:
+    contents = contents.replace(
+        '''            # asyncio.ensure_future(signalling.start(), loop=loop)
+            asyncio.ensure_future(audio_signalling.start(), loop=loop)
+            loop.run_until_complete(signalling.start())
+''',
+        '''            # asyncio.ensure_future(signalling.start(), loop=loop)
+            asyncio.ensure_future(preview_signalling.start(), loop=loop)
+            asyncio.ensure_future(audio_signalling.start(), loop=loop)
+            loop.run_until_complete(signalling.start())
+''',
+    )
+if "preview_signalling.on_session = on_session_handler" not in contents:
+    contents = contents.replace(
+        '''    signalling.on_session = on_session_handler
+    audio_signalling.on_session = on_session_handler
+''',
+        '''    signalling.on_session = on_session_handler
+    preview_signalling.on_session = on_session_handler
+    audio_signalling.on_session = on_session_handler
+''',
+    )
+if "preview_app = GSTWebRTCApp(" not in contents:
+    contents = contents.replace(
+        '''    app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+    audio_app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+''',
+        '''    app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+    preview_app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+    audio_app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+''',
+    )
+if "preview_signalling.on_sdp = preview_app.set_sdp" not in contents:
+    contents = contents.replace(
+        "preview_signalling.on_sdp = app.set_sdp",
+        "preview_signalling.on_sdp = preview_app.set_sdp",
+    )
+if "preview_signalling.on_ice = preview_app.set_ice" not in contents:
+    contents = contents.replace(
+        "preview_signalling.on_ice = app.set_ice",
+        "preview_signalling.on_ice = preview_app.set_ice",
+    )
+if "preview_signalling.on_disconnect = lambda: preview_app.stop_pipeline()" not in contents:
+    contents = contents.replace(
+        "preview_signalling.on_disconnect = lambda: app.stop_pipeline()",
+        "preview_signalling.on_disconnect = lambda: preview_app.stop_pipeline()",
+    )
+if "def on_preview_signalling_disconnect():" not in contents:
+    contents = contents.replace(
+        '''    signalling.on_disconnect = lambda: app.stop_pipeline()
+    audio_signalling.on_disconnect = lambda: audio_app.stop_pipeline()
+    preview_signalling.on_disconnect = lambda: preview_app.stop_pipeline()
+''',
+        '''    def on_audio_signalling_disconnect():
+        clear_setup_call_retry("audio")
+        audio_app.stop_pipeline()
+        schedule_signalling_restart(audio_signalling, "audio-signalling", 1.0)
+
+    def on_preview_signalling_disconnect():
+        clear_setup_call_retry("preview")
+        preview_app.stop_pipeline()
+        schedule_signalling_restart(preview_signalling, "preview-signalling", 1.0)
+
+    signalling.on_disconnect = lambda: app.stop_pipeline()
+    audio_signalling.on_disconnect = on_audio_signalling_disconnect
+    preview_signalling.on_disconnect = on_preview_signalling_disconnect
+''',
+    )
+contents = contents.replace(
+    '''    def on_audio_signalling_disconnect():
+        clear_setup_call_retry("audio")
+        audio_app.stop_pipeline()
+
+    def on_preview_signalling_disconnect():
+''',
+    '''    def on_audio_signalling_disconnect():
+        clear_setup_call_retry("audio")
+        audio_app.stop_pipeline()
+        schedule_signalling_restart(audio_signalling, "audio-signalling", 1.0)
+
+    def on_preview_signalling_disconnect():
+''',
+)
+contents = contents.replace(
+    '''    def on_preview_signalling_disconnect():
+        clear_setup_call_retry("preview")
+        preview_app.stop_pipeline()
+
+    signalling.on_disconnect = lambda: app.stop_pipeline()
+''',
+    '''    def on_preview_signalling_disconnect():
+        clear_setup_call_retry("preview")
+        preview_app.stop_pipeline()
+        schedule_signalling_restart(preview_signalling, "preview-signalling", 1.0)
+
+    signalling.on_disconnect = lambda: app.stop_pipeline()
+''',
+)
+contents = contents.replace(
+    '''           logger.error("preview signalling error: %s", str(e))
+           app.stop_pipeline()''',
+    '''           logger.error("preview signalling error: %s", str(e))
+           preview_app.stop_pipeline()''',
+)
+if "preview_app.on_sdp = preview_signalling.send_sdp" not in contents:
+    contents = contents.replace(
+        '''        elif str(session_peer_id) == str(preview_peer_id):
+            clear_setup_call_retry("preview")
+            app.on_sdp = preview_signalling.send_sdp
+            app.on_ice = preview_signalling.send_ice
+            app.stop_pipeline()
+            logger.info("starting preview video pipeline")
+            app.start_pipeline()''',
+        '''        elif str(session_peer_id) == str(preview_peer_id):
+            clear_setup_call_retry("preview")
+            preview_app.on_sdp = preview_signalling.send_sdp
+            preview_app.on_ice = preview_signalling.send_ice
+            preview_app.stop_pipeline()
+            logger.info("starting preview video pipeline")
+            preview_app.start_pipeline()''',
+    )
+if 'preview_app.on_data_open = lambda: logger.info("opened preview data channel")' not in contents:
+    contents = contents.replace(
+        '''    app.on_data_open = lambda: data_channel_ready()
+''',
+        '''    app.on_data_open = lambda: data_channel_ready()
+    preview_app.on_data_open = lambda: logger.info("opened preview data channel")
+    preview_app.on_data_message = lambda msg: None
+''',
+    )
+contents = contents.replace(
+    'preview_app.on_data_close = lambda: (preview_app.stop_pipeline(), schedule_setup_call(preview_signalling, "preview", 1.0))',
+    'preview_app.on_data_close = lambda: schedule_setup_call(preview_signalling, "preview", 1.0)',
+)
+contents = contents.replace(
+    'preview_app.on_data_error = lambda: (preview_app.stop_pipeline(), schedule_setup_call(preview_signalling, "preview", 1.0))',
+    'preview_app.on_data_error = lambda: schedule_setup_call(preview_signalling, "preview", 1.0)',
+)
+contents = contents.replace(
+    '''    preview_app.on_data_close = lambda: None
+    preview_app.on_data_error = lambda: None
+''',
+    '''    preview_app.on_data_close = lambda: None
+    preview_app.on_data_error = lambda: None
+''',
+)
+contents = contents.replace(
+    'preview_app.on_data_close = lambda: schedule_setup_call(preview_signalling, "preview", 1.0)',
+    'preview_app.on_data_close = lambda: None',
+)
+contents = contents.replace(
+    'preview_app.on_data_error = lambda: schedule_setup_call(preview_signalling, "preview", 1.0)',
+    'preview_app.on_data_error = lambda: None',
+)
+if 'preview_app.on_data_close = lambda: None' not in contents:
+    contents = contents.replace(
+        '''    preview_app.on_data_open = lambda: logger.info("opened preview data channel")
+    preview_app.on_data_message = lambda msg: None
+''',
+        '''    preview_app.on_data_open = lambda: logger.info("opened preview data channel")
+    preview_app.on_data_message = lambda msg: None
+    preview_app.on_data_close = lambda: None
+    preview_app.on_data_error = lambda: None
+''',
+    )
+if "preview_app.handle_bus_calls()" not in contents:
+    contents = contents.replace(
+        '''            asyncio.ensure_future(app.handle_bus_calls(), loop=loop)
+            asyncio.ensure_future(audio_app.handle_bus_calls(), loop=loop)
+''',
+        '''            asyncio.ensure_future(app.handle_bus_calls(), loop=loop)
+            asyncio.ensure_future(preview_app.handle_bus_calls(), loop=loop)
+            asyncio.ensure_future(audio_app.handle_bus_calls(), loop=loop)
+''',
+    )
+if '''            app.stop_pipeline()
+            preview_app.stop_pipeline()
+            audio_app.stop_pipeline()
+            webrtc_input.stop_js_server()
+''' not in contents:
+    contents = contents.replace(
+        '''            app.stop_pipeline()
+            audio_app.stop_pipeline()
+            webrtc_input.stop_js_server()
+''',
+        '''            app.stop_pipeline()
+            preview_app.stop_pipeline()
+            audio_app.stop_pipeline()
+            webrtc_input.stop_js_server()
+''',
+    )
+    contents = contents.replace(
+        '''    finally:
+        app.stop_pipeline()
+        audio_app.stop_pipeline()
+''',
+        '''    finally:
+        app.stop_pipeline()
+        preview_app.stop_pipeline()
+        audio_app.stop_pipeline()
+''',
+    )
+if "if preview_app.webrtcbin:" not in contents:
+    contents = contents.replace(
+        '''    def mon_rtc_config(stun_servers, turn_servers, rtc_config):
+        if app.webrtcbin:
+            logger.info("updating STUN server")
+            app.webrtcbin.set_property("stun-server", stun_servers[0])
+            for i, turn_server in enumerate(turn_servers):
+                logger.info("updating TURN server")
+                if i == 0:
+                    app.webrtcbin.set_property("turn-server", turn_server)
+                else:
+                    app.webrtcbin.emit("add-turn-server", turn_server)
+        server.set_rtc_config(rtc_config)
+''',
+        '''    def mon_rtc_config(stun_servers, turn_servers, rtc_config):
+        for active_app in (app, preview_app):
+            if active_app.webrtcbin:
+                logger.info("updating STUN server")
+                active_app.webrtcbin.set_property("stun-server", stun_servers[0])
+                for i, turn_server in enumerate(turn_servers):
+                    logger.info("updating TURN server")
+                    if i == 0:
+                        active_app.webrtcbin.set_property("turn-server", turn_server)
+                    else:
+                        active_app.webrtcbin.emit("add-turn-server", turn_server)
+        server.set_rtc_config(rtc_config)
+''',
+    )
+for auxiliary_signalling_handler_source, auxiliary_signalling_handler_target in (
+    (
+        '''    async def on_audio_signalling_connect():
+       await schedule_setup_call(audio_signalling, "audio")
+''',
+        '''    async def on_audio_signalling_connect():
+       return
+''',
+    ),
+    (
+        '''    async def on_preview_signalling_connect():
+       await schedule_setup_call(preview_signalling, "preview")
+''',
+        '''    async def on_preview_signalling_connect():
+       return
+''',
+    ),
+    (
+        '''    async def on_audio_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(audio_signalling, "audio", 1.5)
+       else:
+           logger.error("signalling error: %s", str(e))
+           audio_app.stop_pipeline()
+''',
+        '''    async def on_audio_signalling_error(e):
+       return
+''',
+    ),
+    (
+        '''    async def on_preview_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(preview_signalling, "preview", 1.5)
+       else:
+           logger.error("preview signalling error: %s", str(e))
+           app.stop_pipeline()
+''',
+        '''    async def on_preview_signalling_error(e):
+       return
+''',
+    ),
+    (
+        '''    async def on_preview_signalling_error(e):
+       if isinstance(e, WebRTCSignallingErrorNoPeer):
+           schedule_setup_call(preview_signalling, "preview", 1.5)
+       else:
+           logger.error("preview signalling error: %s", str(e))
+           preview_app.stop_pipeline()
+''',
+        '''    async def on_preview_signalling_error(e):
+       return
+''',
+    ),
+    (
+        '''    def on_audio_signalling_disconnect():
+        clear_setup_call_retry("audio")
+        audio_app.stop_pipeline()
+        schedule_signalling_restart(audio_signalling, "audio-signalling", 1.0)
+''',
+        '''    def on_audio_signalling_disconnect():
+        clear_setup_call_retry("audio")
+        audio_app.stop_pipeline()
+''',
+    ),
+    (
+        '''    def on_preview_signalling_disconnect():
+        clear_setup_call_retry("preview")
+        preview_app.stop_pipeline()
+        schedule_signalling_restart(preview_signalling, "preview-signalling", 1.0)
+''',
+        '''    def on_preview_signalling_disconnect():
+        clear_setup_call_retry("preview")
+        preview_app.stop_pipeline()
+''',
+    ),
+):
+    contents = contents.replace(
+        auxiliary_signalling_handler_source,
+        auxiliary_signalling_handler_target,
+    )
+required_preview_tokens = [
+    "preview_peer_id = 11",
+    "preview_signalling = WebRTCSignalling",
+    "def schedule_setup_call(signalling_client, retry_key, delay=0.0):",
+    "def schedule_signalling_restart(signalling_client, retry_key, delay=0.0):",
+    'async def on_audio_signalling_connect():\\n       return',
+    'async def on_preview_signalling_connect():\\n       return',
+    "preview_app = GSTWebRTCApp",
+    "def on_preview_signalling_disconnect():",
+    "preview_signalling.on_sdp = preview_app.set_sdp",
+    "preview_signalling.on_ice = preview_app.set_ice",
+    "elif str(session_peer_id) == str(preview_peer_id):",
+    'clear_setup_call_retry("preview")',
+    "preview_app.on_sdp = preview_signalling.send_sdp",
+    "preview_app.on_ice = preview_signalling.send_ice",
+    "preview_app.on_data_close = lambda: None",
+    "preview_app.handle_bus_calls()",
+    "preview_signalling.on_session = on_session_handler",
+    "loop.run_until_complete(preview_signalling.connect())",
+    "asyncio.ensure_future(preview_signalling.start(), loop=loop)",
+]
+missing_preview_tokens = [
+    token for token in required_preview_tokens if token not in contents
+]
+if missing_preview_tokens:
+    raise RuntimeError(
+        "Selkies preview patch is incomplete: " + ", ".join(missing_preview_tokens)
+    )
+path.write_text(contents)
+PY
+  fi
+  SELKIES_SIGNALING_SERVER_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/signalling_web.py"
+  if [ -f "$SELKIES_SIGNALING_SERVER_FILE" ]; then
+    python3 - "$SELKIES_SIGNALING_SERVER_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+
+peer_reconnect_block = '''        if uid in self.peers:
+            logger.warning("Replacing existing peer %r at %r with a new connection from %r", uid, self.peers[uid][1], raddr)
+            await self.remove_peer(uid)
+'''
+if peer_reconnect_block not in contents:
+    contents = contents.replace(
+        '''        if not uid or uid in self.peers or uid.split() != [uid]: # no whitespace
+            await ws.close(code=1002, reason='invalid peer uid')
+            raise Exception("Invalid uid {!r} from {!r}".format(uid, raddr))
+''',
+        '''        if not uid or uid.split() != [uid]: # no whitespace
+            await ws.close(code=1002, reason='invalid peer uid')
+            raise Exception("Invalid uid {!r} from {!r}".format(uid, raddr))
+        if uid in self.peers:
+            logger.warning("Replacing existing peer %r at %r with a new connection from %r", uid, self.peers[uid][1], raddr)
+            await self.remove_peer(uid)
+''',
+    )
+
+stale_disconnect_block = '''    async def remove_peer(self, uid, ws=None):
+        if uid not in self.peers:
+            return
+        current_ws, raddr, status, _ = self.peers[uid]
+        if ws is not None and current_ws is not ws:
+            logger.info("Ignoring stale disconnect for peer %r at %r", uid, raddr)
+            return
+        await self.cleanup_session(uid)
+        if uid in self.peers:
+            ws, raddr, status, _ = self.peers[uid]
+            if status and status != 'session':
+                await self.cleanup_room(uid, status)
+            del self.peers[uid]
+            await ws.close()
+            logger.info("Disconnected from peer {!r} at {!r}".format(uid, raddr))
+'''
+if stale_disconnect_block not in contents:
+    contents = contents.replace(
+        '''    async def remove_peer(self, uid):
+        await self.cleanup_session(uid)
+        if uid in self.peers:
+            ws, raddr, status, _ = self.peers[uid]
+            if status and status != 'session':
+                await self.cleanup_room(uid, status)
+            del self.peers[uid]
+            await ws.close()
+            logger.info("Disconnected from peer {!r} at {!r}".format(uid, raddr))
+''',
+        stale_disconnect_block,
+    )
+
+if "await self.remove_peer(peer_id, ws)" not in contents:
+    contents = contents.replace(
+        '''                await self.remove_peer(peer_id)
+''',
+        '''                await self.remove_peer(peer_id, ws)
+''',
+    )
+
+required_tokens = [
+    'logger.warning("Replacing existing peer %r at %r with a new connection from %r", uid, self.peers[uid][1], raddr)',
+    "await self.remove_peer(uid)",
+    'logger.info("Ignoring stale disconnect for peer %r at %r", uid, raddr)',
+    "await self.remove_peer(peer_id, ws)",
+]
+missing_tokens = [token for token in required_tokens if token not in contents]
+if missing_tokens:
+    raise RuntimeError(
+        "Selkies signalling reconnect patch is incomplete: " + ", ".join(missing_tokens)
+    )
+
+path.write_text(contents)
+PY
+  fi
+  SELKIES_SIGNALING_CLIENT_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/webrtc_signalling.py"
+  if [ -f "$SELKIES_SIGNALING_CLIENT_FILE" ]; then
+    python3 - "$SELKIES_SIGNALING_CLIENT_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+
+start_marker = "    async def start(self):\\n"
+start_offset = contents.find(start_marker)
+if start_offset == -1:
+    raise RuntimeError("Unable to locate Selkies signalling start() for disconnect patching")
+
+contents = contents[:start_offset] + '''    async def start(self):
+        """Handles messages from the signalling server websocket.
+
+        Message types:
+          HELLO: response from server indicating peer is registered.
+          ERROR*: error messages from server.
+          {"sdp": ...}: JSON SDP message
+          {"ice": ...}: JSON ICE message
+
+        Callbacks:
+
+        on_connect: fired when HELLO is received.
+        on_session: fired after setup_call() succeeds and SESSION_OK is received.
+        on_error(WebRTCSignallingErrorNoPeer): fired when setup_call() fails and peer not found message is received.
+        on_error(WebRTCSignallingError): fired when message parsing fails or unexpected message is received.
+
+        """
+        try:
+            async for message in self.conn:
+                if message == 'HELLO':
+                    logger.info("connected")
+                    await self.on_connect()
+                elif message.startswith('SESSION_OK'):
+                    toks = message.split()
+                    meta = {}
+                    if len(toks) > 1:
+                        meta = json.loads(base64.b64decode(toks[1]))
+                    logger.info("started session with peer: %s, meta: %s", self.peer_id, json.dumps(meta))
+                    self.on_session(self.peer_id, (meta))
+                elif message.startswith('ERROR'):
+                    if message == "ERROR peer '%s' not found" % self.peer_id:
+                        await self.on_error(WebRTCSignallingErrorNoPeer("'%s' not found" % self.peer_id))
+                    else:
+                        await self.on_error(WebRTCSignallingError("unhandled signalling message: %s" % message))
+                else:
+                    # Attempt to parse JSON SDP or ICE message
+                    data = None
+                    try:
+                        data = json.loads(message)
+                    except Exception as e:
+                        if isinstance(e, json.decoder.JSONDecodeError):
+                            await self.on_error(WebRTCSignallingError("error parsing message as JSON: %s" % message))
+                        else:
+                            await self.on_error(WebRTCSignallingError("failed to prase message: %s" % message))
+                        continue
+                    if data.get("sdp", None):
+                        logger.info("received SDP")
+                        logger.debug("SDP:\\\\n%s" % data["sdp"])
+                        self.on_sdp(data['sdp'].get('type'),
+                                    data['sdp'].get('sdp'))
+                    elif data.get("ice", None):
+                        logger.info("received ICE")
+                        logger.debug("ICE:\\\\n%s" % data.get("ice"))
+                        self.on_ice(data['ice'].get('sdpMLineIndex'),
+                                    data['ice'].get('candidate'))
+                    else:
+                        await self.on_error(WebRTCSignallingError("unhandled JSON message: %s", json.dumps(data)))
+        finally:
+            self.on_disconnect()
+'''
+
+required_tokens = [
+    "try:",
+    "async for message in self.conn:\\n                if message == 'HELLO':",
+    "finally:",
+    "self.on_disconnect()",
+]
+missing_tokens = [token for token in required_tokens if token not in contents]
+if missing_tokens:
+    raise RuntimeError(
+        "Selkies signalling client disconnect patch is incomplete: " + ", ".join(missing_tokens)
+    )
+
+path.write_text(contents)
+PY
+  fi
+  SELKIES_GST_APP_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/gstwebrtc_app.py"
+  if [ -f "$SELKIES_GST_APP_FILE" ]; then
+    python3 - "$SELKIES_GST_APP_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+contents = contents.replace(
+    '''        logger.info("starting pipeline")
+
+        self.pipeline = Gst.Pipeline.new()''',
+    '''        logger.info("starting pipeline")
+        if self.pipeline is not None or self.webrtcbin is not None:
+            logger.info("existing pipeline detected, tearing it down before restart")
+            self.stop_pipeline()
+
+        self.pipeline = Gst.Pipeline.new()''',
+)
+contents = contents.replace(
+    '''        if t == Gst.MessageType.EOS:
+            logger.error("End-of-stream\\n")
+            return False
+        elif t == Gst.MessageType.ERROR:
+            err, debug = message.parse_error()
+            logger.error("Error: %s: %s\\n" % (err, debug))
+            return False''',
+    '''        if t == Gst.MessageType.EOS:
+            logger.error("End-of-stream\\n")
+            self.stop_pipeline()
+            return True
+        elif t == Gst.MessageType.ERROR:
+            err, debug = message.parse_error()
+            logger.error("Error: %s: %s\\n" % (err, debug))
+            error_detail = f"{err} {debug}".lower()
+            if self.encoder == "x264enc" and "x264" in error_detail:
+                logger.warning("x264enc failed, falling back to vp8enc for the next attempt")
+                self.encoder = "vp8enc"
+            self.stop_pipeline()
+            return True''',
+)
+contents = contents.replace(
+    '''                if (old_state.value_nick == "paused" and new_state.value_nick == "ready"):
+                    logger.info("stopping bus message loop")
+                    return False''',
+    '''                if (old_state.value_nick == "paused" and new_state.value_nick == "ready"):
+                    logger.info("pipeline returned to ready state")''',
+)
+contents = contents.replace(
+    '''        # Data channel events
+        self.on_data_open = lambda: logger.warn('unhandled on_data_open')
+        self.on_data_close = lambda: logger.warn('unhandled on_data_close')
+        self.on_data_error = lambda: logger.warn('unhandled on_data_error')
+        self.on_data_message = lambda msg: logger.warn(
+            'unhandled on_data_message')
+''',
+    '''        # Data channel events
+        self.on_data_open = lambda: logger.warn('unhandled on_data_open')
+        self.on_data_close = lambda: logger.warn('unhandled on_data_close')
+        self.on_data_error = lambda: logger.warn('unhandled on_data_error')
+        self.on_data_message = lambda msg: logger.warn(
+            'unhandled on_data_message')
+        self._stopping_pipeline = False
+''',
+)
+contents = contents.replace(
+    '''    def stop_pipeline(self):
+        logger.info("stopping pipeline")
+        if self.data_channel:
+            self.data_channel.emit('close')
+            self.data_channel = None
+            logger.info("data channel closed")
+        if self.pipeline:
+            logger.info("setting pipeline state to NULL")
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+            logger.info("pipeline set to state NULL")
+        if self.webrtcbin:
+            self.webrtcbin.set_state(Gst.State.NULL)
+            self.webrtcbin = None
+            logger.info("webrtcbin set to state NULL")
+        logger.info("pipeline stopped")
+''',
+    '''    def stop_pipeline(self):
+        if self._stopping_pipeline:
+            logger.info("pipeline stop already in progress")
+            return
+
+        self._stopping_pipeline = True
+        try:
+            logger.info("stopping pipeline")
+            if self.data_channel:
+                data_channel = self.data_channel
+                self.data_channel = None
+                data_channel.emit('close')
+                logger.info("data channel closed")
+            if self.pipeline:
+                logger.info("setting pipeline state to NULL")
+                self.pipeline.set_state(Gst.State.NULL)
+                self.pipeline = None
+                logger.info("pipeline set to state NULL")
+            if self.webrtcbin:
+                self.webrtcbin.set_state(Gst.State.NULL)
+                self.webrtcbin = None
+                logger.info("webrtcbin set to state NULL")
+            logger.info("pipeline stopped")
+        finally:
+            self._stopping_pipeline = False
+''',
+)
+path.write_text(contents)
+PY
+  fi
+  SELKIES_WEBRTC_INPUT_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/webrtc_input.py"
+  if [ -f "$SELKIES_WEBRTC_INPUT_FILE" ]; then
+    python3 - "$SELKIES_WEBRTC_INPUT_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+
+contents = contents.replace(
+    '''        except subprocess.SubprocessError as e:
+            logger.warning(f"Error while capturing clipboard: {e}")
+''',
+    '''        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"Error while capturing clipboard: {e}")
+''',
+)
+contents = contents.replace(
+    '''        except subprocess.SubprocessError as e:
+            logger.warning(f"Error while writing to clipboard: {e}")
+            return False
+''',
+    '''        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"Error while writing to clipboard: {e}")
+            return False
+''',
+)
+
+required_tokens = [
+    "except (subprocess.SubprocessError, OSError) as e:",
+]
+missing_tokens = [token for token in required_tokens if token not in contents]
+if missing_tokens:
+    raise RuntimeError(
+        "Selkies clipboard guard patch is incomplete: " + ", ".join(missing_tokens)
+    )
+
+path.write_text(contents)
+PY
+  fi
+  SELKIES_APP_FILE="$SELKIES_INSTALL_DIR/share/selkies-web/app.js"
+  if [ -f "$SELKIES_APP_FILE" ]; then
+    python3 - "$SELKIES_APP_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+
+contents = contents.replace('fetch("/turn")', 'fetch("turn")')
+contents = contents.replace(
+    'var checkconnect = app.status == checkconnect;',
+    'var checkconnect = app.status === "checkconnect";',
+)
+
+preview_flag = 'var parallaizePreviewMode = new URLSearchParams(window.location.search).get("parallaize_preview") === "1";\\n'
+if preview_flag not in contents:
+    contents = contents.replace(
+        '// Fetch scale local settings\\napp.scaleLocal = app.getBoolParam("scaleLocal", !app.resizeRemote);\\n',
+        '// Fetch scale local settings\\napp.scaleLocal = app.getBoolParam("scaleLocal", !app.resizeRemote);\\n' + preview_flag,
+    )
+
+peer_id_block = '''var browserVideoPeerId = parallaizePreviewMode ? 11 : 1;
+var browserAudioPeerId = parallaizePreviewMode ? 13 : 3;
+'''
+contents = contents.replace(
+    '''var browserVideoPeerId = 1;
+var browserAudioPeerId = 3;
+''',
+    "",
+)
+if peer_id_block not in contents:
+    contents = contents.replace(
+        '''var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
+''',
+        '''var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
+var browserVideoPeerId = parallaizePreviewMode ? 11 : 1;
+var browserAudioPeerId = parallaizePreviewMode ? 13 : 3;
+''',
+    )
+contents = contents.replace(
+    'var webrtc = new WebRTCDemo(signalling, videoElement, 1);',
+    'var webrtc = new WebRTCDemo(signalling, videoElement, browserVideoPeerId);',
+)
+
+preview_media_block = '''if (parallaizePreviewMode) {
+    videoElement.autoplay = true;
+    videoElement.muted = true;
+    videoElement.playsInline = true;
+    audioElement.muted = true;
+}
+'''
+parallaize_media_block = '''videoElement.autoplay = true;
+videoElement.muted = true;
+videoElement.playsInline = true;
+if (parallaizePreviewMode) {
+    audioElement.muted = true;
+}
+'''
+contents = contents.replace(
+    preview_media_block,
+    parallaize_media_block,
+)
+contents = contents.replace(
+    '''videoElement.autoplay = true;
+videoElement.playsInline = true;
+if (parallaizePreviewMode) {
+    audioElement.muted = true;
+}
+''',
+    parallaize_media_block,
+)
+if parallaize_media_block not in contents:
+    contents = contents.replace(
+        '''if (audioElement === null) {
+    throw 'audioElement not found on page';
+}
+''',
+        '''if (audioElement === null) {
+    throw 'audioElement not found on page';
+}
+''' + parallaize_media_block,
+    )
+old_parallaize_autoplay_block = '''var parallaizeVideoPlayRetryTimer = null;
+function parallaizeMaybeAutoplayVideo(delay = 0) {
+    if (parallaizePreviewMode) {
+        return;
+    }
+    if (parallaizeVideoPlayRetryTimer !== null) {
+        clearTimeout(parallaizeVideoPlayRetryTimer);
+        parallaizeVideoPlayRetryTimer = null;
+    }
+    const attemptPlay = () => {
+        if (parallaizePreviewMode || videoConnected !== "connected" || videoElement.srcObject === null) {
+            return;
+        }
+        const playPromise = videoElement.play();
+        if (playPromise !== undefined) {
+            playPromise.then(() => {
+                app.showStart = false;
+                app.loadingText = "";
+            }).catch(() => {
+                parallaizeVideoPlayRetryTimer = window.setTimeout(() => {
+                    parallaizeVideoPlayRetryTimer = null;
+                    parallaizeMaybeAutoplayVideo();
+                }, 500);
+            });
+        }
+    };
+    if (delay > 0) {
+        parallaizeVideoPlayRetryTimer = window.setTimeout(() => {
+            parallaizeVideoPlayRetryTimer = null;
+            attemptPlay();
+        }, delay);
+        return;
+    }
+    attemptPlay();
+}
+
+videoElement.addEventListener('loadeddata', (e) => {
+    webrtc.input.getCursorScaleFactor();
+    parallaizeMaybeAutoplayVideo(50);
+})
+'''
+parallaize_autoplay_block = '''var parallaizeVideoPlayRetryTimer = null;
+var parallaizeVideoPlayRetryCount = 0;
+function parallaizeScheduleAutoplayRetry(delay) {
+    if (parallaizeVideoPlayRetryTimer !== null) {
+        clearTimeout(parallaizeVideoPlayRetryTimer);
+    }
+    parallaizeVideoPlayRetryTimer = window.setTimeout(() => {
+        parallaizeVideoPlayRetryTimer = null;
+        parallaizeMaybeAutoplayVideo();
+    }, delay);
+}
+function parallaizeMaybeAutoplayVideo(delay = 0) {
+    if (parallaizePreviewMode) {
+        return;
+    }
+    if (delay > 0) {
+        parallaizeScheduleAutoplayRetry(delay);
+        return;
+    }
+    if (videoConnected !== "connected" || videoElement.srcObject === null) {
+        if (parallaizeVideoPlayRetryCount < 60) {
+            parallaizeVideoPlayRetryCount += 1;
+            parallaizeScheduleAutoplayRetry(250);
+        }
+        return;
+    }
+    const playPromise = videoElement.play();
+    if (playPromise !== undefined) {
+        playPromise.then(() => {
+            parallaizeVideoPlayRetryCount = 0;
+            app.showStart = false;
+            app.loadingText = "";
+        }).catch(() => {
+            if (parallaizeVideoPlayRetryCount < 60) {
+                parallaizeVideoPlayRetryCount += 1;
+                parallaizeScheduleAutoplayRetry(500);
+            }
+        });
+        return;
+    }
+    parallaizeVideoPlayRetryCount = 0;
+    app.showStart = false;
+    app.loadingText = "";
+}
+
+videoElement.addEventListener('loadeddata', (e) => {
+    webrtc.input.getCursorScaleFactor();
+    parallaizeMaybeAutoplayVideo(50);
+})
+'''
+contents = contents.replace(old_parallaize_autoplay_block, parallaize_autoplay_block)
+if "var parallaizeVideoPlayRetryCount = 0;" not in contents:
+    contents = contents.replace(
+        '''videoElement.addEventListener('loadeddata', (e) => {
+    webrtc.input.getCursorScaleFactor();
+})
+''',
+        parallaize_autoplay_block,
+    )
+
+preview_audio_block = '''var audio_signalling = parallaizePreviewMode
+    ? {
+        disconnect() {},
+    }
+    : new WebRTCDemoSignalling(new URL(protocol + window.location.host + "/" + app.appName + "/signalling/"));
+var audio_webrtc = parallaizePreviewMode
+    ? {
+        connect() {},
+        forceTurn: false,
+        getConnectionStats() {
+            return Promise.resolve({
+                general: {
+                    availableReceiveBandwidth: 0,
+                    bytesReceived: 0,
+                    bytesSent: 0,
+                    connectionType: "preview",
+                    currentRoundTripTime: null,
+                },
+                audio: {
+                    bytesReceived: 0,
+                    codecName: "preview",
+                    jitterBufferDelay: 0,
+                    jitterBufferEmittedCount: 0,
+                    packetsLost: 0,
+                    packetsReceived: 0,
+                },
+                allReports: [],
+            });
+        },
+        playStream() {},
+        reset() {},
+        rtcPeerConfig: null,
+    }
+    : new WebRTCDemo(audio_signalling, audioElement, browserAudioPeerId);
+'''
+if 'connectionType: "preview"' not in contents:
+    contents = contents.replace(
+        '''var audio_signalling = new WebRTCDemoSignalling(new URL(protocol + window.location.host + "/" + app.appName + "/signalling/"));
+var audio_webrtc = new WebRTCDemo(audio_signalling, audioElement, 3);
+''',
+        preview_audio_block,
+    )
+
+if 'var audioConnected = parallaizePreviewMode ? "connected" : "";' not in contents:
+    contents = contents.replace(
+        'var audioConnected = "";',
+        'var audioConnected = parallaizePreviewMode ? "connected" : "";',
+    )
+if "var parallaizeAudioActivationPending = !parallaizePreviewMode;" not in contents:
+    contents = contents.replace(
+        'var audioConnected = parallaizePreviewMode ? "connected" : "";',
+        '''var audioConnected = parallaizePreviewMode ? "connected" : "";
+var parallaizeAudioActivationPending = !parallaizePreviewMode;
+var parallaizeAudioConnectRequested = parallaizePreviewMode;
+function parallaizeMaybeConnectAudio() {
+    if (parallaizePreviewMode || parallaizeAudioConnectRequested) {
+        return;
+    }
+    parallaizeAudioConnectRequested = true;
+    audio_webrtc.connect();
+}
+function parallaizeMaybeActivateAudio() {
+    if (parallaizePreviewMode || !parallaizeAudioActivationPending || audioElement.srcObject === null) {
+        return;
+    }
+    const playPromise = audioElement.play();
+    if (playPromise !== undefined) {
+        playPromise.then(() => {
+            parallaizeAudioActivationPending = false;
+        }).catch(() => {});
+        return;
+    }
+    parallaizeAudioActivationPending = false;
+}
+window.addEventListener("pointerdown", parallaizeMaybeActivateAudio, { capture: true });
+window.addEventListener("keydown", parallaizeMaybeActivateAudio, { capture: true });
+''',
+    )
+if "var parallaizeAudioConnectRequested = parallaizePreviewMode;" not in contents:
+    contents = contents.replace(
+        '''var parallaizeAudioActivationPending = !parallaizePreviewMode;
+''',
+        '''var parallaizeAudioActivationPending = !parallaizePreviewMode;
+var parallaizeAudioConnectRequested = parallaizePreviewMode;
+function parallaizeMaybeConnectAudio() {
+    if (parallaizePreviewMode || parallaizeAudioConnectRequested) {
+        return;
+    }
+    parallaizeAudioConnectRequested = true;
+    audio_webrtc.connect();
+}
+''',
+    )
+
+contents = contents.replace(
+    '''        webrtc.rtcPeerConfig = config;
+        audio_webrtc.rtcPeerConfig = config;
+        webrtc.connect();
+        audio_webrtc.connect();
+''',
+    '''        webrtc.rtcPeerConfig = config;
+        audio_webrtc.rtcPeerConfig = config;
+        webrtc.connect();
+''',
+)
+
+contents = contents.replace(
+    '''signalling.onstatus = (message) => {
+    app.loadingText = message;
+    app.logEntries.push(applyTimestamp("[signalling] " + message));
+};
+''',
+    '''signalling.onstatus = (message) => {
+    if (videoConnected !== "connected") {
+        app.loadingText = message;
+    }
+    app.logEntries.push(applyTimestamp("[signalling] " + message));
+};
+''',
+)
+
+contents = contents.replace(
+    '''audio_signalling.onstatus = (message) => {
+    app.loadingText = message;
+    app.logEntries.push(applyTimestamp("[audio signalling] " + message));
+};
+''',
+    '''audio_signalling.onstatus = (message) => {
+    if (videoConnected !== "connected") {
+        app.loadingText = message;
+    }
+    app.logEntries.push(applyTimestamp("[audio signalling] " + message));
+};
+''',
+)
+
+audio_signalling_disconnect_target = '''audio_signalling.ondisconnect = () => {
+    console.log("audio signalling disconnected");
+    audioConnected = "";
+    if (videoConnected === "connected") {
+        app.status = "connected";
+        app.showStart = false;
+        app.loadingText = "";
+    }
+}
+'''
+for audio_signalling_disconnect_source in (
+    '''audio_signalling.ondisconnect = () => {
+    var checkconnect = app.status === "checkconnect";
+    // if (app.status !== "connected") return;
+    console.log("audio signalling disconnected");
+    if (videoConnected === "connected") {
+        audioConnected = "";
+        app.status = "connected";
+        app.showStart = false;
+        app.loadingText = "";
+        return;
+    }
+    app.status = 'connecting';
+    videoElement.style.cursor = "auto";
+    audio_webrtc.reset();
+    app.status = 'checkconnect';
+}
+''',
+    '''audio_signalling.ondisconnect = () => {
+    var checkconnect = app.status == checkconnect;
+    // if (app.status !== "connected") return;
+    console.log("audio signalling disconnected");
+    app.status = 'connecting';
+    videoElement.style.cursor = "auto";
+    audio_webrtc.reset();
+    app.status = 'checkconnect';
+    if (!checkconnect) signalling.disconnect();
+}
+''',
+    '''audio_signalling.ondisconnect = () => {
+    var checkconnect = app.status === "checkconnect";
+    // if (app.status !== "connected") return;
+    console.log("audio signalling disconnected");
+    app.status = 'connecting';
+    videoElement.style.cursor = "auto";
+    audio_webrtc.reset();
+    app.status = 'checkconnect';
+    if (!checkconnect) signalling.disconnect();
+}
+''',
+):
+    contents = contents.replace(
+        audio_signalling_disconnect_source,
+        audio_signalling_disconnect_target,
+    )
+
+contents = contents.replace(
+    '''            if (audioConnected === "connected" && !statWatchEnabled) {
+                enableStatWatch();
+            }
+''',
+    '''            parallaizeMaybeConnectAudio();
+            if (audioConnected === "connected" && !statWatchEnabled) {
+                enableStatWatch();
+            }
+''',
+)
+
+contents = contents.replace(
+    '''webrtc.onconnectionstatechange = (state) => {
+    videoConnected = state;
+    if (videoConnected === "connected") {
+        // Repeatedly emit minimum latency target
+        webrtc.peerConnection.getReceivers().forEach((receiver) => {
+            let intervalLoop = setInterval(async () => {
+                if (receiver.track.readyState !== "live" || receiver.transport.state !== "connected") {
+                    clearInterval(intervalLoop);
+                    return;
+                } else {
+                    receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
+                }
+            }, 15);
+        });
+    }
+    if (videoConnected === "connected" && audioConnected === "connected") {
+        app.status = state;
+        if (!statWatchEnabled) {
+            enableStatWatch();
+        }
+    } else {
+        app.status = state === "connected" ? audioConnected : videoConnected;
+    }
+};
+''',
+    '''webrtc.onconnectionstatechange = (state) => {
+    videoConnected = state;
+    if (videoConnected === "connected") {
+        webrtc.playStream();
+        parallaizeMaybeAutoplayVideo(50);
+        app.status = "connected";
+        if (parallaizePreviewMode) {
+            app.showStart = false;
+        }
+        app.loadingText = "";
+        if (!parallaizePreviewMode) {
+            // Repeatedly emit minimum latency target
+            webrtc.peerConnection.getReceivers().forEach((receiver) => {
+                let intervalLoop = setInterval(async () => {
+                    if (receiver.track.readyState !== "live" || receiver.transport.state !== "connected") {
+                        clearInterval(intervalLoop);
+                        return;
+                    } else {
+                        receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
+                    }
+                }, 15);
+            });
+            if (parallaizeBackgroundMode) {
+                parallaizeApplyBackgroundStreamProfile();
+            }
+            parallaizeMaybeConnectAudio();
+            if (audioConnected === "connected" && !statWatchEnabled) {
+                enableStatWatch();
+            }
+        }
+    } else {
+        if (parallaizeVideoPlayRetryTimer !== null) {
+            clearTimeout(parallaizeVideoPlayRetryTimer);
+            parallaizeVideoPlayRetryTimer = null;
+        }
+        parallaizeVideoPlayRetryCount = 0;
+        app.status = videoConnected;
+    }
+};
+''',
+)
+contents = contents.replace(
+    '''webrtc.onconnectionstatechange = (state) => {
+    videoConnected = state;
+    if (videoConnected === "connected") {
+        if (parallaizePreviewMode) {
+            webrtc.playStream();
+        }
+        app.status = "connected";
+        app.showStart = false;
+        app.loadingText = "";
+        if (!parallaizePreviewMode) {
+            // Repeatedly emit minimum latency target
+            webrtc.peerConnection.getReceivers().forEach((receiver) => {
+                let intervalLoop = setInterval(async () => {
+                    if (receiver.track.readyState !== "live" || receiver.transport.state !== "connected") {
+                        clearInterval(intervalLoop);
+                        return;
+                    } else {
+                        receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
+                    }
+                }, 15);
+            });
+            if (parallaizeBackgroundMode) {
+                parallaizeApplyBackgroundStreamProfile();
+            }
+            if (audioConnected === "connected" && !statWatchEnabled) {
+                enableStatWatch();
+            }
+        }
+    } else {
+        app.status = videoConnected;
+    }
+};
+''',
+    '''webrtc.onconnectionstatechange = (state) => {
+    videoConnected = state;
+    if (videoConnected === "connected") {
+        webrtc.playStream();
+        parallaizeMaybeAutoplayVideo(50);
+        app.status = "connected";
+        if (parallaizePreviewMode) {
+            app.showStart = false;
+        }
+        app.loadingText = "";
+        if (!parallaizePreviewMode) {
+            // Repeatedly emit minimum latency target
+            webrtc.peerConnection.getReceivers().forEach((receiver) => {
+                let intervalLoop = setInterval(async () => {
+                    if (receiver.track.readyState !== "live" || receiver.transport.state !== "connected") {
+                        clearInterval(intervalLoop);
+                        return;
+                    } else {
+                        receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
+                    }
+                }, 15);
+            });
+            if (audioConnected === "connected" && !statWatchEnabled) {
+                enableStatWatch();
+            }
+        }
+    } else {
+        if (parallaizeVideoPlayRetryTimer !== null) {
+            clearTimeout(parallaizeVideoPlayRetryTimer);
+            parallaizeVideoPlayRetryTimer = null;
+        }
+        parallaizeVideoPlayRetryCount = 0;
+        app.status = videoConnected;
+    }
+};
+''',
+)
+
+contents = contents.replace(
+    '''audio_webrtc.onconnectionstatechange = (state) => {
+    audioConnected = state;
+    if (audioConnected === "connected") {
+        // Repeatedly emit minimum latency target
+        audio_webrtc.peerConnection.getReceivers().forEach((receiver) => {
+            let intervalLoop = setInterval(async () => {
+                if (receiver.track.readyState !== "live" || receiver.transport.state !== "connected") {
+                    clearInterval(intervalLoop);
+                    return;
+                } else {
+                    receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
+                }
+            }, 15);
+        });
+    }
+    if (audioConnected === "connected" && videoConnected === "connected") {
+        app.status = state;
+        if (!statWatchEnabled) {
+            enableStatWatch();
+        }
+    } else {
+        app.status = state === "connected" ? videoConnected : audioConnected;
+    }
+};
+''',
+    '''audio_webrtc.onconnectionstatechange = (state) => {
+    audioConnected = state;
+    if (audioConnected === "connected") {
+        if (!parallaizePreviewMode) {
+            // Repeatedly emit minimum latency target
+            audio_webrtc.peerConnection.getReceivers().forEach((receiver) => {
+                let intervalLoop = setInterval(async () => {
+                    if (receiver.track.readyState !== "live" || receiver.transport.state !== "connected") {
+                        clearInterval(intervalLoop);
+                        return;
+                    } else {
+                        receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
+                    }
+                }, 15);
+            });
+        }
+    }
+    if (videoConnected === "connected") {
+        app.status = "connected";
+        app.loadingText = "";
+        if (!parallaizePreviewMode && audioConnected === "connected" && !statWatchEnabled) {
+            enableStatWatch();
+        }
+    } else {
+        app.status = videoConnected;
+    }
+};
+''',
+)
+
+if 'if (!parallaizePreviewMode) {\\n                audio_webrtc.playStream();\\n            }' not in contents:
+    contents = contents.replace(
+        '''        playStream() {
+            webrtc.playStream();
+            audio_webrtc.playStream();
+            this.showStart = false;
+        },
+''',
+        '''        playStream() {
+            webrtc.playStream();
+            if (!parallaizePreviewMode) {
+                audio_webrtc.playStream();
+            }
+            this.showStart = false;
+        },
+''',
+    )
+
+if 'if (parallaizePreviewMode) {\\n        return;\\n    }' not in contents:
+    contents = contents.replace(
+        '''webrtc.ondatachannelopen = () => {
+    // Bind gamepad connected handler.
+''',
+        '''webrtc.ondatachannelopen = () => {
+    if (parallaizePreviewMode) {
+        return;
+    }
+    // Bind gamepad connected handler.
+''',
+    )
+
+if 'webrtc.ondatachannelclose = () => {\\n    if (!parallaizePreviewMode) {' not in contents:
+    contents = contents.replace(
+        '''webrtc.ondatachannelclose = () => {
+    webrtc.input.detach();
+}
+''',
+        '''webrtc.ondatachannelclose = () => {
+    if (!parallaizePreviewMode) {
+        webrtc.input.detach();
+    }
+}
+''',
+    )
+
+if 'webrtc.onplaystreamrequired = () => {\\n    if (parallaizePreviewMode) {' not in contents:
+    contents = contents.replace(
+        '''webrtc.onplaystreamrequired = () => {
+    app.showStart = true;
+}
+''',
+        '''webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode) {
+        webrtc.playStream();
+        app.showStart = false;
+        return;
+    }
+    parallaizeMaybeAutoplayVideo(250);
+    app.showStart = true;
+}
+''',
+    )
+contents = contents.replace(
+    '''webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode) {
+        webrtc.playStream();
+        app.showStart = false;
+        return;
+    }
+    app.showStart = true;
+}
+''',
+    '''webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode) {
+        webrtc.playStream();
+        app.showStart = false;
+        return;
+    }
+    parallaizeMaybeAutoplayVideo(250);
+    app.showStart = true;
+}
+''',
+)
+
+if 'audio_webrtc.onplaystreamrequired = () => {\\n    if (parallaizePreviewMode || videoConnected === "connected") {' not in contents:
+    contents = contents.replace(
+        '''audio_webrtc.onplaystreamrequired = () => {
+    app.showStart = true;
+}
+''',
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode || videoConnected === "connected") {
+        app.showStart = false;
+        return;
+    }
+    app.showStart = true;
+}
+''',
+    )
+    contents = contents.replace(
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode) {
+        webrtc.playStream();
+        app.showStart = false;
+        return;
+    }
+    app.showStart = true;
+}
+''',
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode || videoConnected === "connected") {
+        app.showStart = false;
+        return;
+    }
+    app.showStart = true;
+}
+''',
+    )
+    contents = contents.replace(
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode) {
+        webrtc.playStream();
+        app.showStart = false;
+        return;
+    }
+    parallaizeMaybeAutoplayVideo(250);
+    app.showStart = true;
+}
+''',
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode || videoConnected === "connected") {
+        app.showStart = false;
+        return;
+    }
+    app.showStart = true;
+}
+''',
+    )
+    contents = contents.replace(
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode) {
+        return;
+    }
+    app.showStart = true;
+}
+''',
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode || videoConnected === "connected") {
+        app.showStart = false;
+        return;
+    }
+    app.showStart = true;
+}
+''',
+    )
+
+if 'function shutdownSelkiesStream() {' not in contents:
+    contents = contents.replace(
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode || videoConnected === "connected") {
+        app.showStart = false;
+        return;
+    }
+    app.showStart = true;
+}
+''',
+        '''audio_webrtc.onplaystreamrequired = () => {
+    if (parallaizePreviewMode || videoConnected === "connected") {
+        app.showStart = false;
+        return;
+    }
+    app.showStart = true;
+}
+
+var parallaizeBackgroundMode = false;
+var parallaizeBackgroundRestoreProfile = null;
+function parallaizeApplyTransientStreamProfile(profile) {
+    if (typeof profile.videoBitRate === "number") {
+        webrtc.sendDataChannelMessage('vb,' + profile.videoBitRate);
+    }
+    if (typeof profile.videoFramerate === "number") {
+        webrtc.sendDataChannelMessage('_arg_fps,' + profile.videoFramerate);
+    }
+    if (typeof profile.audioBitRate === "number") {
+        webrtc.sendDataChannelMessage('ab,' + profile.audioBitRate);
+    }
+}
+function parallaizeApplyBackgroundStreamProfile() {
+    audioElement.muted = true;
+    try {
+        audioElement.pause();
+    } catch (error) {
+        console.warn("failed to pause background audio cleanly", error);
+    }
+    parallaizeApplyTransientStreamProfile({
+        audioBitRate: 24000,
+        videoBitRate: 1500,
+        videoFramerate: 15,
+    });
+}
+function parallaizeSetBackgroundMode(background) {
+    if (parallaizePreviewMode) {
+        return;
+    }
+    if (background) {
+        if (!parallaizeBackgroundMode) {
+            parallaizeBackgroundRestoreProfile = {
+                audioBitRate: app.audioBitRate,
+                audioMuted: audioElement.muted,
+                videoBitRate: app.videoBitRate,
+                videoFramerate: app.videoFramerate,
+            };
+        }
+        parallaizeBackgroundMode = true;
+        parallaizeApplyBackgroundStreamProfile();
+        return;
+    }
+    if (!parallaizeBackgroundMode) {
+        return;
+    }
+    parallaizeBackgroundMode = false;
+    const restoreProfile = parallaizeBackgroundRestoreProfile;
+    parallaizeBackgroundRestoreProfile = null;
+    if (!restoreProfile) {
+        return;
+    }
+    audioElement.muted = restoreProfile.audioMuted;
+    parallaizeApplyTransientStreamProfile(restoreProfile);
+    parallaizeMaybeConnectAudio();
+    parallaizeMaybeActivateAudio();
+}
+window.parallaizeSetBackgroundMode = parallaizeSetBackgroundMode;
+
+var parallaizeStreamClosing = false;
+function shutdownSelkiesStream() {
+    if (parallaizeStreamClosing) {
+        return;
+    }
+    parallaizeStreamClosing = true;
+    if ("ondisconnect" in signalling) {
+        signalling.ondisconnect = null;
+    }
+    if ("onconnectionstatechange" in webrtc) {
+        webrtc.onconnectionstatechange = null;
+    }
+    if ("connect" in signalling) {
+        signalling.connect = () => {};
+    }
+    if ("connect" in webrtc) {
+        webrtc.connect = () => {};
+    }
+    if ("_retryTimer" in signalling && signalling._retryTimer !== null) {
+        clearTimeout(signalling._retryTimer);
+        signalling._retryTimer = null;
+    }
+    if ("_reconnectTimer" in webrtc && webrtc._reconnectTimer !== null) {
+        clearTimeout(webrtc._reconnectTimer);
+        webrtc._reconnectTimer = null;
+    }
+    try {
+        if ("shutdown" in signalling) {
+            signalling.shutdown();
+        } else {
+            signalling.disconnect();
+        }
+    } catch (error) {
+        console.warn("failed to close signalling cleanly", error);
+    }
+    if (webrtc.peerConnection !== null) {
+        webrtc.peerConnection.close();
+    }
+    if (!parallaizePreviewMode) {
+        if ("ondisconnect" in audio_signalling) {
+            audio_signalling.ondisconnect = null;
+        }
+        if ("onconnectionstatechange" in audio_webrtc) {
+            audio_webrtc.onconnectionstatechange = null;
+        }
+        if ("connect" in audio_signalling) {
+            audio_signalling.connect = () => {};
+        }
+        if ("connect" in audio_webrtc) {
+            audio_webrtc.connect = () => {};
+        }
+        if ("_retryTimer" in audio_signalling && audio_signalling._retryTimer !== null) {
+            clearTimeout(audio_signalling._retryTimer);
+            audio_signalling._retryTimer = null;
+        }
+        if ("_reconnectTimer" in audio_webrtc && audio_webrtc._reconnectTimer !== null) {
+            clearTimeout(audio_webrtc._reconnectTimer);
+            audio_webrtc._reconnectTimer = null;
+        }
+        try {
+            if ("shutdown" in audio_signalling) {
+                audio_signalling.shutdown();
+            } else {
+                audio_signalling.disconnect();
+            }
+        } catch (error) {
+            console.warn("failed to close audio signalling cleanly", error);
+        }
+        if (audio_webrtc.peerConnection !== null) {
+            audio_webrtc.peerConnection.close();
+        }
+    }
+}
+window.addEventListener("pagehide", shutdownSelkiesStream);
+window.addEventListener("beforeunload", shutdownSelkiesStream);
+''',
+    )
+
+if 'function parallaizeSetBackgroundMode(background) {' not in contents:
+    contents = contents.replace(
+        '''var parallaizeStreamClosing = false;
+''',
+        '''var parallaizeBackgroundMode = false;
+var parallaizeBackgroundRestoreProfile = null;
+function parallaizeApplyTransientStreamProfile(profile) {
+    if (typeof profile.videoBitRate === "number") {
+        webrtc.sendDataChannelMessage('vb,' + profile.videoBitRate);
+    }
+    if (typeof profile.videoFramerate === "number") {
+        webrtc.sendDataChannelMessage('_arg_fps,' + profile.videoFramerate);
+    }
+    if (typeof profile.audioBitRate === "number") {
+        webrtc.sendDataChannelMessage('ab,' + profile.audioBitRate);
+    }
+}
+function parallaizeApplyBackgroundStreamProfile() {
+    audioElement.muted = true;
+    try {
+        audioElement.pause();
+    } catch (error) {
+        console.warn("failed to pause background audio cleanly", error);
+    }
+    parallaizeApplyTransientStreamProfile({
+        audioBitRate: 24000,
+        videoBitRate: 1500,
+        videoFramerate: 15,
+    });
+}
+function parallaizeSetBackgroundMode(background) {
+    if (parallaizePreviewMode) {
+        return;
+    }
+    if (background) {
+        if (!parallaizeBackgroundMode) {
+            parallaizeBackgroundRestoreProfile = {
+                audioBitRate: app.audioBitRate,
+                audioMuted: audioElement.muted,
+                videoBitRate: app.videoBitRate,
+                videoFramerate: app.videoFramerate,
+            };
+        }
+        parallaizeBackgroundMode = true;
+        parallaizeApplyBackgroundStreamProfile();
+        return;
+    }
+    if (!parallaizeBackgroundMode) {
+        return;
+    }
+    parallaizeBackgroundMode = false;
+    const restoreProfile = parallaizeBackgroundRestoreProfile;
+    parallaizeBackgroundRestoreProfile = null;
+    if (!restoreProfile) {
+        return;
+    }
+    audioElement.muted = restoreProfile.audioMuted;
+    parallaizeApplyTransientStreamProfile(restoreProfile);
+    parallaizeMaybeConnectAudio();
+    parallaizeMaybeActivateAudio();
+}
+window.parallaizeSetBackgroundMode = parallaizeSetBackgroundMode;
+
+var parallaizeStreamClosing = false;
+''',
+    )
+
+if 'function freezeParallaizePreviewFrame() {' not in contents:
+    contents = contents.replace(
+        '''window.addEventListener("pagehide", shutdownSelkiesStream);
+window.addEventListener("beforeunload", shutdownSelkiesStream);
+''',
+        '''window.addEventListener("pagehide", shutdownSelkiesStream);
+window.addEventListener("beforeunload", shutdownSelkiesStream);
+
+var parallaizePreviewFrameFrozen = false;
+var parallaizePreviewCanvas = null;
+function freezeParallaizePreviewFrame() {
+    if (!parallaizePreviewMode || parallaizePreviewFrameFrozen) {
+        return;
+    }
+    if (videoElement.readyState < 2 || videoElement.videoWidth <= 0 || videoElement.videoHeight <= 0) {
+        return;
+    }
+    if (parallaizePreviewCanvas === null) {
+        parallaizePreviewCanvas = document.createElement("canvas");
+        parallaizePreviewCanvas.style.width = "100%";
+        parallaizePreviewCanvas.style.height = "100%";
+        parallaizePreviewCanvas.style.display = "block";
+        parallaizePreviewCanvas.style.background = "#040608";
+        if (videoElement.parentElement !== null) {
+            videoElement.parentElement.insertBefore(parallaizePreviewCanvas, videoElement.nextSibling);
+        } else {
+            document.body.appendChild(parallaizePreviewCanvas);
+        }
+    }
+    parallaizePreviewCanvas.width = videoElement.videoWidth;
+    parallaizePreviewCanvas.height = videoElement.videoHeight;
+    var previewContext = parallaizePreviewCanvas.getContext("2d");
+    if (previewContext === null) {
+        return;
+    }
+    previewContext.drawImage(
+        videoElement,
+        0,
+        0,
+        parallaizePreviewCanvas.width,
+        parallaizePreviewCanvas.height,
+    );
+    parallaizePreviewFrameFrozen = true;
+    console.log("Parallaize preview frame frozen");
+    videoElement.style.display = "none";
+    shutdownSelkiesStream();
+}
+if (parallaizePreviewMode) {
+    var armParallaizePreviewFreeze = () => {
+        if (parallaizePreviewFrameFrozen) {
+            return;
+        }
+        if ("requestVideoFrameCallback" in videoElement) {
+            videoElement.requestVideoFrameCallback(() => {
+                console.log("Parallaize preview frame callback ready");
+                window.setTimeout(freezeParallaizePreviewFrame, 0);
+            });
+            return;
+        }
+        console.log("Parallaize preview frame fallback ready");
+        window.setTimeout(freezeParallaizePreviewFrame, 120);
+    };
+    videoElement.addEventListener("loadeddata", armParallaizePreviewFreeze);
+    videoElement.addEventListener("playing", armParallaizePreviewFreeze);
+}
+''',
+    )
+
+if 'webrtc.input.onresizeend = () => {\\n    if (parallaizePreviewMode || app.resizeRemote !== true) {' not in contents:
+    contents = contents.replace(
+        '''webrtc.input.onresizeend = () => {
+    app.windowResolution = webrtc.input.getWindowResolution();
+    var newRes = parseInt(app.windowResolution[0]) + "x" + parseInt(app.windowResolution[1]);
+    console.log(\`Window size changed: \${app.windowResolution[0]}x\${app.windowResolution[1]}, scaled to: \${newRes}\`);
+    webrtc.sendDataChannelMessage("r," + newRes);
+    webrtc.sendDataChannelMessage("s," + window.devicePixelRatio);
+}
+''',
+        '''webrtc.input.onresizeend = () => {
+    if (parallaizePreviewMode || app.resizeRemote !== true) {
+        return;
+    }
+    parallaizeSyncStreamScale(true);
+}
+''',
+    )
+
+if 'window.parallaizeWriteGuestClipboard = (text) => {' not in contents:
+    contents = contents.replace(
+        '''// Actions to take whenever window changes focus
+window.addEventListener('focus', () => {
+    // reset keyboard to avoid stuck keys.
+    webrtc.sendDataChannelMessage("kr");
+
+    // Send clipboard contents.
+    navigator.clipboard.readText()
+        .then(text => {
+            webrtc.sendDataChannelMessage("cw," + stringToBase64(text))
+        })
+        .catch(err => {
+            webrtc._setStatus('Failed to read clipboard contents: ' + err);
+        });
+});
+window.addEventListener('blur', () => {
+    // reset keyboard to avoid stuck keys.
+    webrtc.sendDataChannelMessage("kr");
+});
+
+webrtc.onclipboardcontent = (content) => {
+    if (app.clipboardStatus === 'enabled') {
+        navigator.clipboard.writeText(content)
+            .catch(err => {
+                webrtc._setStatus('Could not copy text to clipboard: ' + err);
+        });
+    }
+}
+''',
+        '''// Actions to take whenever window changes focus
+var parallaizeRequestedStreamScale = null;
+var parallaizeGuestClipboardListeners = new Set();
+function parallaizeNotifyGuestClipboardListeners(content) {
+    parallaizeGuestClipboardListeners.forEach((listener) => {
+        try {
+            listener(content);
+        } catch (err) {
+            console.error('Parallaize clipboard listener failed', err);
+        }
+    });
+}
+function parallaizeSendClipboardMessage(message) {
+    try {
+        webrtc.sendDataChannelMessage(message);
+        return true;
+    } catch (err) {
+        webrtc._setStatus('Could not send clipboard contents: ' + err);
+        return false;
+    }
+}
+function parallaizeResolveStreamScale() {
+    var scale =
+        Number.isFinite(parallaizeRequestedStreamScale) && parallaizeRequestedStreamScale > 0
+            ? parallaizeRequestedStreamScale
+            : window.devicePixelRatio;
+    if (!Number.isFinite(scale) || scale <= 0) {
+        return 1;
+    }
+    return Math.round(scale * 100) / 100;
+}
+function parallaizeApplyStreamPixelation() {
+    var streamScale = parallaizeResolveStreamScale();
+    var devicePixelRatio =
+        Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+            ? window.devicePixelRatio
+            : 1;
+    var pixelated = streamScale + 0.01 < devicePixelRatio;
+    if (
+        document &&
+        document.head &&
+        !document.getElementById("parallaize-stream-pixelation-style")
+    ) {
+        var styleElement = document.createElement("style");
+        styleElement.id = "parallaize-stream-pixelation-style";
+        styleElement.textContent =
+            ':root[data-parallaize-stream-pixelated="true"] video, :root[data-parallaize-stream-pixelated="true"] canvas, :root[data-parallaize-stream-pixelated="true"] .video { image-rendering: crisp-edges; image-rendering: pixelated; }';
+        document.head.appendChild(styleElement);
+    }
+    if (document && document.documentElement) {
+        document.documentElement.dataset.parallaizeStreamPixelated = pixelated ? "true" : "false";
+    }
+    return pixelated;
+}
+function parallaizeSyncStreamScale(sendResolution = true) {
+    if (parallaizePreviewMode || app.resizeRemote !== true) {
+        return false;
+    }
+    try {
+        app.windowResolution = webrtc.input.getWindowResolution();
+        if (sendResolution) {
+            var newRes = parseInt(app.windowResolution[0]) + "x" + parseInt(app.windowResolution[1]);
+            console.log(\`Window size changed: \${app.windowResolution[0]}x\${app.windowResolution[1]}, scaled to: \${newRes} @ \${parallaizeResolveStreamScale()}\`);
+            webrtc.sendDataChannelMessage("r," + newRes);
+        }
+        webrtc.sendDataChannelMessage("s," + parallaizeResolveStreamScale());
+        parallaizeApplyStreamPixelation();
+        return true;
+    } catch (err) {
+        console.warn('Parallaize could not update stream scale', err);
+        return false;
+    }
+}
+window.parallaizeWriteGuestClipboard = (text) => {
+    if (typeof text !== 'string') {
+        return false;
+    }
+    return parallaizeSendClipboardMessage("cw," + stringToBase64(text));
+};
+window.parallaizeRequestGuestClipboard = () => {
+    return parallaizeSendClipboardMessage("cr");
+};
+window.parallaizeSetStreamScale = (scale) => {
+    var nextScale = Number(scale);
+    if (!Number.isFinite(nextScale) || nextScale <= 0) {
+        return false;
+    }
+    parallaizeRequestedStreamScale = Math.round(nextScale * 100) / 100;
+    return parallaizeSyncStreamScale(true);
+};
+window.parallaizeTriggerGuestPaste = () => {
+    if (!parallaizeSendClipboardMessage("kd,65507")) {
+        return false;
+    }
+    parallaizeSendClipboardMessage("kd,118");
+    parallaizeSendClipboardMessage("ku,118");
+    parallaizeSendClipboardMessage("ku,65507");
+    return true;
+};
+window.parallaizeSubscribeGuestClipboard = (listener) => {
+    if (typeof listener !== 'function') {
+        return () => {};
+    }
+    parallaizeGuestClipboardListeners.add(listener);
+    return () => {
+        parallaizeGuestClipboardListeners.delete(listener);
+    };
+};
+window.parallaizeGetStreamState = () => {
+    const waitingForStream =
+        typeof app.loadingText === 'string' &&
+        app.loadingText.toLowerCase().includes('waiting for stream');
+
+    return {
+        ready:
+            videoConnected === "connected" &&
+            videoElement.srcObject !== null &&
+            videoElement.videoWidth > 0 &&
+            videoElement.videoHeight > 0 &&
+            !app.showStart &&
+            !waitingForStream,
+        status:
+            typeof app.loadingText === 'string' && app.loadingText.length > 0
+                ? app.loadingText
+                : app.status,
+    };
+};
+window.parallaizeKickStream = (reason = 'manual') => {
+    if (parallaizePreviewMode) {
+        return false;
+    }
+    const normalizedReason =
+        typeof reason === 'string' && reason.length > 0
+            ? reason
+            : 'manual';
+    if (parallaizeVideoPlayRetryTimer !== null) {
+        clearTimeout(parallaizeVideoPlayRetryTimer);
+        parallaizeVideoPlayRetryTimer = null;
+    }
+    parallaizeVideoPlayRetryCount = 0;
+    videoElement.style.cursor = "auto";
+    app.showStart = false;
+    app.status = "connecting";
+    app.loadingText = "Reconnecting stream.";
+    if (Array.isArray(app.logEntries)) {
+        app.logEntries.push(
+            applyTimestamp("[parallaize] kicking stream: " + normalizedReason),
+        );
+    }
+    try {
+        if (
+            signalling &&
+            signalling._ws_conn !== null &&
+            signalling._ws_conn !== undefined &&
+            typeof signalling.disconnect === "function"
+        ) {
+            signalling.disconnect();
+            return true;
+        }
+    } catch {
+        // fall through to direct WebRTC reset
+    }
+    try {
+        if (typeof webrtc.reset === "function" && webrtc.peerConnection !== null) {
+            webrtc.reset();
+            return true;
+        }
+    } catch {
+        // fall through to direct connect
+    }
+    try {
+        if (typeof webrtc.connect === "function") {
+            webrtc.connect();
+            return true;
+        }
+    } catch {
+        return false;
+    }
+    return false;
+};
+window.addEventListener('focus', () => {
+    // reset keyboard to avoid stuck keys.
+    webrtc.sendDataChannelMessage("kr");
+
+    // Send clipboard contents.
+    navigator.clipboard.readText()
+        .then(text => {
+            webrtc.sendDataChannelMessage("cw," + stringToBase64(text))
+        })
+        .catch(err => {
+            webrtc._setStatus('Failed to read clipboard contents: ' + err);
+        });
+});
+window.addEventListener('blur', () => {
+    // reset keyboard to avoid stuck keys.
+    webrtc.sendDataChannelMessage("kr");
+});
+
+webrtc.onclipboardcontent = (content) => {
+    parallaizeNotifyGuestClipboardListeners(content);
+    if (app.clipboardStatus === 'enabled') {
+        navigator.clipboard.writeText(content)
+            .catch(err => {
+                webrtc._setStatus('Could not copy text to clipboard: ' + err);
+        });
+    }
+}
+''',
+    )
+
+old_cursor_patch_start = contents.find(
+    '''function parallaizeReadCursorPngDimensions(curdata) {
+'''
+)
+if old_cursor_patch_start >= 0:
+    old_cursor_patch_end = contents.find(
+        '''
+webrtc.onsystemaction = (action) => {
+''',
+        old_cursor_patch_start,
+    )
+    if old_cursor_patch_end < 0:
+        raise RuntimeError("failed to locate Selkies cursor patch block")
+    contents = (
+        contents[:old_cursor_patch_start]
+        + '''webrtc.oncursorchange = (handle, curdata, hotspot, override) => {
+    if (parseInt(handle) === 0) {
+        videoElement.style.cursor = "auto";
+        return;
+    }
+    if (override) {
+        videoElement.style.cursor = override;
+        return;
+    }
+    if (!webrtc.cursor_cache.has(handle)) {
+        // Add cursor to cache.
+        const cursor_url = "url('data:image/png;base64," + curdata + "')";
+        webrtc.cursor_cache.set(handle, cursor_url);
+    }
+    var cursor_url = webrtc.cursor_cache.get(handle);
+    if (hotspot) {
+        cursor_url += " " + hotspot.x + " " + hotspot.y + ", auto";
+    } else {
+        cursor_url += ", auto";
+    }
+    videoElement.style.cursor = cursor_url;
+}
+'''
+        + contents[old_cursor_patch_end:]
+    )
+
+path.write_text(contents)
+PY
+  fi
+  SELKIES_SIGNALING_FILE="$SELKIES_INSTALL_DIR/share/selkies-web/signalling.js"
+  if [ -f "$SELKIES_SIGNALING_FILE" ]; then
+    python3 - "$SELKIES_SIGNALING_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+
+contents = contents.replace(
+    '        this.peer_id = 1;',
+    '        this.peer_id = new URLSearchParams(window.location.search).get("parallaize_preview") === "1" ? 11 : 1;',
+)
+if '        this._retryTimer = null;' not in contents:
+    contents = contents.replace(
+        '''        this.retry_count = 0;
+''',
+        '''        this.retry_count = 0;
+
+        /**
+         * @type {number | null}
+         */
+        this._retryTimer = null;
+
+        /**
+         * @type {boolean}
+         */
+        this._suppressDisconnect = false;
+''',
+    )
+contents = contents.replace(
+    '''        this.state = 'connected';
+        this._ws_conn.send('HELLO ' + this.peer_id + ' ' + btoa(JSON.stringify(meta)));
+''',
+    '''        this.state = 'connected';
+        this._suppressDisconnect = false;
+        if (this._retryTimer !== null) {
+            clearTimeout(this._retryTimer);
+            this._retryTimer = null;
+        }
+        this._ws_conn.send('HELLO ' + this.peer_id + ' ' + btoa(JSON.stringify(meta)));
+''',
+)
+contents = contents.replace(
+    '''        this._setStatus("Connection error, retry in 3 seconds.");
+        this.retry_count++;
+        if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
+            setTimeout(() => {
+                if (this.retry_count > 3) {
+                    window.location.replace(window.location.href.replace(window.location.pathname, "/"));
+                } else {
+                    this.connect();
+                }
+            }, 3000);
+        }
+''',
+    '''        this._setStatus("Connection error, retrying.");
+        this.retry_count++;
+        if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
+            setTimeout(() => {
+                if (this.retry_count > 3) {
+                    this.retry_count = 0;
+                }
+                this.connect();
+            }, 500);
+        }
+''',
+)
+contents = contents.replace(
+    '''        this._setStatus("Connection error, retrying.");
+        this.retry_count++;
+        if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
+            setTimeout(() => {
+                if (this.retry_count > 3) {
+                    this.retry_count = 0;
+                }
+                this.connect();
+            }, 500);
+        }
+''',
+    '''        if (this._suppressDisconnect) {
+            return;
+        }
+        this._setStatus("Connection error, retrying.");
+        this.retry_count++;
+        if (this._retryTimer !== null) {
+            return;
+        }
+        if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
+            this._retryTimer = setTimeout(() => {
+                this._retryTimer = null;
+                if (this.retry_count > 3) {
+                    this.retry_count = 0;
+                }
+                this.connect();
+            }, 1500);
+        }
+''',
+)
+contents = contents.replace(
+    '''    _onServerClose() {
+        if (this.state !== 'connecting') {
+            this.state = 'disconnected';
+            this._setError("Server closed connection.");
+            if (this.ondisconnect !== null) this.ondisconnect();
+        }
+    }
+''',
+    '''    _onServerClose() {
+        this._ws_conn = null;
+        if (this._suppressDisconnect) {
+            this.state = 'disconnected';
+            return;
+        }
+        if (this.state !== 'connecting') {
+            this.state = 'disconnected';
+            this._setError("Server closed connection.");
+            if (this.ondisconnect !== null) this.ondisconnect();
+        }
+    }
+''',
+)
+contents = contents.replace(
+    '''    connect() {
+        this.state = 'connecting';
+        this._setStatus("Connecting to server.");
+''',
+    '''    connect() {
+        if (this._retryTimer !== null) {
+            clearTimeout(this._retryTimer);
+            this._retryTimer = null;
+        }
+        this._suppressDisconnect = false;
+        if (this._ws_conn !== null &&
+            (this._ws_conn.readyState === WebSocket.OPEN ||
+             this._ws_conn.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+        this.state = 'connecting';
+        this._setStatus("Connecting to server.");
+''',
+)
+contents = contents.replace(
+    '''    disconnect() {
+        this._ws_conn.close();
+    }
+''',
+    '''    disconnect() {
+        this._suppressDisconnect = false;
+        if (this._ws_conn !== null) {
+            this._ws_conn.close();
+        }
+    }
+
+    shutdown() {
+        this._suppressDisconnect = true;
+        if (this._retryTimer !== null) {
+            clearTimeout(this._retryTimer);
+            this._retryTimer = null;
+        }
+        if (this._ws_conn !== null) {
+            this._ws_conn.close();
+        }
+    }
+''',
+)
+
+path.write_text(contents)
+PY
+  fi
+  SELKIES_WEBRTC_FILE="$SELKIES_INSTALL_DIR/share/selkies-web/webrtc.js"
+  if [ -f "$SELKIES_WEBRTC_FILE" ]; then
+    python3 - "$SELKIES_WEBRTC_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+
+if '        this._reconnectTimer = null;' not in contents:
+    contents = contents.replace(
+        '''        this.onclipboardcontent = null;
+
+        /**
+         * @type {function}
+         */
+        this.onsystemaction = null;
+''',
+        '''        this.onclipboardcontent = null;
+
+        /**
+         * @type {number | null}
+         */
+        this._reconnectTimer = null;
+
+        /**
+         * @type {function}
+         */
+        this.onsystemaction = null;
+''',
+    )
+contents = contents.replace(
+    '''    connect() {
+        // Create the peer connection object and bind callbacks.
+''',
+    '''    connect() {
+        if (this._reconnectTimer !== null) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+        // Create the peer connection object and bind callbacks.
+''',
+)
+contents = contents.replace(
+    '''        var signalState = this.peerConnection.signalingState;
+''',
+    '''        var signalState = this.peerConnection !== null ? this.peerConnection.signalingState : "closed";
+''',
+)
+contents = contents.replace(
+    '''        if (signalState !== "stable") {
+            setTimeout(() => {
+                this.connect();
+            }, 3000);
+        } else {
+            this.connect();
+        }
+''',
+    '''        if (this._reconnectTimer !== null) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+
+        if (signalState !== "stable" && signalState !== "closed") {
+            this._reconnectTimer = setTimeout(() => {
+                this._reconnectTimer = null;
+                this.connect();
+            }, 1000);
+        } else {
+            this.connect();
+        }
+''',
+)
+contents = contents.replace(
+    '''        if (signalState !== "stable") {
+            setTimeout(() => {
+                this.connect();
+            }, 250);
+        } else {
+            this.connect();
+        }
+''',
+    '''        if (this._reconnectTimer !== null) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+
+        if (signalState !== "stable" && signalState !== "closed") {
+            this._reconnectTimer = setTimeout(() => {
+                this._reconnectTimer = null;
+                this.connect();
+            }, 1000);
+        } else {
+            this.connect();
+        }
+''',
+)
+
+path.write_text(contents)
+PY
+  fi
+  SELKIES_INDEX_FILE="$SELKIES_INSTALL_DIR/share/selkies-web/index.html"
+  if [ -f "$SELKIES_INDEX_FILE" ]; then
+    python3 - "$SELKIES_INDEX_FILE" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+contents = path.read_text()
+
+launcher_button_pattern = re.compile(
+    r'(?:^|\\n)[ \\t]*<v-tooltip bottom>\\n'
+    r'[ \\t]*<template v-slot:activator="\\{ on \\}">\\n'
+    r'[ \\t]*<v-btn icon href="/">\\n'
+    r'[ \\t]*<v-icon color="black" v-on="on">home</v-icon>\\n'
+    r'[ \\t]*</v-btn>\\n'
+    r'[ \\t]*</template>\\n'
+    r'[ \\t]*<span>Return to launcher</span>\\n'
+    r'[ \\t]*</v-tooltip>\\n',
+)
+
+contents, replaced = launcher_button_pattern.subn("\\n", contents, count=1)
+
+if replaced > 1:
+    raise RuntimeError("Selkies launcher button patch removed multiple toolbar blocks unexpectedly")
+
+if 'href="/"' in contents and "Return to launcher" in contents:
+    raise RuntimeError("Selkies launcher button patch did not remove the launcher shortcut")
+
+path.write_text(contents)
+PY
+  fi
+}
+validate_selkies_bundle() {
+  python3 - "$SELKIES_INSTALL_DIR/share/selkies-web/app.js" "$SELKIES_INSTALL_DIR/share/selkies-web/signalling.js" "$SELKIES_INSTALL_DIR/share/selkies-web/index.html" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+app_path = Path(sys.argv[1])
+signalling_path = Path(sys.argv[2])
+index_path = Path(sys.argv[3])
+app_contents = app_path.read_text()
+signalling_contents = signalling_path.read_text()
+index_contents = index_path.read_text()
+
+required_app_tokens = [
+    "window.parallaizeGetStreamState = () => {",
+    "window.parallaizeKickStream = (reason = 'manual') => {",
+    "window.parallaizeSetStreamScale = (scale) => {",
+    "window.parallaizeSetBackgroundMode = parallaizeSetBackgroundMode;",
+    "var parallaizeGuestClipboardListeners = new Set();",
+    "function parallaizeApplyStreamPixelation() {",
+    ':root[data-parallaize-stream-pixelated="true"] .video { image-rendering: crisp-edges; image-rendering: pixelated; }',
+    "function parallaizeMaybeConnectAudio() {",
+]
+required_signalling_tokens = [
+    'this._setStatus("Connection error, retrying.");',
+    "this._retryTimer = null;",
+    "this._suppressDisconnect = false;",
+]
+
+errors = []
+for token in required_app_tokens:
+    if token not in app_contents:
+        errors.append(f"app.js missing token: {token}")
+for token in required_signalling_tokens:
+    if token not in signalling_contents:
+        errors.append(f"signalling.js missing token: {token}")
+
+if app_contents.count("window.parallaizeGetStreamState = () => {") != 1:
+    errors.append("app.js contains duplicated stream-state bridge")
+if app_contents.count("window.parallaizeKickStream = (reason = 'manual') => {") != 1:
+    errors.append("app.js contains duplicated kick-stream bridge")
+if re.search(r"(?:\\n[ \\t]*parallaizeMaybeConnectAudio\\(\\);){2,}", app_contents):
+    errors.append("app.js contains duplicated audio-connect insertions")
+if 'href="/"' in index_contents and "Return to launcher" in index_contents:
+    errors.append("index.html still contains the launcher shortcut")
+
+if errors:
+    raise SystemExit("; ".join(errors))
+PY
+}
+ensure_selkies_bundle() {
+  SELKIES_VERSION="v${DEFAULT_GUEST_SELKIES_VERSION}"
+  SELKIES_PATCH_LEVEL="${DEFAULT_GUEST_SELKIES_PATCH_LEVEL}"
+  SELKIES_PARENT_DIR="/opt/parallaize"
+  SELKIES_INSTALL_DIR="$SELKIES_PARENT_DIR/selkies-gstreamer"
+  SELKIES_CACHE_DIR="/var/cache/parallaize/selkies"
+  SELKIES_ARCHIVE_URL="${DEFAULT_GUEST_SELKIES_ARCHIVE_URL}"
+  SELKIES_ARCHIVE_FILE="$SELKIES_CACHE_DIR/\${SELKIES_VERSION}.tar.gz"
+  SELKIES_VERSION_FILE="$SELKIES_INSTALL_DIR/.parallaize-selkies-version"
+  SELKIES_PATCH_LEVEL_FILE="$SELKIES_INSTALL_DIR/.parallaize-selkies-patch-level"
+  CURRENT_SELKIES_VERSION="$(cat "$SELKIES_VERSION_FILE" 2>/dev/null || true)"
+  CURRENT_SELKIES_PATCH_LEVEL="$(cat "$SELKIES_PATCH_LEVEL_FILE" 2>/dev/null || true)"
+  if [ "$CURRENT_SELKIES_VERSION" = "$SELKIES_VERSION" ] && [ "$CURRENT_SELKIES_PATCH_LEVEL" = "$SELKIES_PATCH_LEVEL" ] && [ -x "$SELKIES_INSTALL_DIR/bin/selkies-gstreamer-run" ] && [ -f "$SELKIES_INSTALL_DIR/share/selkies-web/app.js" ] && [ -f "$SELKIES_INSTALL_DIR/share/selkies-web/signalling.js" ]; then
+    if validate_selkies_bundle; then
+      return 0
+    fi
+    echo "Selkies bundle validation failed, reinstalling runtime from a clean archive." >&2
+  elif [ "$CURRENT_SELKIES_VERSION" = "$SELKIES_VERSION" ] && [ -x "$SELKIES_INSTALL_DIR/bin/selkies-gstreamer-run" ] && [ -f "$SELKIES_INSTALL_DIR/share/selkies-web/app.js" ]; then
+    echo "Selkies patch-level drift detected, reinstalling runtime from a clean archive." >&2
+  fi
+  mkdir -p "$SELKIES_CACHE_DIR" "$SELKIES_PARENT_DIR"
+  if [ ! -f "$SELKIES_ARCHIVE_FILE" ]; then
+    TEMP_ARCHIVE="$SELKIES_ARCHIVE_FILE.tmp"
+    rm -f "$TEMP_ARCHIVE"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL --connect-timeout 20 --max-time 900 "$SELKIES_ARCHIVE_URL" -o "$TEMP_ARCHIVE"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -T 900 -O "$TEMP_ARCHIVE" "$SELKIES_ARCHIVE_URL"
+    else
+      echo "curl or wget is required to download Selkies." >&2
+      return 1
+    fi
+    mv "$TEMP_ARCHIVE" "$SELKIES_ARCHIVE_FILE"
+  fi
+  TEMP_DIR="$(mktemp -d)"
+  tar -xzf "$SELKIES_ARCHIVE_FILE" -C "$TEMP_DIR"
+  if [ ! -d "$TEMP_DIR/selkies-gstreamer" ]; then
+    rm -rf "$TEMP_DIR"
+    echo "Selkies archive did not contain the expected selkies-gstreamer directory." >&2
+    return 1
+  fi
+  rm -rf "$SELKIES_INSTALL_DIR"
+  mv "$TEMP_DIR/selkies-gstreamer" "$SELKIES_INSTALL_DIR"
+  rm -rf "$TEMP_DIR"
+  if [ -x "$SELKIES_INSTALL_DIR/bin/conda-unpack" ]; then
+    "$SELKIES_INSTALL_DIR/bin/conda-unpack" >/dev/null 2>&1 || true
+  fi
+  patch_selkies_bundle
+  validate_selkies_bundle
+  printf '%s\\n' "$SELKIES_VERSION" > "$SELKIES_VERSION_FILE"
+  printf '%s\\n' "$SELKIES_PATCH_LEVEL" > "$SELKIES_PATCH_LEVEL_FILE"
+  chmod -R a+rX "$SELKIES_INSTALL_DIR"
+  RESTART_DESKTOP=1
+}`;
 }
 
 function buildGuestDesktopSessionSetupScript(vmName?: string): string {
@@ -414,23 +3570,77 @@ function buildGuestDesktopBootstrapScript(
   port: number,
   vmName?: string,
   repairProfile: GuestDesktopBootstrapRepairProfile = "standard",
+  transport: VmDesktopTransport = "vnc",
+  selkiesPort: number = DEFAULT_GUEST_SELKIES_PORT,
+  selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
 ): string {
   const repairTimings = resolveGuestDesktopBootstrapRepairTimings(repairProfile);
+  const resetDisplayStateOnRepair = repairProfile === "aggressive";
+  const desiredDesktopBridgeVersion = JSON.stringify(
+    buildExpectedGuestDesktopBridgeVersionRecord(transport),
+    null,
+    2,
+  );
+  const desktopServiceName =
+    transport === "selkies" ? "parallaize-selkies.service" : "parallaize-x11vnc.service";
+  const launcherFile =
+    transport === "selkies"
+      ? "/usr/local/bin/parallaize-selkies"
+      : "/usr/local/bin/parallaize-x11vnc";
+  const serviceFile = `/etc/systemd/system/${desktopServiceName}`;
+  const desiredLauncher =
+    transport === "selkies"
+      ? buildGuestSelkiesLauncherScript(selkiesPort, selkiesRtcConfig)
+      : buildGuestVncLauncherScript(port);
+  const desiredService =
+    transport === "selkies"
+      ? buildGuestSelkiesServiceUnit()
+      : buildGuestVncServiceUnit();
+  const desktopPackageChecks =
+    transport === "selkies"
+      ? `if ! command -v xrandr >/dev/null 2>&1 || ! command -v cvt >/dev/null 2>&1; then
+  MISSING_PACKAGES="$MISSING_PACKAGES x11-xserver-utils"
+fi
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+  MISSING_PACKAGES="$MISSING_PACKAGES curl"
+fi
+if ! command -v import >/dev/null 2>&1; then
+  MISSING_PACKAGES="$MISSING_PACKAGES imagemagick"
+fi
+if ! command -v xsel >/dev/null 2>&1; then
+  MISSING_PACKAGES="$MISSING_PACKAGES xsel"
+fi
+${buildGuestSelkiesInstallScript()}`
+      : `if ! command -v x11vnc >/dev/null 2>&1; then
+  MISSING_PACKAGES="$MISSING_PACKAGES x11vnc"
+fi
+if ! command -v import >/dev/null 2>&1; then
+  MISSING_PACKAGES="$MISSING_PACKAGES imagemagick"
+fi`;
+  const desktopInstallStep =
+    transport === "selkies" ? "ensure_selkies_bundle" : "";
 
   return `#!/bin/sh
 set -eu
 GDM_FILE="/etc/gdm3/custom.conf"
-LAUNCHER_FILE="/usr/local/bin/parallaize-x11vnc"
-SERVICE_FILE="/etc/systemd/system/parallaize-x11vnc.service"
+DESKTOP_SERVICE_NAME="${desktopServiceName}"
+LAUNCHER_FILE="${launcherFile}"
+SERVICE_FILE="${serviceFile}"
 RENDERING_ENV_FILE="/etc/environment.d/90-parallaize-rendering.conf"
 SESSION_HEALTH_FILE="${DEFAULT_GUEST_DESKTOP_HEALTH_CHECK}"
 SESSION_SETUP_FILE="/usr/local/bin/parallaize-desktop-session-setup"
 SESSION_AUTOSTART_FILE="/etc/xdg/autostart/parallaize-desktop-session-setup.desktop"
 REPAIR_STATE_DIR="/var/lib/parallaize"
+DESKTOP_BRIDGE_VERSION_FILE="${DEFAULT_GUEST_DESKTOP_BRIDGE_VERSION_FILE}"
 DESKTOP_HEALTH_PENDING_FILE="$REPAIR_STATE_DIR/desktop-session-unhealthy-at"
 DESKTOP_GDM_RESTART_FILE="$REPAIR_STATE_DIR/desktop-session-last-gdm-restart"
+RESET_DISPLAY_STATE_ON_REPAIR=${resetDisplayStateOnRepair ? 1 : 0}
+GUEST_MONITORS_FILE="${DEFAULT_GUEST_HOME}/.config/monitors.xml"
+GDM_MONITORS_FILE="/var/lib/gdm3/.config/monitors.xml"
 DESKTOP_HEALTH_GRACE_SECONDS=${repairTimings.healthGraceSeconds}
 DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=${repairTimings.gdmRestartCooldownSeconds}
+NETWORK_WAIT_ONLINE_OVERRIDE_FILE="/etc/systemd/system/systemd-networkd-wait-online.service.d/10-parallaize.conf"
+PLYMOUTH_QUIT_WAIT_OVERRIDE_FILE="/etc/systemd/system/plymouth-quit-wait.service.d/10-parallaize.conf"
 WELCOME_STATE_DIR="${DEFAULT_GUEST_HOME}/.config"
 WELCOME_DONE_FILE="$WELCOME_STATE_DIR/gnome-initial-setup-done"
 WELCOME_AUTOSTART_DIR="$WELCOME_STATE_DIR/autostart"
@@ -442,12 +3652,12 @@ CONF
 )"
 CURRENT_LAUNCHER="$(cat "$LAUNCHER_FILE" 2>/dev/null || true)"
 DESIRED_LAUNCHER="$(cat <<'SCRIPT'
-${buildGuestVncLauncherScript(port)}
+${desiredLauncher}
 SCRIPT
 )"
 CURRENT_SERVICE="$(cat "$SERVICE_FILE" 2>/dev/null || true)"
 DESIRED_SERVICE="$(cat <<'UNIT'
-${buildGuestVncServiceUnit()}
+${desiredService}
 UNIT
 )"
 CURRENT_RENDERING_ENV="$(cat "$RENDERING_ENV_FILE" 2>/dev/null || true)"
@@ -470,6 +3680,21 @@ DESIRED_SESSION_AUTOSTART="$(cat <<'DESKTOP'
 ${buildGuestDesktopSessionAutostartEntry()}
 DESKTOP
 )"
+CURRENT_NETWORK_WAIT_ONLINE_OVERRIDE="$(cat "$NETWORK_WAIT_ONLINE_OVERRIDE_FILE" 2>/dev/null || true)"
+DESIRED_NETWORK_WAIT_ONLINE_OVERRIDE="$(cat <<'CONF'
+${buildGuestNetworkWaitOnlineOverride()}
+CONF
+)"
+CURRENT_PLYMOUTH_QUIT_WAIT_OVERRIDE="$(cat "$PLYMOUTH_QUIT_WAIT_OVERRIDE_FILE" 2>/dev/null || true)"
+DESIRED_PLYMOUTH_QUIT_WAIT_OVERRIDE="$(cat <<'CONF'
+${buildGuestPlymouthQuitWaitOverride()}
+CONF
+)"
+CURRENT_DESKTOP_BRIDGE_VERSION="$(cat "$DESKTOP_BRIDGE_VERSION_FILE" 2>/dev/null || true)"
+DESIRED_DESKTOP_BRIDGE_VERSION="$(cat <<'JSON'
+${desiredDesktopBridgeVersion}
+JSON
+)"
 DESIRED_WELCOME_AUTOSTART="$(cat <<'DESKTOP'
 [Desktop Entry]
 Type=Application
@@ -479,8 +3704,35 @@ X-GNOME-Autostart-enabled=false
 DESKTOP
 )"
 RESTART_GDM=0
-RESTART_VNC=0
+RESTART_DESKTOP=0
+RESTART_WAIT_ONLINE=0
+STOP_PLYMOUTH_QUIT_WAIT=0
 MISSING_PACKAGES=""
+enable_desktop_service() {
+  if systemctl enable "$DESKTOP_SERVICE_NAME" >/dev/null 2>&1; then
+    return 0
+  fi
+  mkdir -p /etc/systemd/system/multi-user.target.wants
+  ln -sf "$SERVICE_FILE" "/etc/systemd/system/multi-user.target.wants/$DESKTOP_SERVICE_NAME"
+  systemctl daemon-reload
+}
+reset_guest_display_state() {
+  if [ "$RESET_DISPLAY_STATE_ON_REPAIR" -ne 1 ]; then
+    return 0
+  fi
+  RESET_DISPLAY_STATE=0
+  for DISPLAY_STATE_FILE in "$GUEST_MONITORS_FILE" "$GDM_MONITORS_FILE"; do
+    if [ -f "$DISPLAY_STATE_FILE" ]; then
+      rm -f "$DISPLAY_STATE_FILE"
+      RESET_DISPLAY_STATE=1
+    fi
+  done
+  if [ "$RESET_DISPLAY_STATE" -eq 1 ]; then
+    rm -f "$DESKTOP_HEALTH_PENDING_FILE" "$DESKTOP_GDM_RESTART_FILE"
+    RESTART_GDM=1
+    RESTART_DESKTOP=1
+  fi
+}
 repair_guest_desktop_if_unhealthy() {
   if [ ! -x "$SESSION_HEALTH_FILE" ]; then
     return 0
@@ -515,7 +3767,7 @@ repair_guest_desktop_if_unhealthy() {
   fi
   printf '%s\\n' "$NOW_EPOCH" > "$DESKTOP_GDM_RESTART_FILE"
   systemctl restart gdm3 || true
-  RESTART_VNC=1
+  RESTART_DESKTOP=1
   sleep 2
 }
 if id ${DEFAULT_GUEST_USERNAME} >/dev/null 2>&1 && [ -d "${DEFAULT_GUEST_HOME}" ]; then
@@ -544,17 +3796,17 @@ fi
 if [ "$CURRENT_LAUNCHER" != "$DESIRED_LAUNCHER" ]; then
   mkdir -p /usr/local/bin
   cat > "$LAUNCHER_FILE" <<'SCRIPT'
-${buildGuestVncLauncherScript(port)}
+${desiredLauncher}
 SCRIPT
   chmod 0755 "$LAUNCHER_FILE"
-  RESTART_VNC=1
+  RESTART_DESKTOP=1
 fi
 if [ "$CURRENT_SERVICE" != "$DESIRED_SERVICE" ]; then
   mkdir -p /etc/systemd/system
   cat > "$SERVICE_FILE" <<'UNIT'
-${buildGuestVncServiceUnit()}
+${desiredService}
 UNIT
-  RESTART_VNC=1
+  RESTART_DESKTOP=1
 fi
 if [ "$CURRENT_RENDERING_ENV" != "$DESIRED_RENDERING_ENV" ]; then
   mkdir -p /etc/environment.d
@@ -583,9 +3835,21 @@ if [ "$CURRENT_SESSION_AUTOSTART" != "$DESIRED_SESSION_AUTOSTART" ]; then
 ${buildGuestDesktopSessionAutostartEntry()}
 DESKTOP
 fi
-if ! command -v x11vnc >/dev/null 2>&1; then
-  MISSING_PACKAGES="$MISSING_PACKAGES x11vnc"
+if [ "$CURRENT_NETWORK_WAIT_ONLINE_OVERRIDE" != "$DESIRED_NETWORK_WAIT_ONLINE_OVERRIDE" ]; then
+  mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
+  cat > "$NETWORK_WAIT_ONLINE_OVERRIDE_FILE" <<'CONF'
+${buildGuestNetworkWaitOnlineOverride()}
+CONF
+  RESTART_WAIT_ONLINE=1
 fi
+if [ "$CURRENT_PLYMOUTH_QUIT_WAIT_OVERRIDE" != "$DESIRED_PLYMOUTH_QUIT_WAIT_OVERRIDE" ]; then
+  mkdir -p /etc/systemd/system/plymouth-quit-wait.service.d
+  cat > "$PLYMOUTH_QUIT_WAIT_OVERRIDE_FILE" <<'CONF'
+${buildGuestPlymouthQuitWaitOverride()}
+CONF
+  STOP_PLYMOUTH_QUIT_WAIT=1
+fi
+${desktopPackageChecks}
 if ! dpkg-query -W -f='\${Status}' indicator-multiload 2>/dev/null | grep -q 'install ok installed'; then
   MISSING_PACKAGES="$MISSING_PACKAGES indicator-multiload"
 fi
@@ -593,25 +3857,39 @@ if [ -n "$MISSING_PACKAGES" ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
   apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y $MISSING_PACKAGES
-  RESTART_VNC=1
+  RESTART_DESKTOP=1
+fi
+${desktopInstallStep}
+reset_guest_display_state
+if [ "$CURRENT_DESKTOP_BRIDGE_VERSION" != "$DESIRED_DESKTOP_BRIDGE_VERSION" ]; then
+  mkdir -p "$REPAIR_STATE_DIR"
+  cat > "$DESKTOP_BRIDGE_VERSION_FILE" <<'JSON'
+${desiredDesktopBridgeVersion}
+JSON
 fi
 systemctl daemon-reload
-systemctl enable parallaize-x11vnc.service >/dev/null 2>&1 || true
+if [ "$RESTART_WAIT_ONLINE" -eq 1 ]; then
+  systemctl restart systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+fi
+if [ "$STOP_PLYMOUTH_QUIT_WAIT" -eq 1 ]; then
+  systemctl stop --no-block plymouth-quit-wait.service >/dev/null 2>&1 || true
+fi
+enable_desktop_service
 if [ "$RESTART_GDM" -eq 1 ]; then
   systemctl restart gdm3 || true
   sleep 2
 fi
 repair_guest_desktop_if_unhealthy
-if [ "$RESTART_VNC" -eq 1 ] || ! systemctl is-active --quiet parallaize-x11vnc.service; then
-  systemctl restart --no-block parallaize-x11vnc.service
+if [ "$RESTART_DESKTOP" -eq 1 ] || ! systemctl is-active --quiet "$DESKTOP_SERVICE_NAME"; then
+  systemctl restart --no-block "$DESKTOP_SERVICE_NAME"
 fi`;
 }
 
 function buildGuestDesktopBootstrapServiceUnit(): string {
   return `[Unit]
 Description=Parallaize desktop bootstrap
-After=network-online.target display-manager.service
-Wants=network-online.target display-manager.service
+After=display-manager.service
+Wants=display-manager.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -624,31 +3902,99 @@ RestartSec=15
 WantedBy=multi-user.target`;
 }
 
+function buildGuestNetworkWaitOnlineOverride(): string {
+  return `[Service]
+ExecStart=
+ExecStart=/bin/true`;
+}
+
+function buildGuestPlymouthQuitWaitOverride(): string {
+  return `[Service]
+ExecStart=
+ExecStart=/bin/true`;
+}
+
+function buildGuestEarlyBootOverrideScript(): string {
+  return `set -eu
+mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
+cat > /etc/systemd/system/systemd-networkd-wait-online.service.d/10-parallaize.conf <<'CONF'
+${buildGuestNetworkWaitOnlineOverride()}
+CONF
+mkdir -p /etc/systemd/system/plymouth-quit-wait.service.d
+cat > /etc/systemd/system/plymouth-quit-wait.service.d/10-parallaize.conf <<'CONF'
+${buildGuestPlymouthQuitWaitOverride()}
+CONF
+systemctl daemon-reload || true
+systemctl restart systemd-networkd-wait-online.service || true
+systemctl stop --no-block plymouth-quit-wait.service || true`;
+}
+
+function buildGuestIncusAgentInstallScript(): string {
+  return `if mount /dev/disk/by-label/incus-agent /mnt/incus-agent; then
+  (
+    cd /mnt/incus-agent
+    ./install.sh || true
+  )
+  umount /mnt/incus-agent || true
+  agent_target=""
+  for candidate in /usr/lib /lib /etc; do
+    if [ -f "$candidate/systemd/system/incus-agent.service" ]; then
+      agent_target="$candidate"
+      break
+    fi
+  done
+  if [ -n "$agent_target" ]; then
+    mkdir -p /etc/systemd/system/multi-user.target.wants
+    ln -sf "$agent_target/systemd/system/incus-agent.service" /etc/systemd/system/multi-user.target.wants/incus-agent.service
+  fi
+  systemctl start incus-agent.service || true
+fi`;
+}
+
 function buildGuestInotifySysctlConfig(settings: GuestInotifySettings): string {
   return `# Raised inotify limits for Node/Vite-style dev watchers inside the guest.
 fs.inotify.max_user_watches=${settings.maxUserWatches}
 fs.inotify.max_user_instances=${settings.maxUserInstances}`;
 }
 
-export function buildGuestVncCloudInit(
+function buildGuestCloudInit(
+  transport: VmDesktopTransport,
   port: number,
   inotifySettings: GuestInotifySettings,
   vmName?: string,
+  selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
 ): string {
+  const launcherPath =
+    transport === "selkies"
+      ? "/usr/local/bin/parallaize-selkies"
+      : "/usr/local/bin/parallaize-x11vnc";
+  const launcherScript =
+    transport === "selkies"
+      ? buildGuestSelkiesLauncherScript(port, selkiesRtcConfig)
+      : buildGuestVncLauncherScript(port);
+  const servicePath =
+    transport === "selkies"
+      ? "/etc/systemd/system/parallaize-selkies.service"
+      : "/etc/systemd/system/parallaize-x11vnc.service";
+  const serviceUnit =
+    transport === "selkies"
+      ? buildGuestSelkiesServiceUnit()
+      : buildGuestVncServiceUnit();
+
   return `#cloud-config
 write_files:
   - path: /etc/gdm3/custom.conf
     permissions: '0644'
     content: |
 ${indentBlock(buildGuestGdmCustomConfig(), "      ")}
-  - path: /usr/local/bin/parallaize-x11vnc
+  - path: ${launcherPath}
     permissions: '0755'
     content: |
-${indentBlock(buildGuestVncLauncherScript(port), "      ")}
-  - path: /etc/systemd/system/parallaize-x11vnc.service
+${indentBlock(launcherScript, "      ")}
+  - path: ${servicePath}
     permissions: '0644'
     content: |
-${indentBlock(buildGuestVncServiceUnit(), "      ")}
+${indentBlock(serviceUnit, "      ")}
   - path: /etc/environment.d/90-parallaize-rendering.conf
     permissions: '0644'
     content: |
@@ -660,7 +4006,17 @@ ${indentBlock(buildGuestDesktopHealthCheckScript(), "      ")}
   - path: /usr/local/bin/parallaize-desktop-bootstrap
     permissions: '0755'
     content: |
-${indentBlock(buildGuestDesktopBootstrapScript(port, vmName), "      ")}
+${indentBlock(
+        buildGuestDesktopBootstrapScript(
+          port,
+          vmName,
+          "standard",
+          transport,
+          port,
+          selkiesRtcConfig,
+        ),
+        "      ",
+      )}
   - path: /etc/systemd/system/parallaize-desktop-bootstrap.service
     permissions: '0644'
     content: |
@@ -669,9 +4025,22 @@ ${indentBlock(buildGuestDesktopBootstrapServiceUnit(), "      ")}
     permissions: '0644'
     content: |
 ${indentBlock(buildGuestInotifySysctlConfig(inotifySettings), "      ")}
+  - path: /etc/systemd/system/systemd-networkd-wait-online.service.d/10-parallaize.conf
+    permissions: '0644'
+    content: |
+${indentBlock(buildGuestNetworkWaitOnlineOverride(), "      ")}
+  - path: /etc/systemd/system/plymouth-quit-wait.service.d/10-parallaize.conf
+    permissions: '0644'
+    content: |
+${indentBlock(buildGuestPlymouthQuitWaitOverride(), "      ")}
+bootcmd:
+  - |
+${indentBlock(buildGuestEarlyBootOverrideScript(), "      ")}
 runcmd:
   - sysctl --load /etc/sysctl.d/60-parallaize-inotify.conf || true
   - systemctl daemon-reload
+  - systemctl restart systemd-networkd-wait-online.service || true
+  - systemctl stop --no-block plymouth-quit-wait.service || true
   - systemctl disable --now gnome-remote-desktop.service || true
   - systemctl mask gnome-remote-desktop.service || true
   - mkdir -p /etc/systemd/user
@@ -680,29 +4049,28 @@ runcmd:
   - ln -sf /dev/null /etc/systemd/user/gnome-remote-desktop-headless.service
   - mkdir -p /mnt/incus-agent
   - |
-      if mount /dev/disk/by-label/incus-agent /mnt/incus-agent; then
-        (
-          cd /mnt/incus-agent
-          ./install.sh || true
-        )
-        umount /mnt/incus-agent || true
-        agent_target=""
-        for candidate in /usr/lib /lib /etc; do
-          if [ -f "$candidate/systemd/system/incus-agent.service" ]; then
-            agent_target="$candidate"
-            break
-          fi
-        done
-        if [ -n "$agent_target" ]; then
-          mkdir -p /etc/systemd/system/multi-user.target.wants
-          ln -sf "$agent_target/systemd/system/incus-agent.service" /etc/systemd/system/multi-user.target.wants/incus-agent.service
-        fi
-        systemctl start incus-agent.service || true
-      fi
+${indentBlock(buildGuestIncusAgentInstallScript(), "      ")}
   - systemctl enable parallaize-desktop-bootstrap.service
   - systemctl restart gdm3 || true
   - systemctl start parallaize-desktop-bootstrap.service || true
 `;
+}
+
+export function buildGuestVncCloudInit(
+  port: number,
+  inotifySettings: GuestInotifySettings,
+  vmName?: string,
+): string {
+  return buildGuestCloudInit("vnc", port, inotifySettings, vmName);
+}
+
+export function buildGuestSelkiesCloudInit(
+  port: number,
+  inotifySettings: GuestInotifySettings,
+  vmName?: string,
+  selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
+): string {
+  return buildGuestCloudInit("selkies", port, inotifySettings, vmName, selkiesRtcConfig);
 }
 
 function indentBlock(value: string, prefix: string): string {

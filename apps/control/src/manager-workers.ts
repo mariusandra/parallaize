@@ -96,7 +96,11 @@ export function performManagerTick(runtime: DesktopManagerRuntime): void {
     }
   }
 
-  runtime.requestVmSessionRefresh();
+  if (shouldRequestFullVmSessionMaintenanceRefresh(runtime)) {
+    runtime.requestVmSessionRefresh("all");
+  } else {
+    runtime.requestVmSessionRefresh();
+  }
 
   if (changed) {
     runtime.publish();
@@ -367,6 +371,10 @@ export function requestVmSessionRefresh(
   runtime: DesktopManagerRuntime,
   mode: Exclude<VmSessionRefreshMode, "none"> = "missing",
 ): void {
+  if (mode === "all") {
+    runtime.lastFullVmSessionRefreshRequestAt = Date.now();
+  }
+
   runtime.sessionRefreshMode = mergeVmSessionRefreshMode(runtime.sessionRefreshMode, mode);
 
   if (runtime.sessionRefreshInFlight) {
@@ -468,4 +476,13 @@ function shouldRefreshVmSession(
   }
 
   return !hasReachableVncSession(vm.session);
+}
+
+function shouldRequestFullVmSessionMaintenanceRefresh(
+  runtime: DesktopManagerRuntime,
+): boolean {
+  return (
+    Date.now() - runtime.lastFullVmSessionRefreshRequestAt >=
+    runtime.vmSessionMaintenanceRefreshMs
+  );
 }

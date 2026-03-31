@@ -21,7 +21,11 @@ const config = loadConfig();
 const provider = createProvider(config.providerKind, config.incusBinary, {
   project: config.incusProject ?? undefined,
   storagePool: config.incusStoragePool ?? undefined,
+  selkiesHostCacheDir: join(config.appHome, "data", "cache", "selkies"),
+  mockDesktopTransport: config.mockDesktopTransport,
   guestVncPort: config.guestVncPort,
+  guestSelkiesPort: config.guestSelkiesPort,
+  guestSelkiesRtcConfig: config.guestSelkiesRtcConfig ?? undefined,
   guestInotifyMaxUserWatches: config.guestInotifyMaxUserWatches,
   guestInotifyMaxUserInstances: config.guestInotifyMaxUserInstances,
   templateCompression: config.templateCompression,

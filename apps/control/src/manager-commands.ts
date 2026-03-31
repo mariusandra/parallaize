@@ -1,4 +1,7 @@
-import { slugify } from "../../../packages/shared/src/helpers.js";
+import {
+  normalizeTemplateDesktopTransport,
+  slugify,
+} from "../../../packages/shared/src/helpers.js";
 
 import type {
   ActionJob,
@@ -115,6 +118,7 @@ export function createVm(
         normalizeVmNetworkMode(
           input.networkMode ?? sourceVm?.networkMode ?? template.defaultNetworkMode,
         ),
+        input.desktopTransport ?? sourceVm?.desktopTransport,
         draft.provider.kind,
         "creating",
         runtime.options.forwardedServiceHostBase ?? null,
@@ -161,6 +165,7 @@ export function createVm(
       input.resources,
       input.forwardedPorts ?? template.defaultForwardedPorts,
       normalizeVmNetworkMode(input.networkMode ?? template.defaultNetworkMode),
+      input.desktopTransport,
       draft.provider.kind,
       "creating",
       runtime.options.forwardedServiceHostBase ?? null,
@@ -283,6 +288,7 @@ export function cloneVm(
       normalizeVmNetworkMode(
         input.networkMode ?? source.networkMode ?? template.defaultNetworkMode,
       ),
+      source.desktopTransport,
       draft.provider.kind,
       "creating",
       runtime.options.forwardedServiceHostBase ?? null,
@@ -541,6 +547,7 @@ export function launchVmFromSnapshot(
       snapshot.resources,
       source.forwardedPorts.map(copyForwardAsTemplatePort),
       normalizeVmNetworkMode(source.networkMode ?? template.defaultNetworkMode),
+      source.desktopTransport,
       draft.provider.kind,
       "creating",
       runtime.options.forwardedServiceHostBase ?? null,
@@ -639,6 +646,62 @@ export function restoreVmSnapshot(
   });
 }
 
+export function deleteVmSnapshot(
+  runtime: DesktopManagerRuntime,
+  vmId: string,
+  snapshotId: string,
+): void {
+  let jobId = "";
+  let deletedLabel = "";
+
+  runtime.store.update((draft) => {
+    const vm = runtime.requireVm(draft, vmId);
+    runtime.ensureActiveProvider(vm);
+    const snapshot = requireVmSnapshot(draft, vmId, snapshotId);
+    const job = buildJob(
+      draft,
+      "delete",
+      vm.id,
+      vm.templateId,
+      `Queued snapshot delete for ${snapshot.label}`,
+    );
+
+    draft.jobs.unshift(job);
+    trimJobs(draft);
+    jobId = job.id;
+    deletedLabel = snapshot.label;
+  });
+
+  runtime.publish();
+
+  void runtime.runJob(jobId, async () => {
+    const vm = runtime.getVmDetail(vmId).vm;
+    runtime.ensureActiveProvider(vm);
+    const snapshot = requireVmSnapshot(runtime.store.load(), vmId, snapshotId);
+
+    await sleep(220);
+    await runtime.provider.deleteVmSnapshot(vm, snapshot);
+
+    runtime.store.update((draft) => {
+      const current = runtime.requireVm(draft, vmId);
+      const template = requireTemplate(draft, snapshot.templateId);
+
+      draft.snapshots = draft.snapshots.filter((entry) => entry.id !== snapshotId);
+      current.snapshotIds = current.snapshotIds.filter((entry) => entry !== snapshotId);
+      current.lastAction = `Snapshot deleted: ${snapshot.label}`;
+      current.updatedAt = nowIso();
+      current.frameRevision += 1;
+      template.snapshotIds = template.snapshotIds.filter((entry) => entry !== snapshotId);
+      template.updatedAt = nowIso();
+      appendActivity(current, `snapshot deleted: ${snapshot.label}`);
+    });
+
+    runtime.publish();
+
+    return `Deleted snapshot ${deletedLabel} from ${vm.name}`;
+  });
+}
+
 export function captureTemplate(
   runtime: DesktopManagerRuntime,
   vmId: string,
@@ -722,6 +785,9 @@ export function captureTemplate(
       );
       const captureNotes = buildCaptureNotes(current, existingTemplate?.notes ?? []);
       const provenance = buildCapturedTemplateProvenance(current, detail.template, snapshot);
+      const captureDesktopTransport = normalizeTemplateDesktopTransport(
+        existingTemplate?.defaultDesktopTransport ?? detail.template?.defaultDesktopTransport,
+      );
       const captureHistoryEntry = buildTemplateHistoryEntry(
         "captured",
         existingTemplate
@@ -746,6 +812,7 @@ export function captureTemplate(
         existingTemplate.defaultForwardedPorts = current.forwardedPorts.map(
           copyForwardAsTemplatePort,
         );
+        existingTemplate.defaultDesktopTransport = captureDesktopTransport;
         existingTemplate.defaultNetworkMode = normalizeVmNetworkMode(current.networkMode);
         existingTemplate.snapshotIds.unshift(snapshot.id);
         existingTemplate.tags = Array.from(
@@ -766,6 +833,7 @@ export function captureTemplate(
           launchSource,
           defaultResources: { ...current.resources },
           defaultForwardedPorts: current.forwardedPorts.map(copyForwardAsTemplatePort),
+          defaultDesktopTransport: captureDesktopTransport,
           defaultNetworkMode: normalizeVmNetworkMode(current.networkMode),
           initCommands: [...(detail.template?.initCommands ?? [])],
           tags: ["captured", slugify(current.name)],
@@ -820,6 +888,9 @@ export function createTemplate(
       launchSource: sourceTemplate.launchSource,
       defaultResources: { ...sourceTemplate.defaultResources },
       defaultForwardedPorts: sourceTemplate.defaultForwardedPorts.map(copyTemplatePortForward),
+      defaultDesktopTransport: normalizeTemplateDesktopTransport(
+        sourceTemplate.defaultDesktopTransport,
+      ),
       defaultNetworkMode: normalizeVmNetworkMode(sourceTemplate.defaultNetworkMode),
       initCommands: nextInitCommands,
       tags: Array.from(
@@ -1036,8 +1107,8 @@ export async function setVmResolution(
     throw new Error("VM must be running before the display resolution can be changed.");
   }
 
-  if (vm.session?.kind !== "vnc") {
-    throw new Error("Display resolution changes require a live VNC-backed desktop.");
+  if (vm.session?.kind !== "vnc" && vm.session?.kind !== "selkies") {
+    throw new Error("Display resolution changes require a live browser-backed desktop.");
   }
 
   await runtime.provider.setDisplayResolution(vm, width, height);

@@ -2,10 +2,14 @@ import type {
   CSSProperties,
   FormEvent,
   JSX,
+  RefObject,
   ReactNode,
 } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { VmInstance, VmStatus } from "../../../packages/shared/src/types.js";
+
+const PREVIEW_IMAGE_REFRESH_MS = 15_000;
 
 export function LoadingShell({ showContent = true }: { showContent?: boolean }): JSX.Element {
   return (
@@ -115,14 +119,20 @@ export function StageStat({
 export function SidepanelSection({
   children,
   defaultOpen = false,
+  onOpenChange,
   title,
 }: {
   children: ReactNode;
   defaultOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
   title: string;
 }): JSX.Element {
   return (
-    <details className="sidepanel-section" open={defaultOpen}>
+    <details
+      className="sidepanel-section"
+      open={defaultOpen}
+      onToggle={(event) => onOpenChange?.(event.currentTarget.open)}
+    >
       <summary>{title}</summary>
       <div className="sidepanel-section__body">{children}</div>
     </details>
@@ -151,6 +161,377 @@ export function StaticPatternPreview({
       <div className="pattern-preview__band pattern-preview__band--b" />
       <div className="pattern-preview__glow" />
     </div>
+  );
+}
+
+type PreviewMediaElement =
+  | HTMLCanvasElement
+  | HTMLImageElement
+  | HTMLVideoElement;
+
+function resolvePreviewMedia(
+  sourceDocument: Document | null,
+): PreviewMediaElement | null {
+  const video = sourceDocument?.querySelector("video");
+
+  if (video instanceof HTMLVideoElement) {
+    return video;
+  }
+
+  const image = sourceDocument?.querySelector("img");
+
+  if (image instanceof HTMLImageElement) {
+    return image;
+  }
+
+  const canvas = sourceDocument?.querySelector("canvas");
+  return canvas instanceof HTMLCanvasElement ? canvas : null;
+}
+
+function readPreviewMediaDimensions(sourceMedia: PreviewMediaElement): {
+  height: number;
+  width: number;
+} {
+  if (sourceMedia instanceof HTMLVideoElement) {
+    return sourceMedia.readyState >= 2
+      ? {
+          height: sourceMedia.videoHeight,
+          width: sourceMedia.videoWidth,
+        }
+      : {
+          height: 0,
+          width: 0,
+        };
+  }
+
+  if (sourceMedia instanceof HTMLImageElement) {
+    return sourceMedia.complete
+      ? {
+          height: sourceMedia.naturalHeight,
+          width: sourceMedia.naturalWidth,
+        }
+      : {
+          height: 0,
+          width: 0,
+        };
+  }
+
+  return {
+    height: sourceMedia.height,
+    width: sourceMedia.width,
+  };
+}
+
+export function MirroredStagePreview({
+  label,
+  paused = false,
+  sourceFrameRef,
+}: {
+  label: string;
+  paused?: boolean;
+  sourceFrameRef: RefObject<HTMLIFrameElement | null>;
+}): JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let intervalId = 0;
+
+    const paintFrame = () => {
+      const canvas = canvasRef.current;
+      const sourceFrame = sourceFrameRef.current;
+
+      if (!canvas || !sourceFrame) {
+        return;
+      }
+
+      try {
+        const sourceDocument =
+          sourceFrame.contentDocument ?? sourceFrame.contentWindow?.document ?? null;
+        const sourceMedia = resolvePreviewMedia(sourceDocument);
+
+        if (
+          !(sourceMedia instanceof HTMLVideoElement) &&
+          !(sourceMedia instanceof HTMLImageElement) &&
+          !(sourceMedia instanceof HTMLCanvasElement)
+        ) {
+          return;
+        }
+
+        const {
+          height: sourceHeight,
+          width: sourceWidth,
+        } = readPreviewMediaDimensions(sourceMedia);
+
+        if (sourceWidth <= 0 || sourceHeight <= 0) {
+          return;
+        }
+
+        if (
+          canvas.width !== sourceWidth ||
+          canvas.height !== sourceHeight
+        ) {
+          canvas.width = sourceWidth;
+          canvas.height = sourceHeight;
+        }
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          return;
+        }
+
+        context.drawImage(sourceMedia, 0, 0, canvas.width, canvas.height);
+      } catch {
+        // Same-origin access is expected, but keep the rail stable if the frame is mid-navigation.
+      }
+    };
+
+    if (paused) {
+      return;
+    }
+
+    paintFrame();
+    intervalId = window.setInterval(paintFrame, 120);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [paused, sourceFrameRef]);
+
+  return <canvas ref={canvasRef} aria-label={label} />;
+}
+
+export function PollingImagePreview({
+  label,
+  onLoad,
+  src,
+}: {
+  label: string;
+  onLoad?: () => void;
+  src: string;
+}): JSX.Element {
+  const [refreshIndex, setRefreshIndex] = useState(0);
+
+  useEffect(() => {
+    setRefreshIndex(0);
+  }, [src]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setRefreshIndex((value) => value + 1);
+    }, PREVIEW_IMAGE_REFRESH_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [src]);
+
+  return (
+    <img
+      src={appendQueryParam(src, "tick", String(refreshIndex))}
+      alt={label}
+      decoding="async"
+      loading="lazy"
+      onLoad={onLoad}
+    />
+  );
+}
+
+let activeSnapshotPreviewOwner: string | null = null;
+const snapshotPreviewListeners = new Set<() => void>();
+
+function tryAcquireSnapshotPreview(ownerId: string): boolean {
+  if (activeSnapshotPreviewOwner === null || activeSnapshotPreviewOwner === ownerId) {
+    activeSnapshotPreviewOwner = ownerId;
+    return true;
+  }
+
+  return false;
+}
+
+function releaseSnapshotPreview(ownerId: string): void {
+  if (activeSnapshotPreviewOwner !== ownerId) {
+    return;
+  }
+
+  activeSnapshotPreviewOwner = null;
+
+  for (const listener of snapshotPreviewListeners) {
+    listener();
+  }
+}
+
+function shutdownEmbeddedSelkiesFrame(frame: HTMLIFrameElement | null): void {
+  if (!frame) {
+    return;
+  }
+
+  try {
+    const target = frame.contentWindow as (Window & {
+      shutdownSelkiesStream?: () => void;
+    }) | null;
+
+    if (typeof target?.shutdownSelkiesStream === "function") {
+      target.shutdownSelkiesStream();
+    }
+  } catch {
+    // Ignore cross-frame access races while the iframe is navigating away.
+  }
+}
+
+export function SnapshotBrowserPreview({
+  label,
+  ownerId,
+  src,
+}: {
+  label: string;
+  ownerId: string;
+  src: string;
+}): JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const [attemptKey, setAttemptKey] = useState(0);
+  const [leaseHeld, setLeaseHeld] = useState<boolean>(() => tryAcquireSnapshotPreview(ownerId));
+  const [snapshotReady, setSnapshotReady] = useState(false);
+
+  useEffect(() => {
+    setAttemptKey(0);
+    setSnapshotReady(false);
+  }, [ownerId, src]);
+
+  useEffect(() => {
+    if (snapshotReady) {
+      if (leaseHeld) {
+        releaseSnapshotPreview(ownerId);
+        setLeaseHeld(false);
+      }
+      return;
+    }
+
+    if (leaseHeld) {
+      return;
+    }
+
+    if (tryAcquireSnapshotPreview(ownerId)) {
+      setLeaseHeld(true);
+      return;
+    }
+
+    const handleLeaseRelease = () => {
+      if (tryAcquireSnapshotPreview(ownerId)) {
+        setLeaseHeld(true);
+      }
+    };
+
+    snapshotPreviewListeners.add(handleLeaseRelease);
+
+    return () => {
+      snapshotPreviewListeners.delete(handleLeaseRelease);
+    };
+  }, [leaseHeld, ownerId, snapshotReady]);
+
+  useEffect(() => {
+    if (!leaseHeld || snapshotReady) {
+      return;
+    }
+
+    let active = true;
+    const captureIntervalId = window.setInterval(() => {
+      const canvas = canvasRef.current;
+      const previewFrame = previewFrameRef.current;
+
+      if (!canvas || !previewFrame) {
+        return;
+      }
+
+      try {
+        const previewDocument =
+          previewFrame.contentDocument ?? previewFrame.contentWindow?.document ?? null;
+        const previewMedia = resolvePreviewMedia(previewDocument);
+
+        if (
+          !(previewMedia instanceof HTMLVideoElement) &&
+          !(previewMedia instanceof HTMLImageElement) &&
+          !(previewMedia instanceof HTMLCanvasElement)
+        ) {
+          return;
+        }
+
+        const {
+          height: sourceHeight,
+          width: sourceWidth,
+        } = readPreviewMediaDimensions(previewMedia);
+
+        if (sourceWidth <= 0 || sourceHeight <= 0) {
+          return;
+        }
+
+        if (
+          canvas.width !== sourceWidth ||
+          canvas.height !== sourceHeight
+        ) {
+          canvas.width = sourceWidth;
+          canvas.height = sourceHeight;
+        }
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          return;
+        }
+
+        context.drawImage(previewMedia, 0, 0, canvas.width, canvas.height);
+
+        if (!active) {
+          return;
+        }
+
+        shutdownEmbeddedSelkiesFrame(previewFrame);
+        setSnapshotReady(true);
+      } catch {
+        // Same-origin access can fail mid-navigation; retry on the next interval.
+      }
+    }, 120);
+    const retryTimeoutId = window.setTimeout(() => {
+      if (!active) {
+        return;
+      }
+
+      setAttemptKey((value) => value + 1);
+    }, 10_000);
+
+    return () => {
+      active = false;
+      window.clearInterval(captureIntervalId);
+      window.clearTimeout(retryTimeoutId);
+    };
+  }, [attemptKey, leaseHeld, snapshotReady]);
+
+  useEffect(() => {
+    return () => {
+      shutdownEmbeddedSelkiesFrame(previewFrameRef.current);
+      releaseSnapshotPreview(ownerId);
+    };
+  }, [ownerId]);
+
+  return (
+    <>
+      <canvas ref={canvasRef} aria-label={label} />
+      {leaseHeld && !snapshotReady ? (
+        <iframe
+          ref={previewFrameRef}
+          key={`${src}:${attemptKey}`}
+          className="vm-tile__browser-frame vm-tile__browser-frame--snapshot-source"
+          src={src}
+          title={`${label} source`}
+          allow="autoplay; clipboard-read; clipboard-write; fullscreen"
+          allowFullScreen
+          loading="lazy"
+          tabIndex={-1}
+          aria-hidden="true"
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -237,6 +618,14 @@ function buildPatternStyle(seed: number): CSSProperties {
     "--pattern-tilt-b": `${8 + ((seed * 5) % 18)}deg`,
     "--pattern-shift": `${(seed * 7) % 160}px`,
   } as CSSProperties;
+}
+
+function appendQueryParam(path: string, key: string, value: string): string {
+  const hashIndex = path.indexOf("#");
+  const hash = hashIndex >= 0 ? path.slice(hashIndex) : "";
+  const basePath = hashIndex >= 0 ? path.slice(0, hashIndex) : path;
+  const separator = basePath.includes("?") ? "&" : "?";
+  return `${basePath}${separator}${key}=${encodeURIComponent(value)}${hash}`;
 }
 
 function statusClassName(status: VmStatus): string {

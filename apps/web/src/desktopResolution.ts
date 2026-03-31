@@ -30,6 +30,8 @@ export interface ResolutionControlLease {
   vmId: string;
 }
 
+export type DesktopResolutionSessionKind = "selkies" | "synthetic" | "vnc";
+
 export const emptyViewportBounds: ViewportBounds = {
   height: null,
   width: null,
@@ -154,6 +156,18 @@ export function shouldScheduleResolutionRepair(input: {
   }
 
   return input.attempts < input.maxAttempts;
+}
+
+export function shouldDriveGuestResolution(input: {
+  mode: "fixed" | "viewport";
+  sessionKind: DesktopResolutionSessionKind | null | undefined;
+}): boolean {
+  if (input.mode === "fixed") {
+    return true;
+  }
+
+  // Selkies handles viewport resize through its own data channel; only noVNC needs dashboard-managed viewport resizes.
+  return input.sessionKind === "vnc";
 }
 
 export function buildResolutionControlLeaseStorageKey(vmId: string): string {

@@ -12,7 +12,6 @@ const DEFAULT_MODEL = "gpt-5.4";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MAX_COMMITS_PER_BATCH = 18;
 const DEFAULT_MAX_BATCH_CHARS = 7_500;
-const DEFAULT_COMMIT_REFERENCE_LIMIT = 15;
 const DEFAULT_REASONING_EFFORT = "none";
 const MAX_OPENAI_TEXT_RETRIES = 1;
 const MAX_OPENAI_RETRY_TOKENS = 4_000;
@@ -259,87 +258,59 @@ export function formatFallbackReleaseNotes(changeSet) {
   const previousLabel = changeSet.previousTag ?? "the first tagged release";
   const topAreaLabels = changeSet.topAreas.slice(0, 3).map((area) => area.label);
   const topFileLabels = changeSet.topFiles
-    .slice(0, 5)
+    .slice(0, 4)
     .map((file) => `\`${file.path}\` (${formatFileChurn(file)})`);
-
-  lines.push("## Highlights");
-  lines.push("- This release summary was assembled directly from git metadata.");
-  lines.push(
-    `- ${formatCount(changeSet.commits.length, "commit")} ${changeSet.commits.length === 1 ? "is" : "are"} included since ${previousLabel}.`,
-  );
-  lines.push(
+  const releaseScopeLine = buildFallbackScopeLine(changeSet);
+  const releaseLead =
     topAreaLabels.length > 0
-      ? `- Main areas touched: ${joinHumanList(topAreaLabels)}.`
-      : "- Main areas touched: repository-wide updates.",
-  );
+      ? `This release focuses on ${topAreaLabels.join(", ")}, with ${formatCount(changeSet.commits.length, "commit")} since ${previousLabel}.`
+      : `This release includes ${formatCount(changeSet.commits.length, "commit")} since ${previousLabel}, covering repository-wide updates.`;
+
+  lines.push(releaseLead);
   lines.push("");
-  lines.push("## Key Changes");
+  lines.push(`- ${releaseScopeLine}`);
 
   if (topFileLabels.length > 0) {
     lines.push(`- Highest-churn files: ${joinHumanList(topFileLabels)}.`);
-  } else {
-    lines.push("- No file-level churn summary was available for this range.");
   }
 
-  const recentCommits = changeSet.commits.slice(0, 5).map((commit) => `\`${commit.shortSha}\` ${commit.subject}`);
+  const recentCommits = changeSet.commits.slice(0, 4).map((commit) => `\`${commit.shortSha}\` ${commit.subject}`);
   if (recentCommits.length > 0) {
     lines.push(`- Recent commit subjects: ${joinHumanList(recentCommits)}.`);
   }
 
-  lines.push("");
-  lines.push("## Operator Notes");
-  lines.push("- Review the full compare and package assets before rollout.");
   if (changeSet.packageRelease !== "1") {
-    lines.push(`- This is package revision \`${changeSet.packageRelease}\` for release \`${changeSet.releaseVersion}\`.`);
-  } else {
-    lines.push("- This release publishes the default package revision for the resolved semver.");
-  }
-  lines.push("");
-  lines.push("## Release Scope");
-
-  for (const scopeLine of buildScopeLines(changeSet)) {
-    lines.push(`- ${scopeLine}`);
+    lines.push(`- This publishes package revision \`${changeSet.packageRelease}\` for release \`${changeSet.releaseVersion}\`.`);
   }
 
   if (changeSet.compareUrl) {
-    lines.push("");
-    lines.push("## Full Compare");
-    lines.push(`- ${changeSet.compareUrl}`);
-  }
-
-  const commitReference = changeSet.commits.slice(0, DEFAULT_COMMIT_REFERENCE_LIMIT);
-  if (commitReference.length > 0) {
-    lines.push("");
-    lines.push("## Commit Reference");
-    for (const commit of commitReference) {
-      lines.push(`- \`${commit.shortSha}\` ${commit.subject} (${commit.author}, ${commit.date})`);
-    }
-
-    const remainingCommitCount = changeSet.commits.length - commitReference.length;
-    if (remainingCommitCount > 0) {
-      lines.push(
-        `- ${formatCount(remainingCommitCount, "additional commit")} ${remainingCommitCount === 1 ? "is" : "are"} included in the tagged range.`,
-      );
-    }
+    lines.push(`- [Full compare](${changeSet.compareUrl})`);
   }
 
   return lines.join("\n").trim();
 }
 
 export function assembleReleaseNotes(generatedSections, changeSet) {
-  const lines = [generatedSections.trim(), "", "## Release Scope"];
-
-  for (const scopeLine of buildScopeLines(changeSet)) {
-    lines.push(`- ${scopeLine}`);
-  }
+  const lines = [generatedSections.trim()];
 
   if (changeSet.compareUrl) {
     lines.push("");
-    lines.push("## Full Compare");
-    lines.push(`- ${changeSet.compareUrl}`);
+    lines.push(`- [Full compare](${changeSet.compareUrl})`);
   }
 
   return lines.join("\n").trim();
+}
+
+function buildFallbackScopeLine(changeSet) {
+  if (changeSet.diffStats.filesChanged > 0) {
+    return `Release \`${changeSet.releaseTag}\` changes ${changeSet.diffStats.filesChanged} files with ${changeSet.diffStats.insertions} insertions and ${changeSet.diffStats.deletions} deletions.`;
+  }
+
+  if (changeSet.changedFiles.length > 0) {
+    return `Release \`${changeSet.releaseTag}\` changes ${changeSet.changedFiles.length} files in the tagged range.`;
+  }
+
+  return `Release \`${changeSet.releaseTag}\` does not have file-level diff statistics for this range.`;
 }
 
 export function buildScopeLines(changeSet) {
@@ -637,7 +608,7 @@ async function generateBatchSummary({ apiKey, baseUrl, model, changeSet, batch }
     baseUrl,
     model,
     instructions:
-      "Summarize technical release changes into short factual markdown bullets. Avoid hype, do not invent behavior, and ignore release bookkeeping.",
+      "Summarize technical release changes into short factual markdown bullets. Keep each bullet crisp, avoid hype, do not invent behavior, and ignore release bookkeeping.",
     input,
     maxOutputTokens: 900,
   });
@@ -650,7 +621,7 @@ async function generateFinalSections({ apiKey, baseUrl, model, changeSet, batchS
     baseUrl,
     model,
     instructions:
-      "Write concise GitHub release descriptions for infrastructure-heavy software projects. Return markdown only, use the requested section headings exactly, and keep the tone factual.",
+      "Write concise GitHub release descriptions for infrastructure-heavy software projects. Return markdown only, keep the tone factual, and avoid sectioned or templated prose.",
     input,
     maxOutputTokens: 1_400,
   });
@@ -824,7 +795,7 @@ function buildBatchPrompt(changeSet, batch) {
     `Batch ${batch.index} of ${batch.total}:`,
     batch.promptText,
     "",
-    "Write 4-6 markdown bullets for this batch.",
+    "Write 3-5 markdown bullets for this batch.",
     "- Focus on concrete shipped changes, not process commentary.",
     "- Mention operator, packaging, networking, CI, and UI effects when clearly present.",
     "- Ignore pure release-version bookkeeping.",
@@ -854,20 +825,17 @@ function buildFinalPrompt(changeSet, batchSummaries) {
     "",
     "Batch summaries:",
     ...batchSummaries.flatMap((summary, index) => [`### Batch ${index + 1}`, summary.trim(), ""]),
-    "Return markdown only with exactly these sections:",
-    "## Highlights",
-    "- 3-5 bullets with the most important release outcomes.",
-    "## Key Changes",
-    "### Use 2-4 short subsection headings grouped by theme.",
-    "- Use flat bullets under each subsection.",
-    "## Operator Notes",
-    "- 1-3 bullets, or a single bullet saying `None.` when nothing operator-facing stands out.",
+    "Return markdown only in this shape:",
+    "A short opening paragraph of 1-2 sentences about the headline feature or features.",
+    "Then 4-8 flat markdown bullets for the other notable changes.",
     "",
     "Constraints:",
-    "- Keep the full response under roughly 350 words.",
+    "- Keep the full response under roughly 220 words.",
     "- Prefer externally relevant behavior and deployment impact over internal mechanics.",
     "- Treat tests and docs as supporting evidence unless they are a major release theme.",
-    "- Do not add a title, scope section, compare link, or asset list.",
+    "- No section headings, no subsections, no title, and no closing summary.",
+    "- Do not add scope metadata, compare links, asset lists, or commit-count commentary.",
+    "- Keep the bullets terse and avoid repetitive phrasing.",
   ].join("\n");
 }
 
@@ -893,7 +861,18 @@ function formatFileList(files, limit) {
 }
 
 function looksLikeReleaseNotes(text) {
-  return /^## Highlights\b[\s\S]+^## Key Changes\b[\s\S]+^## Operator Notes\b/mu.test(text.trim());
+  const normalized = text.trim();
+  if (!normalized || /^#{1,6}\s/mu.test(normalized)) {
+    return false;
+  }
+
+  const firstBulletMatch = normalized.match(/^- /mu);
+  if (!firstBulletMatch || firstBulletMatch.index === undefined) {
+    return false;
+  }
+
+  const intro = normalized.slice(0, firstBulletMatch.index).trim();
+  return intro.length > 0 && !intro.startsWith("- ");
 }
 
 function buildCompareUrl({ githubRepository, githubServerUrl, previousTag, releaseTag }) {

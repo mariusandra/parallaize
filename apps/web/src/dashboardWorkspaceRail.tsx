@@ -60,6 +60,24 @@ interface DashboardWorkspaceRailProps {
   onVmStripDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
   onVmStripDrop: (event: React.DragEvent<HTMLDivElement>) => void;
   resolveActiveCpuThreshold: (vmId: string) => number;
+  resolveMirroredStageFrameRef: (vmId: string) => RefObject<HTMLIFrameElement | null> | null;
+}
+
+export function collectRunningWorkspaceUsage(
+  vms: VmInstance[],
+): { cpu: number; ramMb: number } {
+  return vms.reduce(
+    (usage, vm) => {
+      if (vm.status !== "running") {
+        return usage;
+      }
+
+      usage.cpu += vm.resources.cpu;
+      usage.ramMb += vm.resources.ramMb;
+      return usage;
+    },
+    { cpu: 0, ramMb: 0 },
+  );
 }
 
 export function DashboardWorkspaceRail({
@@ -114,7 +132,10 @@ export function DashboardWorkspaceRail({
   onVmStripDragOver,
   onVmStripDrop,
   resolveActiveCpuThreshold,
+  resolveMirroredStageFrameRef,
 }: DashboardWorkspaceRailProps): JSX.Element {
+  const runningUsage = collectRunningWorkspaceUsage(summary.vms);
+
   return (
     <aside
       ref={railRef}
@@ -240,10 +261,10 @@ export function DashboardWorkspaceRail({
 
               <div className="chip-row workspace-rail__chips">
                 <span className="surface-pill">
-                  {summary.metrics.totalCpu}/{summary.metrics.hostCpuCount} CPU
+                  {runningUsage.cpu}/{summary.metrics.hostCpuCount} CPU
                 </span>
                 <span className="surface-pill">
-                  {formatRamUsage(summary.metrics.totalRamMb, summary.metrics.hostRamMb)}
+                  {formatRamUsage(runningUsage.ramMb, summary.metrics.hostRamMb)}
                 </span>
               </div>
 
@@ -344,6 +365,7 @@ export function DashboardWorkspaceRail({
             dragging={draggedVmId === vm.id}
             inspectorVisible={vm.id === selectedVmId && !effectiveSidePanelCollapsed}
             menuOpen={openVmMenuId === vm.id}
+            mirroredStageFrameRef={resolveMirroredStageFrameRef(vm.id)}
             selected={vm.id === selectedVmId}
             showLivePreview={showLivePreviews}
             vm={vm}

@@ -1,4 +1,6 @@
 import {
+  normalizeTemplateDesktopTransport,
+  normalizeVmDesktopTransport,
   normalizeVmNetworkMode,
   slugify,
 } from "../../../packages/shared/src/helpers.js";
@@ -166,6 +168,9 @@ function normalizeTemplate(
     defaultForwardedPorts: normalizeTemplateForwardedPorts(
       template.defaultForwardedPorts,
     ),
+    defaultDesktopTransport: normalizeTemplateDesktopTransport(
+      template.defaultDesktopTransport,
+    ),
     defaultNetworkMode: normalizeVmNetworkMode(template.defaultNetworkMode),
     initCommands: normalizeTemplateInitCommands(template.initCommands),
     tags,
@@ -218,8 +223,15 @@ function normalizeVm(vm: LegacyVm): VmInstance {
     screenSeed: vm.screenSeed ?? 1,
     activeWindow: vm.activeWindow ?? "editor",
     workspacePath,
+    desktopTransport: normalizeVmDesktopTransport(vm.desktopTransport),
     networkMode: normalizeVmNetworkMode(vm.networkMode),
     session: normalizeSession(vm.id ?? "vm-missing", vm.session, provider),
+    desktopReadyAt:
+      typeof vm.desktopReadyAt === "string" && vm.desktopReadyAt ? vm.desktopReadyAt : null,
+    desktopReadyMs:
+      typeof vm.desktopReadyMs === "number" && Number.isFinite(vm.desktopReadyMs)
+        ? Math.max(0, Math.round(vm.desktopReadyMs))
+        : null,
     forwardedPorts: normalizeVmForwardedPorts(
       vm.id ?? "vm-missing",
       vm.forwardedPorts,
@@ -534,7 +546,7 @@ function normalizeSession(
 ): VmSession | null {
   if (session) {
     const reachable =
-      session.kind === "vnc"
+      session.kind === "vnc" || session.kind === "selkies"
         ? session.reachable ?? Boolean(session.host && session.port)
         : undefined;
 
@@ -548,15 +560,28 @@ function normalizeSession(
           ? buildVncSocketPath(vmId)
           : null,
       browserPath:
-        session.kind === "vnc" && reachable !== false && session.host && session.port
+        session.kind === "selkies" &&
+            typeof session.browserPath === "string" &&
+            session.browserPath
+          ? session.browserPath
+          : session.kind === "vnc" && reachable !== false && session.host && session.port
           ? buildVmBrowserPath(vmId)
+          : session.kind === "selkies" &&
+              reachable !== false &&
+              session.host &&
+              session.port
+            ? buildSelkiesBrowserPath(vmId)
           : null,
       display:
         session.display ??
         (session.host && session.port
           ? reachable !== false
             ? `${session.host}:${session.port}`
-            : `${session.host}:${session.port} pending VNC`
+            : session.kind === "selkies"
+              ? `${session.host}:${session.port} pending Selkies`
+              : `${session.host}:${session.port} pending VNC`
+          : session.kind === "selkies"
+            ? "Guest Selkies pending"
           : provider === "mock"
             ? "Synthetic frame stream"
             : "Guest VNC pending"),
@@ -670,6 +695,10 @@ function buildProviderRef(vmId: string, name: string): string {
 
 function buildVmBrowserPath(vmId: string): string {
   return `/?vm=${vmId}`;
+}
+
+function buildSelkiesBrowserPath(vmId: string): string {
+  return `/selkies-${vmId}/`;
 }
 
 function buildVncSocketPath(vmId: string): string {

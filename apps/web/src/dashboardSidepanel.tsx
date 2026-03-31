@@ -1,6 +1,8 @@
 import {
   Fragment,
+  useEffect,
   useRef,
+  useState,
   type CSSProperties,
   type FormEvent,
   type JSX,
@@ -35,6 +37,8 @@ import {
   describeVmNetworkMode,
   diskUsageChipLabel,
   diskUsageSummaryText,
+  formatDesktopReadyMs,
+  formatDesktopTransportLabel,
   formatTemplateProvenanceKindLabel,
   formatTouchedFileRowMeta,
   formatVmFileBrowserKindToken,
@@ -66,7 +70,8 @@ import {
   formatCurrentResolution,
   formatTargetResolution,
   formatViewportResolution,
-  formatViewportScale,
+  formatViewportScaleLabel,
+  isSelkiesViewportManagedResolution,
   liveCaptureWarningCopy,
   quickCommands,
   railMaxWidth,
@@ -113,7 +118,7 @@ export interface WorkspaceSidepanelProps {
   touchedFilesLoading: boolean;
   vm: VmInstance;
   onApplyResolution: (event: FormEvent<HTMLFormElement>) => Promise<void>;
-  onBrowsePath: (path: string) => Promise<void>;
+  onBrowsePath: (path?: string) => Promise<void>;
   onCaptureDraftChange: (draft: CaptureDraft) => void;
   onClone: (vm: VmInstance) => Promise<void>;
   onCommandDraftChange: (value: string) => void;
@@ -134,6 +139,7 @@ export interface WorkspaceSidepanelProps {
   onPowerAction: (vmId: string, action: VmPowerAction) => Promise<void>;
   onSubmitCapture: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSubmitCommand: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  onDeleteSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
   onLaunchFromSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
   onRestoreSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
   onClosedResizeStart: (pointerClientX: number, handleCenterX: number) => void;
@@ -203,6 +209,17 @@ interface TemplateCardProps {
   onToggleMenu: (templateId: string) => void;
   recentSnapshots: Snapshot[];
   template: EnvironmentTemplate;
+}
+
+interface SnapshotCardProps {
+  busy: boolean;
+  menuOpen: boolean;
+  onDeleteSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
+  onLaunchFromSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
+  onRestoreSnapshot: (vm: VmInstance, snapshot: Snapshot) => Promise<void>;
+  onToggleMenu: (snapshotId: string) => void;
+  snapshot: Snapshot;
+  vm: VmInstance;
 }
 
 export function RailResizeHandle({
@@ -393,6 +410,7 @@ export function WorkspaceSidepanel({
   onSetNetworkMode,
   onResize,
   onSaveForward,
+  onDeleteSnapshot,
   onLaunchFromSnapshot,
   onSnapshot,
   onPowerAction,
@@ -410,7 +428,68 @@ export function WorkspaceSidepanel({
   onResizeKeyDown,
   onResizePointerDown,
 }: WorkspaceSidepanelProps): JSX.Element {
+  const [filesSectionOpen, setFilesSectionOpen] = useState(false);
+  const [openSnapshotMenuId, setOpenSnapshotMenuId] = useState<string | null>(null);
+  const [touchedFilesSectionOpen, setTouchedFilesSectionOpen] = useState(false);
   const currentNetworkMode = detail?.vm.networkMode ?? "default";
+  const resolutionSessionKind =
+    detail?.vm.session?.kind ??
+    vm.session?.kind ??
+    (vm.desktopTransport === "selkies"
+      ? "selkies"
+      : vm.desktopTransport === "vnc"
+        ? "vnc"
+        : null);
+  const selkiesViewportManaged = isSelkiesViewportManagedResolution({
+    mode: resolutionDraft.mode,
+    sessionKind: resolutionSessionKind,
+  });
+  const currentFileBrowser =
+    fileBrowser &&
+    fileBrowser.vmId === vm.id &&
+    fileBrowser.workspacePath === detail?.vm.workspacePath
+      ? fileBrowser
+      : null;
+  const currentTouchedFiles =
+    touchedFiles &&
+    touchedFiles.vmId === vm.id &&
+    touchedFiles.workspacePath === detail?.vm.workspacePath
+      ? touchedFiles
+      : null;
+  const showFileBrowserLoading =
+    fileBrowserLoading ||
+    (filesSectionOpen && currentFileBrowser === null && fileBrowserError === null);
+  const showTouchedFilesLoading =
+    touchedFilesLoading ||
+    (touchedFilesSectionOpen && currentTouchedFiles === null && touchedFilesError === null);
+
+  useEffect(() => {
+    if (!detail || !filesSectionOpen || currentFileBrowser) {
+      return;
+    }
+
+    void onBrowsePath();
+  }, [currentFileBrowser, detail, filesSectionOpen, vm.id]);
+
+  useEffect(() => {
+    if (!openSnapshotMenuId) {
+      return;
+    }
+
+    if (detail?.snapshots.some((snapshot) => snapshot.id === openSnapshotMenuId)) {
+      return;
+    }
+
+    setOpenSnapshotMenuId(null);
+  }, [detail, openSnapshotMenuId, vm.id]);
+
+  useEffect(() => {
+    if (!detail || !touchedFilesSectionOpen || currentTouchedFiles) {
+      return;
+    }
+
+    void onRefreshTouchedFiles();
+  }, [currentTouchedFiles, detail, touchedFilesSectionOpen, vm.id]);
 
   return (
     <aside
@@ -543,9 +622,24 @@ export function WorkspaceSidepanel({
                     <FieldPair label="Workspace path" mono value={vm.workspacePath} />
                     <FieldPair label="Last action" value={vm.lastAction} />
                     <FieldPair
+                      label="Desktop transport"
+                      value={formatDesktopTransportLabel(detail.vm)}
+                    />
+                    <FieldPair
+                      label="Browser route"
+                      mono
+                      value={detail.vm.session?.browserPath ?? "Waiting for browser route"}
+                    />
+                    <FieldPair
                       label="Browser socket"
                       mono
-                      value={detail.vm.session?.webSocketPath ?? "Waiting for VNC bridge"}
+                      value={
+                        detail.vm.session?.kind === "vnc"
+                          ? (detail.vm.session.webSocketPath ?? "Waiting for VNC bridge")
+                          : detail.vm.session?.kind === "selkies"
+                            ? "Handled inside the Selkies page"
+                            : "Not applicable"
+                      }
                     />
                     <FieldPair
                       label="Guest endpoint"
@@ -554,6 +648,18 @@ export function WorkspaceSidepanel({
                         detail.vm.session?.host && detail.vm.session?.port
                           ? `${detail.vm.session.host}:${detail.vm.session.port}`
                           : "Guest endpoint pending"
+                      }
+                    />
+                    <FieldPair
+                      label="Ready in"
+                      value={formatDesktopReadyMs(detail.vm.desktopReadyMs)}
+                    />
+                    <FieldPair
+                      label="Ready at"
+                      value={
+                        detail.vm.desktopReadyAt
+                          ? formatTimestamp(detail.vm.desktopReadyAt)
+                          : "Pending"
                       }
                     />
                   </div>
@@ -603,6 +709,36 @@ export function WorkspaceSidepanel({
                           }
                         />
                       </div>
+                    ) : selkiesViewportManaged ? (
+                      <label className="field-shell">
+                        <span>Stream scale</span>
+                        <div className="field-range">
+                          <input
+                            className="field-range__input"
+                            disabled={resolutionControlBlocked}
+                            type="range"
+                            min={desktopViewportScaleMin}
+                            max={desktopViewportScaleMax}
+                            step={desktopViewportScaleStep}
+                            value={Number(resolutionDraft.scale) || desktopViewportScaleDefault}
+                            onChange={(event) =>
+                              onViewportScaleChange(Number(event.target.value))
+                            }
+                          />
+                          <span className="field-range__value mono-font">
+                            {formatViewportScaleLabel(
+                              Number(resolutionDraft.scale) || desktopViewportScaleDefault,
+                              {
+                                sessionKind: resolutionSessionKind,
+                              },
+                            )}
+                          </span>
+                        </div>
+                        <p className="empty-copy">
+                          100% acts like DPR 1. Increase it toward your browser DPR for a
+                          sharper stream, or lower it to reduce guest render load.
+                        </p>
+                      </label>
                     ) : (
                       <label className="field-shell">
                         <span>Scale</span>
@@ -620,10 +756,12 @@ export function WorkspaceSidepanel({
                             }
                           />
                           <span className="field-range__value mono-font">
-                            {formatViewportScale(
+                            {formatViewportScaleLabel(
                               Number(resolutionDraft.scale) || desktopViewportScaleDefault,
+                              {
+                                sessionKind: resolutionSessionKind,
+                              },
                             )}
-                            x
                           </span>
                         </div>
                       </label>
@@ -634,7 +772,10 @@ export function WorkspaceSidepanel({
                         compact
                         label="Current"
                         mono
-                        value={formatCurrentResolution(resolutionState)}
+                        value={formatCurrentResolution(resolutionState, {
+                          mode: resolutionDraft.mode,
+                          sessionKind: resolutionSessionKind,
+                        })}
                       />
                       <FieldPair
                         compact
@@ -646,7 +787,9 @@ export function WorkspaceSidepanel({
                         compact
                         label="Target"
                         mono
-                        value={formatTargetResolution(resolutionDraft, resolutionState)}
+                        value={formatTargetResolution(resolutionDraft, resolutionState, {
+                          sessionKind: resolutionSessionKind,
+                        })}
                       />
                     </div>
 
@@ -976,7 +1119,7 @@ export function WorkspaceSidepanel({
                   </div>
                 </SidepanelSection>
 
-                <SidepanelSection title="Files">
+                <SidepanelSection title="Files" onOpenChange={setFilesSectionOpen}>
                   <div className="stack">
                     <div className="vm-file-browser">
                       <div className="vm-file-browser__head">
@@ -985,8 +1128,8 @@ export function WorkspaceSidepanel({
                           className="vm-file-browser__breadcrumb"
                         >
                           {buildVmFileBrowserBreadcrumbs(
-                            fileBrowser?.currentPath ??
-                              fileBrowser?.homePath ??
+                            currentFileBrowser?.currentPath ??
+                              currentFileBrowser?.homePath ??
                               detail.vm.workspacePath,
                           ).map((crumb, index, crumbs) => (
                             <Fragment key={crumb.path}>
@@ -1004,7 +1147,7 @@ export function WorkspaceSidepanel({
                                   className="mono-font vm-file-browser__breadcrumb-link"
                                   type="button"
                                   onClick={() => void onBrowsePath(crumb.path)}
-                                  disabled={busy || fileBrowserLoading}
+                                  disabled={busy || showFileBrowserLoading}
                                 >
                                   {crumb.label}
                                 </button>
@@ -1018,8 +1161,10 @@ export function WorkspaceSidepanel({
                             className="button button--ghost"
                             type="button"
                             onClick={() =>
-                              void onBrowsePath(fileBrowser?.homePath ?? detail.vm.workspacePath)}
-                            disabled={busy || fileBrowserLoading}
+                              void onBrowsePath(
+                                currentFileBrowser?.homePath ?? detail.vm.workspacePath,
+                              )}
+                            disabled={busy || showFileBrowserLoading}
                           >
                             Home
                           </button>
@@ -1027,7 +1172,7 @@ export function WorkspaceSidepanel({
                             className="button button--ghost"
                             type="button"
                             onClick={() => void onBrowsePath("/")}
-                            disabled={busy || fileBrowserLoading}
+                            disabled={busy || showFileBrowserLoading}
                           >
                             Root
                           </button>
@@ -1035,11 +1180,15 @@ export function WorkspaceSidepanel({
                             className="button button--ghost"
                             type="button"
                             onClick={() => {
-                              if (fileBrowser?.parentPath) {
-                                void onBrowsePath(fileBrowser.parentPath);
+                              if (currentFileBrowser?.parentPath) {
+                                void onBrowsePath(currentFileBrowser.parentPath);
                               }
                             }}
-                            disabled={busy || fileBrowserLoading || !fileBrowser?.parentPath}
+                            disabled={
+                              busy ||
+                              showFileBrowserLoading ||
+                              !currentFileBrowser?.parentPath
+                            }
                           >
                             Up
                           </button>
@@ -1048,22 +1197,22 @@ export function WorkspaceSidepanel({
                             type="button"
                             onClick={() =>
                               void onBrowsePath(
-                                fileBrowser?.currentPath ??
-                                  fileBrowser?.homePath ??
+                                currentFileBrowser?.currentPath ??
+                                  currentFileBrowser?.homePath ??
                                   detail.vm.workspacePath,
                               )}
-                            disabled={busy || fileBrowserLoading}
+                            disabled={busy || showFileBrowserLoading}
                           >
-                            {fileBrowserLoading ? "Refreshing..." : "Refresh"}
+                            {showFileBrowserLoading ? "Refreshing..." : "Refresh"}
                           </button>
                         </div>
                       </div>
 
                       {fileBrowserError ? <p className="empty-copy">{fileBrowserError}</p> : null}
 
-                      {fileBrowser && fileBrowser.entries.length > 0 ? (
+                      {currentFileBrowser && currentFileBrowser.entries.length > 0 ? (
                         <div className="vm-file-browser__list" role="list">
-                          {fileBrowser.entries.map((entry) => {
+                          {currentFileBrowser.entries.map((entry) => {
                             const meta = formatVmFileBrowserRowMeta(entry);
                             const title = buildVmFileBrowserEntryTitle(entry);
                             const row = (
@@ -1089,7 +1238,7 @@ export function WorkspaceSidepanel({
                                   type="button"
                                   title={title}
                                   onClick={() => void onBrowsePath(entry.path)}
-                                  disabled={busy || fileBrowserLoading}
+                                  disabled={busy || showFileBrowserLoading}
                                 >
                                   {row}
                                 </button>
@@ -1121,7 +1270,7 @@ export function WorkspaceSidepanel({
                             );
                           })}
                         </div>
-                      ) : fileBrowserLoading ? (
+                      ) : showFileBrowserLoading ? (
                         <p className="empty-copy">Loading files...</p>
                       ) : (
                         <p className="empty-copy">No files in this folder.</p>
@@ -1130,14 +1279,17 @@ export function WorkspaceSidepanel({
                   </div>
                 </SidepanelSection>
 
-                <SidepanelSection title="Touched this session">
+                <SidepanelSection
+                  title="Touched this session"
+                  onOpenChange={setTouchedFilesSectionOpen}
+                >
                   <div className="stack">
                     <p className="empty-copy">
-                      {touchedFiles?.baselineLabel ??
+                      {currentTouchedFiles?.baselineLabel ??
                         "Best effort from workspace timestamps and command-history hints."}
                     </p>
                     <p className="empty-copy">
-                      {touchedFiles?.limitationSummary ??
+                      {currentTouchedFiles?.limitationSummary ??
                         "This view is intentionally conservative and may miss or over-report edits."}
                     </p>
 
@@ -1146,17 +1298,17 @@ export function WorkspaceSidepanel({
                         className="button button--secondary"
                         type="button"
                         onClick={() => void onRefreshTouchedFiles()}
-                        disabled={busy || touchedFilesLoading}
+                        disabled={busy || showTouchedFilesLoading}
                       >
-                        {touchedFilesLoading ? "Refreshing..." : "Refresh touched files"}
+                        {showTouchedFilesLoading ? "Refreshing..." : "Refresh touched files"}
                       </button>
                     </div>
 
                     {touchedFilesError ? <p className="empty-copy">{touchedFilesError}</p> : null}
 
-                    {touchedFiles && touchedFiles.entries.length > 0 ? (
+                    {currentTouchedFiles && currentTouchedFiles.entries.length > 0 ? (
                       <div className="vm-file-browser__list" role="list">
-                        {touchedFiles.entries.map((entry) => {
+                        {currentTouchedFiles.entries.map((entry) => {
                           const meta = formatTouchedFileRowMeta(entry);
                           const title = buildTouchedFileEntryTitle(entry);
                           const row = (
@@ -1182,7 +1334,7 @@ export function WorkspaceSidepanel({
                                 type="button"
                                 title={title}
                                 onClick={() => void onBrowsePath(entry.path)}
-                                disabled={busy || touchedFilesLoading}
+                                disabled={busy || showTouchedFilesLoading}
                               >
                                 {row}
                               </button>
@@ -1214,7 +1366,7 @@ export function WorkspaceSidepanel({
                           );
                         })}
                       </div>
-                    ) : touchedFilesLoading ? (
+                    ) : showTouchedFilesLoading ? (
                       <p className="empty-copy">Comparing workspace timestamps...</p>
                     ) : (
                       <p className="empty-copy">No recently touched paths were detected.</p>
@@ -1379,35 +1531,21 @@ export function WorkspaceSidepanel({
 
                     {detail.snapshots.length > 0 ? (
                       detail.snapshots.map((snapshot) => (
-                        <div key={snapshot.id} className="list-card">
-                          <div className="list-card__head">
-                            <div>
-                              <strong>{snapshot.label}</strong>
-                              <p className="list-card__timestamp">
-                                {formatTimestamp(snapshot.createdAt)}
-                              </p>
-                            </div>
-                            <div className="list-card__actions">
-                              <button
-                                className="button button--ghost"
-                                type="button"
-                                onClick={() => void onLaunchFromSnapshot(vm, snapshot)}
-                                disabled={busy}
-                              >
-                                Launch VM
-                              </button>
-                              <button
-                                className="button button--secondary"
-                                type="button"
-                                onClick={() => void onRestoreSnapshot(vm, snapshot)}
-                                disabled={busy}
-                              >
-                                Reset VM
-                              </button>
-                            </div>
-                          </div>
-                          <p>{snapshot.summary}</p>
-                        </div>
+                        <SnapshotCard
+                          key={snapshot.id}
+                          busy={busy}
+                          menuOpen={openSnapshotMenuId === snapshot.id}
+                          onDeleteSnapshot={onDeleteSnapshot}
+                          onLaunchFromSnapshot={onLaunchFromSnapshot}
+                          onRestoreSnapshot={onRestoreSnapshot}
+                          onToggleMenu={(snapshotId) => {
+                            setOpenSnapshotMenuId((current) =>
+                              current === snapshotId ? null : snapshotId,
+                            );
+                          }}
+                          snapshot={snapshot}
+                          vm={vm}
+                        />
                       ))
                     ) : (
                       <p className="empty-copy">No snapshots recorded yet.</p>
@@ -1536,6 +1674,88 @@ function TemplateCard({
       <p>{template.description || "No description yet."}</p>
       <TemplateLifecyclePreview recentSnapshots={recentSnapshots} template={template} />
       <TemplateInitCommandsPreview commands={template.initCommands} truncateAfter={3} />
+    </div>
+  );
+}
+
+function SnapshotCard({
+  busy,
+  menuOpen,
+  onDeleteSnapshot,
+  onLaunchFromSnapshot,
+  onRestoreSnapshot,
+  onToggleMenu,
+  snapshot,
+  vm,
+}: SnapshotCardProps): JSX.Element {
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  return (
+    <div className="list-card">
+      <div className="list-card__head">
+        <div className="list-card__title-copy">
+          <strong>{snapshot.label}</strong>
+          <p className="list-card__timestamp">{formatTimestamp(snapshot.createdAt)}</p>
+        </div>
+
+        <div className="list-card__menu" onClick={(event) => event.stopPropagation()}>
+          <button
+            ref={menuButtonRef}
+            className={joinClassNames("menu-button", menuOpen ? "menu-button--open" : "")}
+            type="button"
+            aria-expanded={menuOpen}
+            aria-label={`Actions for snapshot ${snapshot.label}`}
+            onClick={() => onToggleMenu(snapshot.id)}
+          >
+            ...
+          </button>
+
+          {menuOpen ? (
+            <PortalPopover
+              anchorRef={menuButtonRef}
+              className="list-card__popover"
+              open={menuOpen}
+              onClose={() => onToggleMenu(snapshot.id)}
+            >
+              <button
+                className="menu-action"
+                type="button"
+                onClick={() => {
+                  onToggleMenu(snapshot.id);
+                  void onLaunchFromSnapshot(vm, snapshot);
+                }}
+                disabled={busy}
+              >
+                Create VM from snapshot
+              </button>
+              <button
+                className="menu-action"
+                type="button"
+                onClick={() => {
+                  onToggleMenu(snapshot.id);
+                  void onRestoreSnapshot(vm, snapshot);
+                }}
+                disabled={busy}
+              >
+                Reset current VM to here
+              </button>
+              <button
+                className="menu-action menu-action--danger"
+                type="button"
+                onClick={() => {
+                  onToggleMenu(snapshot.id);
+                  void onDeleteSnapshot(vm, snapshot);
+                }}
+                disabled={busy}
+              >
+                Delete snapshot
+              </button>
+            </PortalPopover>
+          ) : null}
+        </div>
+      </div>
+
+      <p>{snapshot.summary}</p>
     </div>
   );
 }

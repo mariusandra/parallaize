@@ -15,7 +15,7 @@ interface ResolvedVncTarget {
 interface ResolvedForwardTarget extends ResolvedVncTarget {
   publicPath: string;
   publicHostname: string | null;
-  routeKind: "host" | "path";
+  routeKind: "host" | "path" | "selkies";
 }
 
 class ProxyRouteError extends Error {
@@ -45,10 +45,10 @@ export class VmNetworkBridge {
     response: ServerResponse,
     url: URL,
   ): Promise<boolean> {
-    let route: ResolvedForwardRoute | null;
+    let route: ResolvedProxyRoute | null;
 
     try {
-      route = this.resolveForwardRoute(request, url);
+      route = this.resolveProxyRoute(request, url);
     } catch (error) {
       writePlainError(
         response,
@@ -112,10 +112,10 @@ export class VmNetworkBridge {
       return true;
     }
 
-    let route: ResolvedForwardRoute | null;
+    let route: ResolvedProxyRoute | null;
 
     try {
-      route = this.resolveForwardRoute(request, url);
+      route = this.resolveProxyRoute(request, url);
     } catch (error) {
       writeSocketError(
         socket,
@@ -184,7 +184,7 @@ export class VmNetworkBridge {
     request: IncomingMessage,
     socket: Socket,
     head: Buffer,
-    route: ResolvedForwardRoute,
+    route: ResolvedProxyRoute,
     url: URL,
   ): void {
     let target: ResolvedForwardTarget;
@@ -244,16 +244,25 @@ export class VmNetworkBridge {
     });
   }
 
-  private resolveForwardRoute(
+  private resolveProxyRoute(
     request: IncomingMessage,
     url: URL,
-  ): ResolvedForwardRoute | null {
+  ): ResolvedProxyRoute | null {
     const hostTarget = this.resolveForwardTargetFromHost(request.headers.host);
 
     if (hostTarget) {
       return {
         remainder: trimLeadingSlash(url.pathname),
         target: hostTarget,
+      };
+    }
+
+    const selkiesMatch = matchSelkiesPath(url.pathname);
+
+    if (selkiesMatch) {
+      return {
+        remainder: selkiesMatch.remainder,
+        target: this.resolveSelkiesTarget(selkiesMatch.vmId),
       };
     }
 
@@ -290,6 +299,24 @@ export class VmNetworkBridge {
     };
   }
 
+  private resolveSelkiesTarget(vmId: string): ResolvedForwardTarget {
+    const vm = this.manager.getVmDetail(vmId).vm;
+
+    if (vm.status !== "running") {
+      throw new ProxyRouteError(`VM ${vm.name} is not running.`, 409);
+    }
+
+    const session = requireGuestSession(vm.name, vm.session, "selkies");
+
+    return {
+      host: session.host,
+      port: session.port,
+      publicPath: buildSelkiesPublicPath(vmId),
+      publicHostname: null,
+      routeKind: "selkies",
+    };
+  }
+
   private resolveForwardTarget(
     vmId: string,
     forwardId: string,
@@ -301,7 +328,7 @@ export class VmNetworkBridge {
       throw new ProxyRouteError(`VM ${vm.name} is not running.`, 409);
     }
 
-    const session = requireVncSession(vm.name, vm.session);
+    const session = requireGuestSession(vm.name, vm.session);
     const forward = vm.forwardedPorts.find((entry) => entry.id === forwardId);
 
     if (!forward) {
@@ -348,7 +375,12 @@ interface ForwardPathMatch {
   remainder: string;
 }
 
-interface ResolvedForwardRoute {
+interface SelkiesPathMatch {
+  vmId: string;
+  remainder: string;
+}
+
+interface ResolvedProxyRoute {
   remainder: string;
   target: ResolvedForwardTarget;
 }
@@ -364,6 +396,19 @@ function safeUrl(request: IncomingMessage): URL | null {
 function matchVncPath(pathname: string): string | null {
   const match = pathname.match(/^\/api\/vms\/([^/]+)\/vnc$/);
   return match?.[1] ?? null;
+}
+
+function matchSelkiesPath(pathname: string): SelkiesPathMatch | null {
+  const match = pathname.match(/^\/selkies-([^/]+)(?:\/(.*))?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    vmId: match[1],
+    remainder: match[2] ?? "",
+  };
 }
 
 function matchForwardPath(pathname: string): ForwardPathMatch | null {
@@ -397,13 +442,27 @@ function normalizeHostHeader(
   }
 }
 
-function requireVncSession(
+function requireGuestSession(
   vmName: string,
   session: VmSession | null,
+  expectedKind?: "vnc" | "selkies",
 ): ResolvedVncTarget {
-  if (!session || session.kind !== "vnc" || !session.host || !session.port) {
+  if (
+    !session ||
+    session.kind === "synthetic" ||
+    (expectedKind && session.kind !== expectedKind) ||
+    session.reachable === false ||
+    !session.host ||
+    !session.port
+  ) {
+    const transportLabel =
+      expectedKind === "selkies"
+        ? "Selkies"
+        : expectedKind === "vnc"
+          ? "VNC"
+          : "guest network";
     throw new ProxyRouteError(
-      `VM ${vmName} does not have a reachable guest network address yet.`,
+      `VM ${vmName} does not have a reachable ${transportLabel} endpoint yet.`,
       502,
     );
   }
@@ -417,6 +476,10 @@ function requireVncSession(
 function buildTargetPath(remainder: string, search: string): string {
   const path = remainder ? `/${remainder}` : "/";
   return `${path}${search}`;
+}
+
+function buildSelkiesPublicPath(vmId: string): string {
+  return `/selkies-${vmId}/`;
 }
 
 function trimLeadingSlash(pathname: string): string {

@@ -3,6 +3,9 @@ import test from "node:test";
 
 import type { VmDetail, VmInstance } from "../packages/shared/src/types.js";
 import {
+  buildSelkiesPreviewBrowserPath,
+  hasBrowserDesktopSession,
+  hasBrowserSelkiesSession,
   hasBrowserVncSession,
   mergeSelectedVmDetail,
   resolveDisplayedDesktopSession,
@@ -11,6 +14,21 @@ import {
   type RetainedDesktopSession,
   shouldShowLiveVmPreview,
 } from "../apps/web/src/desktopSession.js";
+
+test("hasBrowserDesktopSession accepts Selkies sessions with a browser path", () => {
+  assert.equal(
+    hasBrowserDesktopSession({
+      kind: "selkies",
+      host: "10.0.0.10",
+      port: 6080,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: "/selkies-vm-1/",
+      display: "10.0.0.10:6080",
+    }),
+    true,
+  );
+});
 
 test("hasBrowserVncSession only accepts VNC sessions with a websocket path", () => {
   assert.equal(hasBrowserVncSession(null), false);
@@ -37,6 +55,61 @@ test("hasBrowserVncSession only accepts VNC sessions with a websocket path", () 
       display: "10.0.0.10:5900",
     }),
     true,
+  );
+});
+
+test("hasBrowserSelkiesSession only accepts Selkies sessions with a browser path", () => {
+  assert.equal(hasBrowserSelkiesSession(null), false);
+  assert.equal(
+    hasBrowserSelkiesSession({
+      kind: "selkies",
+      host: "10.0.0.10",
+      port: 6080,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: null,
+      display: "10.0.0.10:6080",
+    }),
+    false,
+  );
+  assert.equal(
+    hasBrowserSelkiesSession({
+      kind: "selkies",
+      host: "10.0.0.10",
+      port: 6080,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: "/selkies-vm-1/",
+      display: "10.0.0.10:6080",
+    }),
+    true,
+  );
+});
+
+test("buildSelkiesPreviewBrowserPath adds preview mode for rail iframes", () => {
+  assert.equal(
+    buildSelkiesPreviewBrowserPath({
+      kind: "selkies",
+      host: "10.0.0.10",
+      port: 6080,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: "/selkies-vm-1/",
+      display: "10.0.0.10:6080",
+    }),
+    "/selkies-vm-1/?parallaize_preview=1",
+  );
+  assert.equal(
+    buildSelkiesPreviewBrowserPath({
+      kind: "selkies",
+      host: "10.0.0.10",
+      port: 6080,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: "/selkies-vm-1/?foo=bar",
+      display: "10.0.0.10:6080",
+    }),
+    "/selkies-vm-1/?foo=bar&parallaize_preview=1",
   );
 });
 
@@ -126,6 +199,21 @@ test("shouldShowLiveVmPreview allows the selected VM tile to keep a live preview
   assert.equal(shouldShowLiveVmPreview(vm, true), true);
 });
 
+test("shouldShowLiveVmPreview keeps Selkies previews active on selected tiles", () => {
+  const vm = buildVm("vm-0102", {
+    kind: "selkies",
+    host: "10.0.0.12",
+    port: 6080,
+    reachable: true,
+    webSocketPath: null,
+    browserPath: "/selkies-vm-0102/",
+    display: "10.0.0.12:6080",
+  });
+
+  assert.equal(shouldShowLiveVmPreview(vm, true), true);
+  assert.equal(shouldShowLiveVmPreview(vm, true, true), true);
+});
+
 test("mergeSelectedVmDetail preserves a fresher detail VNC session when summary lags behind", () => {
   const selectedVm = buildVm("vm-0100", null);
   const detailSession = {
@@ -213,6 +301,24 @@ test("resolveDisplayedDesktopSession does not reuse a retained session for anoth
   assert.equal(resolveDisplayedDesktopSession(vm, null, retainedSession), null);
 });
 
+test("resolveDisplayedDesktopSession keeps the last good Selkies session for the same running VM", () => {
+  const vm = buildVm("vm-0102", null);
+  const retainedSession: RetainedDesktopSession = {
+    vmId: vm.id,
+    session: {
+      kind: "selkies",
+      host: "10.0.0.10",
+      port: 6080,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: "/selkies-vm-0102/",
+      display: "10.0.0.10:6080",
+    },
+  };
+
+  assert.deepEqual(resolveDisplayedDesktopSession(vm, null, retainedSession), retainedSession.session);
+});
+
 function buildVm(
   id: string,
   session: VmInstance["session"],
@@ -238,6 +344,7 @@ function buildVm(
     screenSeed: 1,
     activeWindow: "terminal",
     workspacePath: "/root",
+    desktopTransport: "vnc",
     networkMode: "default",
     session,
     forwardedPorts: [],

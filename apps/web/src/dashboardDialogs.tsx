@@ -10,6 +10,7 @@ import type {
   TemplateCloneDraft,
   TemplateEditDraft,
 } from "./dashboardHelpers.js";
+import { createSourceSupportsDesktopTransportChoice } from "./dashboardHelpers.js";
 import { InlineWarningNote, NumberField } from "./dashboardPrimitives.js";
 import { VmLogOutput } from "./dashboardUi.js";
 
@@ -215,6 +216,8 @@ export function CreateVmDialog({
   const cloneVmSelected = selectedSource?.kind === "vm";
   const cloneSourceRunning = cloneVmSelected && selectedSource.sourceVm?.status === "running";
   const reuseExistingDiskState = snapshotSelected || cloneVmSelected;
+  const desktopTransportChoiceVisible =
+    createSourceSupportsDesktopTransportChoice(selectedSource);
   const lanAccessDisabled = createDraft.networkMode === "dmz";
   const sourceSummary =
     selectedSource?.kind === "snapshot" && selectedSource.snapshot
@@ -264,6 +267,51 @@ export function CreateVmDialog({
           </label>
 
           <p className="empty-copy">{sourceSummary}</p>
+
+          {desktopTransportChoiceVisible ? (
+            <div className="field-shell">
+              <span>Desktop streaming</span>
+              <div className="transport-choice-grid">
+                <label
+                  className={`transport-choice ${createDraft.desktopTransport === "selkies" ? "transport-choice--selected" : ""}`}
+                >
+                  <input
+                    checked={createDraft.desktopTransport === "selkies"}
+                    className="transport-choice__input"
+                    disabled={busy}
+                    name="desktopTransport"
+                    onChange={() => onFieldChange("desktopTransport", "selkies")}
+                    type="radio"
+                    value="selkies"
+                  />
+                  <div className="transport-choice__body">
+                    <strong>Selkies</strong>
+                    <p className="transport-choice__copy">
+                      60fps, needs plenty of CPU/GPU.
+                    </p>
+                  </div>
+                </label>
+
+                <label
+                  className={`transport-choice ${createDraft.desktopTransport === "vnc" ? "transport-choice--selected" : ""}`}
+                >
+                  <input
+                    checked={createDraft.desktopTransport === "vnc"}
+                    className="transport-choice__input"
+                    disabled={busy}
+                    name="desktopTransport"
+                    onChange={() => onFieldChange("desktopTransport", "vnc")}
+                    type="radio"
+                    value="vnc"
+                  />
+                  <div className="transport-choice__body">
+                    <strong>VNC</strong>
+                    <p className="transport-choice__copy">Slow but proven.</p>
+                  </div>
+                </label>
+              </div>
+            </div>
+          ) : null}
 
           {cloneSourceRunning ? (
             <label

@@ -19,6 +19,13 @@ flox activate -d . -- pnpm start
 
 Use a Linux host with working Incus VM support.
 
+For local development on macOS, start Colima with the Incus runtime first:
+
+```bash
+brew install colima
+colima start --runtime incus
+```
+
 Flox provides the repo-local toolchain, including `node`, `pnpm`, `incus`, `incusd`, `caddy`, and `qemu_kvm`.
 
 The host OS still needs the standard VM helpers installed in normal system locations:
@@ -85,11 +92,13 @@ mv data/incus-state.json data/incus-state.json.bak
 
 When the JSON state file is missing, Parallaize will create a fresh state with a seeded template that points at `images:ubuntu/noble/desktop`.
 
-## Set an explicit guest VNC port
+## Set explicit guest desktop ports and Selkies relay config
 
 Set `PARALLAIZE_GUEST_VNC_PORT=5900` explicitly before starting the app if you want the guest VNC port pinned in your runtime env.
 
-That matches the checked-in env example and the cloud-init VNC service wiring.
+Set `PARALLAIZE_GUEST_SELKIES_PORT=6080` as well when you want the guest Selkies port pinned in the same way.
+
+That matches the checked-in env example and the guest bootstrap wiring.
 
 If you routinely hit Vite or Node watcher limits inside guests, you can also raise the default guest inotify caps from the control-plane env.
 
@@ -99,10 +108,46 @@ Use admin auth as well:
 export PARALLAIZE_ADMIN_USERNAME=admin
 export PARALLAIZE_ADMIN_PASSWORD=change-me
 export PARALLAIZE_GUEST_VNC_PORT=5900
+export PARALLAIZE_GUEST_SELKIES_PORT=6080
 export PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=localhost
 export PARALLAIZE_GUEST_INOTIFY_MAX_USER_WATCHES=1048576
 export PARALLAIZE_GUEST_INOTIFY_MAX_USER_INSTANCES=2048
 ```
+
+Important Selkies expectation:
+
+- Access through `127.0.0.1`, a same-host browser, or other simple bridged paths can work with no extra WebRTC configuration.
+- Access through a reverse proxy, across NAT, or from remote clients is not predictable unless you give the guest Selkies runtime explicit STUN and usually TURN settings.
+- Parallaize now forwards these host env vars into each guest bootstrap and later repair/restart path:
+  - `PARALLAIZE_SELKIES_STUN_HOST`
+  - `PARALLAIZE_SELKIES_STUN_PORT`
+  - `PARALLAIZE_SELKIES_TURN_HOST`
+  - `PARALLAIZE_SELKIES_TURN_PORT`
+  - `PARALLAIZE_SELKIES_TURN_PROTOCOL`
+  - `PARALLAIZE_SELKIES_TURN_TLS`
+  - `PARALLAIZE_SELKIES_TURN_SHARED_SECRET`
+  - `PARALLAIZE_SELKIES_TURN_USERNAME`
+  - `PARALLAIZE_SELKIES_TURN_PASSWORD`
+  - `PARALLAIZE_SELKIES_TURN_REST_URI`
+  - `PARALLAIZE_SELKIES_TURN_REST_USERNAME`
+  - `PARALLAIZE_SELKIES_TURN_REST_USERNAME_AUTH_HEADER`
+  - `PARALLAIZE_SELKIES_TURN_REST_PROTOCOL_HEADER`
+  - `PARALLAIZE_SELKIES_TURN_REST_TLS_HEADER`
+
+Minimal static TURN example:
+
+```bash
+export PARALLAIZE_SELKIES_STUN_HOST=stun.example.com
+export PARALLAIZE_SELKIES_STUN_PORT=3478
+export PARALLAIZE_SELKIES_TURN_HOST=turn.example.com
+export PARALLAIZE_SELKIES_TURN_PORT=5349
+export PARALLAIZE_SELKIES_TURN_PROTOCOL=tcp
+export PARALLAIZE_SELKIES_TURN_TLS=true
+export PARALLAIZE_SELKIES_TURN_USERNAME=turn-user
+export PARALLAIZE_SELKIES_TURN_PASSWORD=change-me
+```
+
+If your TURN service issues short-lived credentials through a REST helper instead, set the `PARALLAIZE_SELKIES_TURN_REST_*` values instead of static username/password secrets.
 
 Optional Incus tuning:
 
@@ -171,6 +216,9 @@ Caddy fronts:
 - noVNC websocket upgrades at `/api/vms/:id/vnc`
 - Forwarded guest services at `/vm/:id/forwards/:forwardId/`
 - Hostname-based forwarded guest services on `*.localhost` by default when you keep `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=localhost`
+- Selkies guest HTTP/WebSocket traffic when you browse the app through this same front door
+
+If you already run a system Caddy on `:80` or a public hostname, that instance needs equivalent reverse-proxy rules for Parallaize. Leaving the stock Caddy welcome-site config in place will make paths like `/selkies-vm-0001/` return `404`, even when the control plane and guest Selkies service are healthy.
 
 ## Optional PostgreSQL persistence
 
@@ -227,6 +275,47 @@ Notes from the live PostgreSQL-backed run on March 26, 2026:
 - Captured templates can outlive their published `parallaize-template-*` Incus image aliases. The control plane now recovers those creates from the newest compatible template snapshot instead of failing immediately on `Image "..." not found`.
 - Compatibility matters during that recovery. If the newest snapshot was captured from a larger disk than the requested VM size, Parallaize now skips it and uses the newest snapshot that still fits. If none fit, increase the requested disk or recapture the template.
 - On this host, the smoke path exercised the PostgreSQL-backed create, stop, start, and cleanup paths successfully, but host-to-guest HTTP verification remained the step to watch most closely during follow-up debugging.
+
+## Optional live Playwright browser checks
+
+When you want browser-level verification against a real Incus-backed server instead of the mock harness, keep the control plane running in live mode and use the dedicated Playwright entrypoint:
+
+```bash
+flox activate -d . -- pnpm playwright:install
+flox activate -d . -- pnpm test:e2e:live
+```
+
+Defaults:
+
+- `PARALLAIZE_E2E_BASE_URL` defaults to `http://127.0.0.1:3000`
+- the runner looks for a Selkies-capable template automatically
+- two throwaway VMs are created, exercised, and deleted
+
+Useful overrides:
+
+```bash
+PARALLAIZE_E2E_BASE_URL=http://127.0.0.1:3000 \
+PARALLAIZE_E2E_ADMIN_USERNAME=admin \
+PARALLAIZE_E2E_ADMIN_PASSWORD=change-me \
+PARALLAIZE_E2E_TEMPLATE_NAME="Ubuntu Agent Forge" \
+PARALLAIZE_E2E_KEEP_VMS=1 \
+flox activate -d . -- pnpm test:e2e:live
+```
+
+Additional knobs:
+
+- `PARALLAIZE_E2E_TEMPLATE_ID` or `PARALLAIZE_E2E_TEMPLATE_NAME` to pin the launch source
+- `PARALLAIZE_E2E_VM_PREFIX` to control the created VM names
+- `PARALLAIZE_E2E_VM_TIMEOUT_MS` for slow first boots
+- `PARALLAIZE_E2E_RESUME_TIMEOUT_MS` for slower stage/preview reconnects
+- `PARALLAIZE_E2E_DELETE_TIMEOUT_MS` for slower live cleanup
+
+This live runner checks the same four browser flows as the mock Playwright suite, but against real Incus data:
+
+- creating a VM and getting a live Selkies stage session
+- sidebar previews loading for the created VMs
+- the selected VM keeping its sidebar preview active
+- switching between VMs and getting both sessions back on stage
 
 ## Template Prep Checklist
 

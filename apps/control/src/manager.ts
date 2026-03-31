@@ -15,6 +15,7 @@ import type {
   SetVmResolutionInput,
   SnapshotInput,
   UpdateTemplateInput,
+  VmDesktopBridgeVersion,
   UpdateVmForwardedPortsInput,
   UpdateVmInput,
   UpdateVmNetworkInput,
@@ -29,6 +30,7 @@ import type {
   DesktopProvider,
   ProviderMutation,
   VmFileContent,
+  VmPreviewImage,
 } from "./providers.js";
 import type { StateStore } from "./store.js";
 import {
@@ -39,6 +41,7 @@ import {
   emptyResourceTelemetry,
   errorMessage,
   nowIso,
+  resolveVmSessionMaintenanceRefreshMs,
   requireVm,
   normalizeProgressPercent,
   resolveTemplateCreateFallbackSnapshot,
@@ -54,6 +57,7 @@ import {
   createVm,
   deleteTemplate,
   deleteVm,
+  deleteVmSnapshot,
   injectCommand,
   launchVmFromSnapshot,
   reorderVms,
@@ -77,6 +81,7 @@ import {
   getVmDiskUsage,
   getVmFrame,
   getVmLogs,
+  getVmPreviewImage,
   getVmTouchedFiles,
   readVmFile,
 } from "./manager-read-models.js";
@@ -100,6 +105,8 @@ export class DesktopManager {
   private readonly hostRamMb = Math.round(totalmem() / (1024 * 1024));
   private readonly hostDiskGb = detectHostDiskGb();
   private readonly defaultTemplateLaunchSource: string;
+  private readonly vmSessionMaintenanceRefreshMs: number;
+  private lastFullVmSessionRefreshRequestAt = 0;
   private sessionRefreshMode: VmSessionRefreshMode = "none";
   private sessionRefreshInFlight = false;
   private readonly runtime: DesktopManagerRuntime;
@@ -111,6 +118,9 @@ export class DesktopManager {
   ) {
     this.defaultTemplateLaunchSource = resolveDefaultTemplateLaunchSource(
       this.options.defaultTemplateLaunchSource,
+    );
+    this.vmSessionMaintenanceRefreshMs = resolveVmSessionMaintenanceRefreshMs(
+      this.options.vmSessionMaintenanceRefreshMs,
     );
     this.runtime = this.createRuntime();
     reconcileDefaultTemplateLaunchSource(this.runtime);
@@ -177,6 +187,41 @@ export class DesktopManager {
     return getVmDiskUsage(this.runtime, vmId);
   }
 
+  async getVmPreviewImage(vmId: string): Promise<VmPreviewImage> {
+    return getVmPreviewImage(this.runtime, vmId);
+  }
+
+  async getVmDesktopBridgeVersion(
+    vmId: string,
+  ): Promise<VmDesktopBridgeVersion | null> {
+    const state = this.runtime.store.load();
+    const vm = requireVm(state, vmId);
+    this.runtime.ensureActiveProvider(vm);
+
+    return this.provider.readVmDesktopBridgeVersion
+      ? this.provider.readVmDesktopBridgeVersion(vm)
+      : null;
+  }
+
+  async repairVmDesktopBridge(vmId: string): Promise<VmDetail> {
+    const state = this.runtime.store.load();
+    const vm = requireVm(state, vmId);
+    this.runtime.ensureActiveProvider(vm);
+
+    if (!this.provider.repairVmDesktopBridge) {
+      throw new Error("The active provider does not support desktop bridge repair.");
+    }
+
+    const mutation = await this.provider.repairVmDesktopBridge(vm);
+    this.runtime.store.update((draft) => {
+      const current = requireVm(draft, vmId);
+      applyProviderMutation(current, mutation);
+    });
+    this.runtime.publish();
+    this.runtime.requestVmSessionRefresh("missing");
+    return getVmDetail(this.runtime, vmId);
+  }
+
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {
     return getVmFrame(this.runtime, vmId, mode);
   }
@@ -216,6 +261,10 @@ export class DesktopManager {
 
   deleteVm(vmId: string): void {
     deleteVm(this.runtime, vmId);
+  }
+
+  deleteVmSnapshot(vmId: string, snapshotId: string): void {
+    deleteVmSnapshot(this.runtime, vmId, snapshotId);
   }
 
   resizeVm(vmId: string, input: ResizeVmInput): void {
@@ -281,6 +330,9 @@ export class DesktopManager {
       get defaultTemplateLaunchSource() {
         return self.defaultTemplateLaunchSource;
       },
+      get vmSessionMaintenanceRefreshMs() {
+        return self.vmSessionMaintenanceRefreshMs;
+      },
       get hostCpuCount() {
         return self.hostCpuCount;
       },
@@ -295,6 +347,12 @@ export class DesktopManager {
       },
       set hostTelemetry(value) {
         self.hostTelemetry = value;
+      },
+      get lastFullVmSessionRefreshRequestAt() {
+        return self.lastFullVmSessionRefreshRequestAt;
+      },
+      set lastFullVmSessionRefreshRequestAt(value) {
+        self.lastFullVmSessionRefreshRequestAt = value;
       },
       get sessionRefreshInFlight() {
         return self.sessionRefreshInFlight;

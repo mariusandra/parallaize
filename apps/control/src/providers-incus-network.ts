@@ -148,6 +148,26 @@ export function buildVncSession(
   };
 }
 
+export function buildSelkiesSession(
+  host: string | null,
+  port: number,
+  reachable = true,
+): VmSession {
+  return {
+    kind: "selkies",
+    host,
+    port,
+    reachable,
+    webSocketPath: null,
+    browserPath: null,
+    display: host
+      ? reachable
+        ? `${formatNetworkEndpoint(host, port)}`
+        : `${formatNetworkEndpoint(host, port)} pending Selkies`
+      : `guest Selkies on port ${port} pending DHCP`,
+  };
+}
+
 export function describeGuestDnsProfileActivity(mode: VmNetworkMode): string {
   return normalizeVmNetworkMode(mode) === "dmz"
     ? `dns: public resolvers ${PARALLAIZE_DMZ_PUBLIC_DNS_SERVERS.join(", ")}`

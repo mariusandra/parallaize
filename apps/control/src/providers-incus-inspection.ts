@@ -1,3 +1,4 @@
+import { buildGuestDisplayDiscoveryScript } from "./ubuntu-guest-init.js";
 import { formatByteCount } from "./providers-incus-progress.js";
 import type {
   VmDiskUsageSnapshot,
@@ -292,6 +293,45 @@ print(json.dumps({
   "contentBase64": base64.b64encode(content).decode("ascii"),
   "name": os.path.basename(file_path) or "download",
   "path": os.path.abspath(file_path),
+}))
+PY`;
+}
+
+export function buildReadVmPreviewImageScript(): string {
+  return `set -eu
+${buildGuestDisplayDiscoveryScript()}
+DISPLAY_NUMBER="$(find_guest_display_number)"
+AUTH_FILE="$(find_guest_auth_file || true)"
+if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
+  echo "Unable to locate an Xauthority file for the desktop session." >&2
+  exit 1
+fi
+if ! command -v import >/dev/null 2>&1; then
+  echo "Preview capture requires ImageMagick import." >&2
+  exit 1
+fi
+CAPTURE_FILE="$(mktemp /tmp/parallaize-preview-XXXXXX.png)"
+OUTPUT_FILE="$(mktemp /tmp/parallaize-preview-output-XXXXXX.png)"
+cleanup() {
+  rm -f "$CAPTURE_FILE" "$OUTPUT_FILE"
+}
+trap cleanup EXIT
+DISPLAY="$DISPLAY_NUMBER" XAUTHORITY="$AUTH_FILE" HOME="\${HOME:-/root}" import -quiet -display "$DISPLAY_NUMBER" -window root "$CAPTURE_FILE"
+if command -v convert >/dev/null 2>&1; then
+  convert "$CAPTURE_FILE" -strip -resize '960x540>' "$OUTPUT_FILE"
+else
+  cp "$CAPTURE_FILE" "$OUTPUT_FILE"
+fi
+python3 - "$OUTPUT_FILE" <<'PY'
+from pathlib import Path
+import base64
+import json
+import sys
+
+path = Path(sys.argv[1])
+print(json.dumps({
+  "contentBase64": base64.b64encode(path.read_bytes()).decode("ascii"),
+  "contentType": "image/png",
 }))
 PY`;
 }

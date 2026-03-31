@@ -9,7 +9,7 @@ import type {
   VmLogsSnapshot,
   VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
-import type { VmFileContent } from "./providers.js";
+import type { VmFileContent, VmPreviewImage } from "./providers.js";
 import {
   emptyResourceTelemetry,
   nowIso,
@@ -148,6 +148,32 @@ export async function getVmDiskUsage(
   }
 
   return runtime.provider.readVmDiskUsage(vm);
+}
+
+export async function getVmPreviewImage(
+  runtime: DesktopManagerRuntime,
+  vmId: string,
+): Promise<VmPreviewImage> {
+  const state = runtime.store.load();
+  const vm = runtime.requireVm(state, vmId);
+  const template = state.templates.find((entry) => entry.id === vm.templateId) ?? null;
+  const fallbackImage = {
+    content: Buffer.from(runtime.provider.renderFrame(vm, template, "tile"), "utf8"),
+    contentType: "image/svg+xml; charset=utf-8",
+    generatedAt: nowIso(),
+  } satisfies VmPreviewImage;
+
+  if (vm.status !== "running" || !runtime.provider.readVmPreviewImage) {
+    return fallbackImage;
+  }
+
+  runtime.ensureActiveProvider(vm);
+
+  try {
+    return await runtime.provider.readVmPreviewImage(vm);
+  } catch {
+    return fallbackImage;
+  }
 }
 
 export function getVmFrame(

@@ -1,11 +1,28 @@
-import { useRef, type CSSProperties, type DragEvent as ReactDragEvent, type JSX } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent as ReactDragEvent,
+  type JSX,
+  type RefObject,
+} from "react";
 
 import { formatResources } from "../../../packages/shared/src/helpers.js";
 import type { VmInstance, VmPowerAction } from "../../../packages/shared/src/types.js";
 
-import { shouldShowLiveVmPreview } from "./desktopSession.js";
+import {
+  hasBrowserDesktopSession,
+  shouldShowLiveVmPreview,
+} from "./desktopSession.js";
 import { formatThresholdPercent, vmTilePreviewLabel } from "./dashboardHelpers.js";
-import { StaticPatternPreview, StatusBadge } from "./dashboardPrimitives.js";
+import {
+  MirroredStagePreview,
+  PollingImagePreview,
+  StaticPatternPreview,
+  StatusBadge,
+} from "./dashboardPrimitives.js";
+import { readEmbeddedBrowserStreamState } from "./embeddedBrowserStream.js";
 import {
   formatTelemetryPercent,
   joinClassNames,
@@ -13,7 +30,6 @@ import {
   statusClassName,
   TelemetryPanel,
 } from "./dashboardUi.js";
-import { NoVncViewport } from "./NoVncViewport.js";
 
 interface VmTileProps {
   activeCpuThresholdPercent: number;
@@ -22,6 +38,7 @@ interface VmTileProps {
   dragging: boolean;
   inspectorVisible: boolean;
   menuOpen: boolean;
+  mirroredStageFrameRef: RefObject<HTMLIFrameElement | null> | null;
   selected: boolean;
   showLivePreview: boolean;
   vm: VmInstance;
@@ -107,6 +124,7 @@ export function VmTile({
   dragging,
   inspectorVisible,
   menuOpen,
+  mirroredStageFrameRef,
   selected,
   showLivePreview,
   vm,
@@ -127,8 +145,43 @@ export function VmTile({
   onToggleMenu,
 }: VmTileProps): JSX.Element {
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
-  const canShowLivePreview = shouldShowLiveVmPreview(vm, showLivePreview);
-  const previewLabel = vmTilePreviewLabel(vm, showLivePreview);
+  const selkiesPreviewCandidate =
+    vm.session?.kind === "selkies" || vm.desktopTransport === "selkies";
+  const [retainCapturedSelkiesPreview, setRetainCapturedSelkiesPreview] = useState(
+    selkiesPreviewCandidate && selected && showLivePreview && vm.status === "running",
+  );
+
+  useEffect(() => {
+    if (!selkiesPreviewCandidate || !showLivePreview || vm.status !== "running") {
+      setRetainCapturedSelkiesPreview(false);
+      return;
+    }
+
+    if (selected) {
+      setRetainCapturedSelkiesPreview(true);
+    }
+  }, [selected, selkiesPreviewCandidate, showLivePreview, vm.status]);
+
+  const streamReady = useEmbeddedBrowserStreamReady(mirroredStageFrameRef);
+  const canShowLivePreview = shouldShowLiveVmPreview(vm, showLivePreview, selected);
+  const previewLabel = vmTilePreviewLabel(vm, showLivePreview, selected);
+  const preferCapturedSelkiesPreview =
+    canShowLivePreview &&
+    selkiesPreviewCandidate &&
+    (selected || retainCapturedSelkiesPreview);
+  const canShowMirroredBrowserPreview =
+    showLivePreview &&
+    vm.status === "running" &&
+    mirroredStageFrameRef !== null &&
+    !preferCapturedSelkiesPreview;
+  const canShowCapturedBrowserPreview =
+    canShowLivePreview &&
+    hasBrowserDesktopSession(vm.session) &&
+    !canShowMirroredBrowserPreview;
+  const showStreamingBadge = vm.status === "running" && streamReady;
+  const previewImagePath = canShowCapturedBrowserPreview
+    ? `/api/vms/${encodeURIComponent(vm.id)}/preview?frameRevision=${vm.frameRevision}`
+    : null;
   const compactCpuPercent = compactVmCpuPercent(vm);
   const showMutedPreviewStatus =
     vm.status === "running" && compactCpuPercent <= activeCpuThresholdPercent;
@@ -317,20 +370,26 @@ export function VmTile({
           title={compactStatusTitle}
           onClick={() => onOpen(vm.id)}
         >
+          <span className="vm-tile__open-hitbox" aria-hidden="true" />
           <div className="vm-tile__compact-preview">
-            {canShowLivePreview && vm.session?.webSocketPath ? (
-              <NoVncViewport
-                className="vm-tile__viewport"
-                surfaceClassName="vm-tile__canvas"
-                webSocketPath={vm.session.webSocketPath}
-                viewportMode="scale"
-                viewOnly
-                showHeader={false}
-                statusMode="hidden"
+            {canShowMirroredBrowserPreview ? (
+              <MirroredStagePreview
+                label={`${vm.name} live preview`}
+                sourceFrameRef={mirroredStageFrameRef!}
+              />
+            ) : canShowCapturedBrowserPreview ? (
+              <CapturedBrowserPreview
+                fallbackFrameRef={mirroredStageFrameRef}
+                freezeFallback={!selected}
+                label={`${vm.name} live preview`}
+                src={previewImagePath!}
               />
             ) : (
               <StaticPatternPreview vm={vm} variant="tile" />
             )}
+            {showStreamingBadge ? (
+              <span className="vm-tile__preview-badge">Streaming</span>
+            ) : null}
           </div>
           <span
             className={joinClassNames(
@@ -370,18 +429,41 @@ export function VmTile({
       onDrop={(event) => onDrop(vm.id, event)}
     >
       <button className="vm-tile__open" type="button" onClick={() => onOpen(vm.id)}>
+        <span className="vm-tile__open-hitbox" aria-hidden="true" />
         <div className="vm-tile__preview">
-          {canShowLivePreview && vm.session?.webSocketPath ? (
+          {canShowMirroredBrowserPreview ? (
             <>
-              <NoVncViewport
-                className="vm-tile__viewport"
-                hideConnectedOverlayStatus
-                surfaceClassName="vm-tile__canvas"
-                webSocketPath={vm.session.webSocketPath}
-                viewportMode="scale"
-                viewOnly
-                showHeader={false}
-                statusMode="overlay"
+              <MirroredStagePreview
+                label={`${vm.name} live preview`}
+                sourceFrameRef={mirroredStageFrameRef!}
+              />
+              <span
+                className={joinClassNames(
+                  "vm-tile__compact-status",
+                  "vm-tile__preview-status",
+                  statusClassName(vm.status),
+                  showMutedPreviewStatus ? "vm-tile__compact-status--muted" : "",
+                )}
+                style={
+                  {
+                    "--vm-compact-cpu-color": previewStatusColor ?? undefined,
+                  } as CSSProperties
+                }
+                title={
+                  vm.status === "running"
+                    ? `CPU ${formatTelemetryPercent(vm.telemetry?.cpuPercent)}`
+                    : undefined
+                }
+                aria-hidden="true"
+              />
+            </>
+          ) : canShowCapturedBrowserPreview ? (
+            <>
+              <CapturedBrowserPreview
+                fallbackFrameRef={mirroredStageFrameRef}
+                freezeFallback={!selected}
+                label={`${vm.name} live preview`}
+                src={previewImagePath!}
               />
               <span
                 className={joinClassNames(
@@ -428,6 +510,9 @@ export function VmTile({
               />
             </>
           )}
+          {showStreamingBadge ? (
+            <span className="vm-tile__preview-badge">Streaming</span>
+          ) : null}
         </div>
 
         <div className="vm-tile__body">
@@ -458,6 +543,95 @@ function compactVmCpuPercent(vm: VmInstance): number {
   }
 
   return Math.max(0, Math.min(100, Math.round(rawPercent)));
+}
+
+function CapturedBrowserPreview({
+  fallbackFrameRef,
+  freezeFallback,
+  label,
+  src,
+}: {
+  fallbackFrameRef: RefObject<HTMLIFrameElement | null> | null;
+  freezeFallback: boolean;
+  label: string;
+  src: string;
+}): JSX.Element {
+  const [imageReady, setImageReady] = useState(false);
+
+  useEffect(() => {
+    setImageReady(false);
+  }, [src]);
+
+  return (
+    <div className="vm-tile__preview-stack">
+      {!imageReady && fallbackFrameRef ? (
+        <MirroredStagePreview
+          label={label}
+          paused={freezeFallback}
+          sourceFrameRef={fallbackFrameRef}
+        />
+      ) : null}
+      <PollingImagePreview
+        label={label}
+        src={src}
+        onLoad={() => {
+          setImageReady(true);
+        }}
+      />
+    </div>
+  );
+}
+
+function useEmbeddedBrowserStreamReady(
+  frameRef: RefObject<HTMLIFrameElement | null> | null,
+): boolean {
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    if (!frameRef) {
+      setReady(false);
+      return;
+    }
+
+    let trackedFrame: HTMLIFrameElement | null = null;
+
+    const syncReady = (): void => {
+      const nextState = readEmbeddedBrowserStreamState(frameRef.current);
+      const nextReady = nextState?.ready ?? null;
+
+      if (nextReady === null) {
+        return;
+      }
+
+      setReady((current) => (current === nextReady ? current : nextReady));
+    };
+
+    const attachLoadListener = (): void => {
+      const nextFrame = frameRef.current;
+
+      if (trackedFrame === nextFrame) {
+        return;
+      }
+
+      trackedFrame?.removeEventListener("load", syncReady);
+      trackedFrame = nextFrame;
+      trackedFrame?.addEventListener("load", syncReady);
+    };
+
+    attachLoadListener();
+    syncReady();
+    const pollId = window.setInterval(() => {
+      attachLoadListener();
+      syncReady();
+    }, 250);
+
+    return () => {
+      window.clearInterval(pollId);
+      trackedFrame?.removeEventListener("load", syncReady);
+    };
+  }, [frameRef]);
+
+  return ready;
 }
 
 function compactVmCpuColor(percent: number): string {

@@ -4,6 +4,8 @@ import { posix as pathPosix } from "node:path";
 import {
   describeVmNetworkMode,
   minimumCreateDiskGb,
+  normalizeTemplateDesktopTransport,
+  normalizeVmDesktopTransport,
   normalizeVmNetworkMode,
   slugify,
 } from "../../../packages/shared/src/helpers.js";
@@ -21,6 +23,7 @@ import type {
   TemplateHistoryEntry,
   TemplateProvenance,
   VmCommandResult,
+  VmDesktopTransport,
   VmDetail,
   VmInstance,
   VmNetworkMode,
@@ -40,12 +43,14 @@ const MAX_COMMAND_RESULTS = 6;
 const MAX_JOBS = 20;
 const MAX_TELEMETRY_SAMPLES = 72;
 const QUEUED_PROGRESS_PERCENT = 6;
+export const DEFAULT_VM_SESSION_MAINTENANCE_REFRESH_MS = 60_000;
 
 export type VmSessionRefreshMode = "none" | "missing" | "all";
 
 export interface DesktopManagerOptions {
   forwardedServiceHostBase?: string | null;
   defaultTemplateLaunchSource?: string | null;
+  vmSessionMaintenanceRefreshMs?: number | null;
 }
 
 export type JobProgressReporter = (message: string, progressPercent: number | null) => void;
@@ -58,8 +63,10 @@ export interface DesktopManagerRuntime {
   readonly options: DesktopManagerOptions;
   readonly provider: DesktopProvider;
   readonly store: StateStore;
+  readonly vmSessionMaintenanceRefreshMs: number;
   readonly vmTelemetry: Map<string, ResourceTelemetry>;
   hostTelemetry: ResourceTelemetry;
+  lastFullVmSessionRefreshRequestAt: number;
   sessionRefreshInFlight: boolean;
   sessionRefreshMode: VmSessionRefreshMode;
   createVmWithTemplateRecovery(
@@ -97,12 +104,20 @@ export function buildVmRecord(
   resources: CreateVmInput["resources"],
   forwardedPorts: TemplatePortForward[],
   networkMode: VmNetworkMode,
+  desktopTransport: VmDesktopTransport | null | undefined,
   provider: ProviderState["kind"],
   status: VmInstance["status"],
   forwardedServiceHostBase: string | null,
 ): VmInstance {
   const now = nowIso();
   const id = nextId(state, "vm");
+  const defaultDesktopTransport = normalizeTemplateDesktopTransport(
+    template.defaultDesktopTransport,
+  );
+  const resolvedDesktopTransport =
+    provider === "mock"
+      ? null
+      : normalizeVmDesktopTransport(desktopTransport ?? defaultDesktopTransport);
 
   return {
     id,
@@ -122,11 +137,15 @@ export function buildVmRecord(
     screenSeed: state.sequence * 47,
     activeWindow: "editor",
     workspacePath: provider === "mock" ? `/srv/workspaces/${slugify(name)}` : "/root",
+    desktopTransport: resolvedDesktopTransport ?? undefined,
     networkMode,
     session: provider === "mock" ? buildSyntheticSession() : null,
+    desktopReadyAt: null,
+    desktopReadyMs: null,
     forwardedPorts: buildVmForwardedPorts(id, forwardedPorts, forwardedServiceHostBase),
     activityLog: [
       `template: ${template.name}`,
+      provider === "mock" ? "desktop: synthetic" : `desktop: ${resolvedDesktopTransport}`,
       `network: ${describeVmNetworkMode(networkMode)}`,
       `status: ${status}`,
     ],
@@ -185,6 +204,16 @@ export function normalizeProgressPercent(value: number | null): number | null {
   return Math.max(0, Math.min(100, rounded));
 }
 
+export function resolveVmSessionMaintenanceRefreshMs(
+  value: number | null | undefined,
+): number {
+  if (!Number.isFinite(value) || value == null || value <= 0) {
+    return DEFAULT_VM_SESSION_MAINTENANCE_REFRESH_MS;
+  }
+
+  return Math.max(1, Math.round(value));
+}
+
 export function nextId(state: AppState, prefix: string): string {
   const value = String(state.sequence).padStart(4, "0");
   state.sequence += 1;
@@ -219,6 +248,14 @@ export function applyProviderMutation(vm: VmInstance, mutation: ProviderMutation
     vm.session = enrichVmSession(vm.id, mutation.session ?? null);
   }
 
+  if ("desktopReadyAt" in mutation) {
+    vm.desktopReadyAt = mutation.desktopReadyAt ?? null;
+  }
+
+  if ("desktopReadyMs" in mutation) {
+    vm.desktopReadyMs = mutation.desktopReadyMs ?? null;
+  }
+
   appendManyActivity(vm, mutation.activity);
 
   if (mutation.commandResult) {
@@ -250,7 +287,7 @@ export function appendCommandResult(vm: VmInstance, entry: VmCommandResult): voi
 export function hasReachableVncSession(session: VmInstance["session"]): boolean {
   return Boolean(
     session &&
-      session.kind === "vnc" &&
+      (session.kind === "vnc" || session.kind === "selkies") &&
       session.reachable !== false &&
       session.host &&
       session.port,
@@ -541,6 +578,7 @@ export function buildOrphanedSnapshotTemplate(
     launchSource: defaultTemplateLaunchSource,
     defaultResources: { ...snapshot.resources },
     defaultForwardedPorts: [],
+    defaultDesktopTransport: "selkies",
     initCommands: [],
     tags: ["orphaned"],
     notes: ["Recovered from snapshot metadata after template deletion."],
@@ -775,10 +813,22 @@ export function enrichVmSession(
     return null;
   }
 
-  if (session.kind !== "vnc") {
+  if (session.kind === "synthetic") {
     return {
       ...session,
       browserPath: null,
+      webSocketPath: null,
+    };
+  }
+
+  if (session.kind === "selkies") {
+    return {
+      ...session,
+      browserPath:
+        session.browserPath ??
+        (session.reachable !== false && session.host && session.port
+          ? buildSelkiesBrowserPath(vmId)
+          : null),
       webSocketPath: null,
     };
   }
@@ -801,7 +851,7 @@ export function cloneVmSession(session: VmInstance["session"]): VmInstance["sess
     return null;
   }
 
-  if (session.kind === "vnc") {
+  if (session.kind === "vnc" || session.kind === "selkies") {
     return null;
   }
 
@@ -890,6 +940,10 @@ export function sameProviderState(left: ProviderState, right: ProviderState): bo
 
 export function buildVncSocketPath(vmId: string): string {
   return `/api/vms/${vmId}/vnc`;
+}
+
+export function buildSelkiesBrowserPath(vmId: string): string {
+  return `/selkies-${vmId}/`;
 }
 
 export function buildVmBrowserPath(vmId: string): string {

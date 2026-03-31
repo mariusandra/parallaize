@@ -5,3 +5,4 @@ artifacts/
 tmp/
 data/*.json
 !data/.gitkeep
+data/cache

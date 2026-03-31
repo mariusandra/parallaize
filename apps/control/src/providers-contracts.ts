@@ -3,6 +3,7 @@ import type {
   ProviderState,
   ResourceSpec,
   Snapshot,
+  VmDesktopBridgeVersion,
   VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmFileEntry,
@@ -15,12 +16,15 @@ import type {
   VmTouchedFilesSnapshot,
   VmWindow,
 } from "../../../packages/shared/src/types.js";
+import type { MockDesktopTransport } from "./mock-selkies.js";
 import {
   DEFAULT_GUEST_HOME,
   type GuestDesktopBootstrapRepairProfile,
+  type GuestSelkiesRtcConfig,
 } from "./ubuntu-guest-init.js";
 
 export const DEFAULT_GUEST_VNC_PORT = 5900;
+export const DEFAULT_GUEST_SELKIES_PORT = 6080;
 export const DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES = 1_048_576;
 export const DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES = 2_048;
 export const DEFAULT_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS = 30_000;
@@ -73,7 +77,11 @@ export interface CaptureTemplateTarget {
 export interface CreateProviderOptions {
   project?: string;
   storagePool?: string;
+  selkiesHostCacheDir?: string;
+  mockDesktopTransport?: MockDesktopTransport;
   guestVncPort?: number;
+  guestSelkiesPort?: number;
+  guestSelkiesRtcConfig?: GuestSelkiesRtcConfig;
   guestInotifyMaxUserWatches?: number;
   guestInotifyMaxUserInstances?: number;
   guestDesktopBootstrapRetryMs?: number;
@@ -113,6 +121,12 @@ export interface VmFileContent {
   path: string;
 }
 
+export interface VmPreviewImage {
+  content: Buffer;
+  contentType: string;
+  generatedAt: string;
+}
+
 export type IncusImageCompression =
   | "bzip2"
   | "gzip"
@@ -147,6 +161,7 @@ export interface DesktopProvider {
   setNetworkMode(vm: VmInstance, networkMode: VmNetworkMode): Promise<ProviderMutation>;
   setDisplayResolution(vm: VmInstance, width: number, height: number): Promise<void>;
   snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot>;
+  deleteVmSnapshot(vm: VmInstance, snapshot: Snapshot): Promise<void>;
   launchVmFromSnapshot(
     snapshot: Snapshot,
     targetVm: VmInstance,
@@ -168,9 +183,12 @@ export interface DesktopProvider {
     vm: VmInstance,
     listeners: VmLogsStreamListeners,
   ): VmLogsStreamHandle;
+  readVmDesktopBridgeVersion?(vm: VmInstance): Promise<VmDesktopBridgeVersion | null>;
+  repairVmDesktopBridge?(vm: VmInstance): Promise<ProviderMutation>;
   readVmDiskUsage?(vm: VmInstance): Promise<VmDiskUsageSnapshot>;
   browseVmFiles(vm: VmInstance, path?: string | null): Promise<VmFileBrowserSnapshot>;
   readVmFile(vm: VmInstance, path: string): Promise<VmFileContent>;
+  readVmPreviewImage?(vm: VmInstance): Promise<VmPreviewImage>;
   readVmTouchedFiles(vm: VmInstance): Promise<VmTouchedFilesSnapshot>;
   tickVm(vm: VmInstance, template: EnvironmentTemplate): ProviderTick | null;
   renderFrame(
@@ -186,6 +204,8 @@ export interface ProviderMutation {
   activeWindow?: VmWindow;
   workspacePath?: string;
   session?: VmSession | null;
+  desktopReadyAt?: string | null;
+  desktopReadyMs?: number | null;
   commandResult?: ProviderCommandResult;
 }
 
@@ -227,10 +247,12 @@ export interface IncusCommandRunner {
   executeStreaming?(
     args: string[],
     listeners?: CommandStreamListeners,
+    options?: CommandExecutionOptions,
   ): Promise<CommandResult>;
   startStreaming?(
     args: string[],
     listeners?: CommandStreamListeners,
+    options?: CommandExecutionOptions,
   ): CommandStreamHandle;
 }
 
@@ -244,6 +266,7 @@ export interface CommandResult {
 
 export interface CommandExecutionOptions {
   timeoutMs?: number;
+  input?: Buffer | string;
 }
 
 export interface CommandStreamListeners {

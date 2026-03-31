@@ -501,6 +501,7 @@
 }
 
 .vm-tile__open {
+  position: relative;
   display: grid;
   grid-template-rows: auto auto;
   gap: 0.7rem;
@@ -511,6 +512,14 @@
   background: transparent;
   padding: 0.7rem;
   text-align: left;
+}
+
+.vm-tile__open-hitbox {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  background: transparent;
 }
 
 .vm-tile__preview,
@@ -531,6 +540,7 @@
 .vm-tile__preview > *,
 .vm-tile__preview .novnc-shell,
 .vm-tile__preview .novnc-surface,
+.vm-tile__browser-frame,
 .vm-tile__preview canvas,
 .workspace-stage__surface > *,
 .workspace-fallback > *,
@@ -542,8 +552,39 @@
 .vm-tile__preview > *,
 .vm-tile__preview .novnc-shell,
 .vm-tile__preview .novnc-surface,
+.vm-tile__browser-frame,
 .vm-tile__preview canvas {
   pointer-events: none;
+}
+
+.vm-tile__browser-frame {
+  border: 0;
+  background: #040608;
+}
+
+.vm-tile__preview img,
+.vm-tile__preview canvas,
+.vm-tile__compact-preview img,
+.vm-tile__compact-preview canvas {
+  display: block;
+  object-fit: cover;
+}
+
+.vm-tile__preview-stack {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.vm-tile__preview-stack > * {
+  position: absolute;
+  inset: 0;
+}
+
+.vm-tile__browser-frame--snapshot-source {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
 }
 
 .pattern-preview {
@@ -625,6 +666,27 @@
   color: rgba(255, 255, 255, 0.88);
 }
 
+.vm-tile__preview-badge {
+  position: absolute;
+  top: 0.45rem;
+  left: 0.45rem;
+  z-index: 2;
+  width: auto;
+  height: auto;
+  border-radius: 999px;
+  background: rgba(8, 11, 14, 0.78);
+  border: 1px solid rgba(125, 211, 199, 0.35);
+  padding: 0.18rem 0.48rem;
+  color: rgba(219, 251, 242, 0.94);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+}
+
 .vm-tile__body {
   display: grid;
   gap: 0.45rem;
@@ -677,6 +739,7 @@
 }
 
 .vm-tile__compact-preview {
+  position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -685,9 +748,18 @@
   contain: layout paint;
 }
 
+.vm-tile__compact-preview .vm-tile__preview-badge {
+  top: 0.28rem;
+  left: 0.28rem;
+  padding: 0.14rem 0.34rem;
+  font-size: 0.48rem;
+  letter-spacing: 0.1em;
+}
+
 .vm-tile__compact-preview > *,
 .vm-tile__compact-preview .novnc-shell,
 .vm-tile__compact-preview .novnc-surface,
+.vm-tile__compact-preview .vm-tile__browser-frame,
 .vm-tile__compact-preview canvas {
   width: 100%;
   height: 100%;

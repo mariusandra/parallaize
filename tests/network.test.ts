@@ -292,6 +292,165 @@ test("forward bridge routes hostname-based forwarded service traffic", async () 
   }
 });
 
+test("Selkies bridge proxies the VM-scoped browser path to the guest web app", async () => {
+  const vmId = "vm-4646";
+  const upstreamServer = createHttpServer((request, response) => {
+    response.writeHead(200, {
+      "content-type": "application/json",
+    });
+    response.end(
+      JSON.stringify({
+        forwardedPrefix: request.headers["x-forwarded-prefix"],
+        routedAs: request.headers["x-parallaize-vm-forward"],
+        url: request.url,
+      }),
+    );
+  });
+  const controlServer = createHttpServer();
+
+  try {
+    upstreamServer.listen(0, "127.0.0.1");
+    await once(upstreamServer, "listening");
+    const upstreamPort = portOf(upstreamServer);
+
+    const bridge = new VmNetworkBridge({
+      getSummary() {
+        return {
+          vms: [],
+        };
+      },
+      getVmDetail(requestedVmId: string) {
+        assert.equal(requestedVmId, vmId);
+        return {
+          vm: {
+            id: vmId,
+            name: "selkies-route-test",
+            status: "running",
+            session: {
+              kind: "selkies",
+              host: "127.0.0.1",
+              port: upstreamPort,
+              webSocketPath: null,
+              browserPath: `/selkies-${vmId}/`,
+              display: `127.0.0.1:${upstreamPort}`,
+            },
+            forwardedPorts: [],
+          },
+        };
+      },
+    } as unknown as DesktopManager);
+
+    controlServer.on("request", (request, response) => {
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
+
+      void bridge.maybeHandleRequest(request, response, url).then((handled) => {
+        if (!handled) {
+          response.writeHead(404);
+          response.end("no route");
+        }
+      });
+    });
+    controlServer.listen(0, "127.0.0.1");
+    await once(controlServer, "listening");
+
+    const { body, statusCode } = await requestText({
+      path: `/selkies-${vmId}/signalling/config?ok=1`,
+      port: portOf(controlServer),
+    });
+
+    assert.equal(statusCode, 200);
+    assert.match(body, /"url":"\/signalling\/config\?ok=1"/);
+    assert.match(body, new RegExp(`"routedAs":"\\/selkies-${vmId}\\/"`));
+    assert.doesNotMatch(body, /forwardedPrefix/);
+  } finally {
+    await closeServer(controlServer);
+    await closeServer(upstreamServer);
+  }
+});
+
+test("forward bridge still works for Selkies-backed VMs", async () => {
+  const vmId = "vm-4747";
+  const upstreamServer = createHttpServer((request, response) => {
+    assert.equal(request.url, "/status?ok=1");
+    response.writeHead(200, {
+      "content-type": "application/json",
+    });
+    response.end(
+      JSON.stringify({
+        routedAs: request.headers["x-parallaize-vm-forward"],
+      }),
+    );
+  });
+  const controlServer = createHttpServer();
+
+  try {
+    upstreamServer.listen(0, "127.0.0.1");
+    await once(upstreamServer, "listening");
+    const upstreamPort = portOf(upstreamServer);
+
+    const bridge = new VmNetworkBridge({
+      getSummary() {
+        return {
+          vms: [],
+        };
+      },
+      getVmDetail(requestedVmId: string) {
+        assert.equal(requestedVmId, vmId);
+        return {
+          vm: {
+            id: vmId,
+            name: "selkies-forward-test",
+            status: "running",
+            session: {
+              kind: "selkies",
+              host: "127.0.0.1",
+              port: 6080,
+              webSocketPath: null,
+              browserPath: `/selkies-${vmId}/`,
+              display: "127.0.0.1:6080",
+            },
+            forwardedPorts: [
+              {
+                id: "port-01",
+                name: "status",
+                guestPort: upstreamPort,
+                protocol: "http",
+                description: "Forwarded status endpoint",
+                publicPath: `/vm/${vmId}/forwards/port-01/`,
+                publicHostname: null,
+              },
+            ],
+          },
+        };
+      },
+    } as unknown as DesktopManager);
+
+    controlServer.on("request", (request, response) => {
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
+
+      void bridge.maybeHandleRequest(request, response, url).then((handled) => {
+        if (!handled) {
+          response.writeHead(404);
+          response.end("no route");
+        }
+      });
+    });
+    controlServer.listen(0, "127.0.0.1");
+    await once(controlServer, "listening");
+
+    const { body, statusCode } = await requestText({
+      path: `/vm/${vmId}/forwards/port-01/status?ok=1`,
+      port: portOf(controlServer),
+    });
+
+    assert.equal(statusCode, 200);
+    assert.match(body, new RegExp(`"routedAs":"\\/vm\\/${vmId}\\/forwards\\/port-01\\/"`));
+  } finally {
+    await closeServer(controlServer);
+    await closeServer(upstreamServer);
+  }
+});
+
 function bufferFromRawData(data: RawData): Buffer {
   if (Buffer.isBuffer(data)) {
     return data;

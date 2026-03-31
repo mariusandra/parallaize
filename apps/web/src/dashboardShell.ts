@@ -1,5 +1,6 @@
 import type {
   SetVmResolutionInput,
+  VmSessionKind,
   VmLogsSnapshot,
 } from "../../../packages/shared/src/types.js";
 
@@ -75,6 +76,15 @@ export interface DesktopResolutionTarget {
 export interface ResolutionRetryState {
   attempts: number;
   key: string;
+}
+
+interface ResolutionDisplayOptions {
+  mode?: DesktopResolutionMode;
+  sessionKind?: VmSessionKind | null | undefined;
+}
+
+interface ViewportScaleLabelOptions {
+  sessionKind?: VmSessionKind | null | undefined;
 }
 
 export type RenameDialogState =
@@ -311,6 +321,19 @@ export function formatViewportScale(scale: number): string {
   return normalized % 1 === 0 ? normalized.toFixed(0) : normalized.toFixed(2).replace(/0$/, "");
 }
 
+export function formatViewportScaleLabel(
+  scale: number,
+  options?: ViewportScaleLabelOptions,
+): string {
+  const normalized = clampDesktopViewportScale(scale);
+
+  if (options?.sessionKind === "selkies") {
+    return `${Math.round(normalized * 100)}%`;
+  }
+
+  return `${formatViewportScale(normalized)}x`;
+}
+
 export function clampSidepanelWidthPreference(width: number): number {
   const roundedWidth = Math.round(width);
 
@@ -328,7 +351,56 @@ export function clampDisplayedSidepanelWidth(width: number, viewportWidth: numbe
   );
 }
 
-export function formatCurrentResolution(state: DesktopResolutionState): string {
+export function isSelkiesViewportManagedResolution(input: {
+  mode: DesktopResolutionMode;
+  sessionKind: VmSessionKind | null | undefined;
+}): boolean {
+  return input.mode === "viewport" && input.sessionKind === "selkies";
+}
+
+export function normalizeBrowserDevicePixelRatio(
+  value: number | null | undefined,
+): number {
+  if (!Number.isFinite(value) || (value ?? 0) <= 0) {
+    return 1;
+  }
+
+  return Number((value ?? 1).toFixed(2));
+}
+
+export function computeSelkiesViewportFallbackScale(
+  scale: number,
+  browserDevicePixelRatio: number,
+): number {
+  const normalizedScale = clampDesktopViewportScale(scale);
+  const normalizedDevicePixelRatio = normalizeBrowserDevicePixelRatio(
+    browserDevicePixelRatio,
+  );
+
+  return Number((normalizedDevicePixelRatio / normalizedScale).toFixed(4));
+}
+
+export function shouldPixelateSelkiesViewport(
+  scale: number,
+  browserDevicePixelRatio: number,
+): boolean {
+  return computeSelkiesViewportFallbackScale(scale, browserDevicePixelRatio) > 1.001;
+}
+
+export function formatCurrentResolution(
+  state: DesktopResolutionState,
+  options?: ResolutionDisplayOptions,
+): string {
+  if (
+    options?.mode &&
+    isSelkiesViewportManagedResolution({
+      mode: options.mode,
+      sessionKind: options.sessionKind,
+    })
+  ) {
+    return "Managed by Selkies";
+  }
+
   if (state.remoteWidth !== null && state.remoteHeight !== null) {
     return `${state.remoteWidth} x ${state.remoteHeight}`;
   }
@@ -347,6 +419,7 @@ export function formatViewportResolution(state: DesktopResolutionState): string 
 export function formatTargetResolution(
   draft: ResolutionDraft,
   state: DesktopResolutionState,
+  options?: ResolutionDisplayOptions,
 ): string {
   if (draft.mode === "fixed") {
     const width = Number(draft.width);

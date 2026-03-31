@@ -79,7 +79,7 @@ export function formatCommandFailure(args: string[], result: CommandResult): str
     result.error?.message ||
     `Command exited with status ${result.status ?? "unknown"}.`;
 
-  if (isGuestAgentUnavailableExecFailure(args, result)) {
+  if (isGuestAgentUnavailableFailure(result) && args[0] === "exec") {
     return buildGuestAgentUnavailableMessage(args[1]);
   }
 
@@ -108,12 +108,11 @@ export function isGuestAgentUnavailableExecFailure(
   args: string[],
   result: CommandResult,
 ): boolean {
-  if (args[0] !== "exec") {
-    return false;
-  }
+  return args[0] === "exec" && isGuestAgentUnavailableFailure(result);
+}
 
+export function isGuestAgentUnavailableFailure(result: CommandResult): boolean {
   const detail = `${result.stderr}\n${result.stdout}\n${result.error?.message ?? ""}`.toLowerCase();
-
   return (
     detail.includes("failed connecting to instance agent") ||
     detail.includes("failed to connect to instance agent") ||
@@ -132,6 +131,13 @@ export function isMissingInstanceFailure(message: string): boolean {
   return (
     message.includes("Instance not found") ||
     message.includes("Failed to fetch instance")
+  );
+}
+
+export function isDeleteAlreadySucceededFailure(message: string): boolean {
+  return (
+    message.includes("A matching non-reusable operation has now succeeded") ||
+    message.includes("matching non-reusable operation has now succeeded")
   );
 }
 

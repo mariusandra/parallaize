@@ -13,6 +13,7 @@ import type {
   VmWindow,
 } from "../../../packages/shared/src/types.js";
 import {
+  type CreateProviderOptions,
   DEFAULT_GUEST_INIT_LOG_PATH,
   VM_CREATE_ALLOCATION_START_PERCENT,
   SNAPSHOT_LAUNCH_COPY_START_PERCENT,
@@ -30,6 +31,7 @@ import {
   type ProviderTick,
   type ProviderVmPowerState,
   type VmFileContent,
+  type VmPreviewImage,
 } from "./providers-contracts.js";
 import {
   buildMockVmDiskUsageSnapshot,
@@ -39,13 +41,20 @@ import {
 } from "./providers-incus-inspection.js";
 import { describeVmNetworkMode } from "./providers-incus-network.js";
 import { buildCommandReply, sleep } from "./providers-incus-command.js";
+import { renderSyntheticFrame } from "./providers-synthetic.js";
 import {
-  buildSyntheticSession,
-  renderSyntheticFrame,
-} from "./providers-synthetic.js";
+  buildMockDesktopSession,
+  type MockDesktopTransport,
+} from "./mock-selkies.js";
 
 export class MockProvider implements DesktopProvider {
-  state: ProviderState = buildMockProviderState();
+  state: ProviderState;
+  private readonly mockDesktopTransport: MockDesktopTransport;
+
+  constructor(options: Pick<CreateProviderOptions, "mockDesktopTransport"> = {}) {
+    this.mockDesktopTransport = options.mockDesktopTransport ?? "synthetic";
+    this.state = buildMockProviderState(this.mockDesktopTransport);
+  }
 
   refreshState(): ProviderState {
     return this.state;
@@ -78,8 +87,8 @@ export class MockProvider implements DesktopProvider {
     return null;
   }
 
-  async refreshVmSession(): Promise<VmSession> {
-    return buildSyntheticSession();
+  async refreshVmSession(vm: VmInstance): Promise<VmSession> {
+    return this.buildSession(vm.id);
   }
 
   async createVm(
@@ -110,7 +119,7 @@ export class MockProvider implements DesktopProvider {
       ],
       activeWindow: "editor",
       workspacePath: `/srv/workspaces/${slugify(vm.name)}`,
-      session: buildSyntheticSession(),
+      session: this.buildSession(vm.id),
     };
   }
 
@@ -136,11 +145,11 @@ export class MockProvider implements DesktopProvider {
       ],
       activeWindow: vm.activeWindow,
       workspacePath: `/srv/workspaces/${slugify(targetVm.name)}`,
-      session: buildSyntheticSession(),
+      session: this.buildSession(targetVm.id),
     };
   }
 
-  async startVm(): Promise<ProviderMutation> {
+  async startVm(vm: VmInstance): Promise<ProviderMutation> {
     return {
       lastAction: "Workspace resumed",
       activity: [
@@ -148,11 +157,11 @@ export class MockProvider implements DesktopProvider {
         "agent: session heartbeat restored",
       ],
       activeWindow: "terminal",
-      session: buildSyntheticSession(),
+      session: this.buildSession(vm.id),
     };
   }
 
-  async stopVm(): Promise<ProviderMutation> {
+  async stopVm(vm: VmInstance): Promise<ProviderMutation> {
     return {
       lastAction: "Workspace stopped",
       activity: [
@@ -160,7 +169,7 @@ export class MockProvider implements DesktopProvider {
         "session: desktop marked inactive",
       ],
       activeWindow: "logs",
-      session: buildSyntheticSession(),
+      session: this.buildSession(vm.id),
     };
   }
 
@@ -183,7 +192,7 @@ export class MockProvider implements DesktopProvider {
         `limits: cpu=${resources.cpu} ram=${resources.ramMb}MB disk=${resources.diskGb}GB`,
       ],
       activeWindow: "logs",
-      session: buildSyntheticSession(),
+      session: this.buildSession(vm.id),
     };
   }
 
@@ -195,7 +204,7 @@ export class MockProvider implements DesktopProvider {
       lastAction: `Network mode updated for ${vm.name}`,
       activity: [`network: ${describeVmNetworkMode(networkMode)}`],
       activeWindow: "logs",
-      session: vm.session,
+      session: vm.session ?? this.buildSession(vm.id),
     };
   }
 
@@ -214,6 +223,11 @@ export class MockProvider implements DesktopProvider {
       providerRef: `mock://snapshots/${slugify(vm.name)}-${slugify(label)}`,
       summary: `Snapshot ${label} captured from ${vm.name}.`,
     };
+  }
+
+  async deleteVmSnapshot(vm: VmInstance, snapshot: Snapshot): Promise<void> {
+    void vm;
+    void snapshot;
   }
 
   async launchVmFromSnapshot(
@@ -237,7 +251,7 @@ export class MockProvider implements DesktopProvider {
       ],
       activeWindow: "terminal",
       workspacePath: `/srv/workspaces/${slugify(targetVm.name)}`,
-      session: buildSyntheticSession(),
+      session: this.buildSession(targetVm.id),
     };
   }
 
@@ -253,7 +267,7 @@ export class MockProvider implements DesktopProvider {
       ],
       activeWindow: "terminal",
       workspacePath: vm.workspacePath,
-      session: buildSyntheticSession(),
+      session: this.buildSession(vm.id),
     };
   }
 
@@ -286,7 +300,7 @@ export class MockProvider implements DesktopProvider {
       activity: [`$ ${trimmed}`, reply],
       activeWindow: "terminal",
       workspacePath: nextWorkspacePath,
-      session: buildSyntheticSession(),
+      session: this.buildSession(vm.id),
       commandResult: {
         command: trimmed,
         output: [reply],
@@ -343,6 +357,14 @@ export class MockProvider implements DesktopProvider {
     return buildMockVmTouchedFilesSnapshot(vm);
   }
 
+  async readVmPreviewImage(vm: VmInstance): Promise<VmPreviewImage> {
+    return {
+      content: Buffer.from(this.renderFrame(vm, null, "tile"), "utf8"),
+      contentType: "image/svg+xml; charset=utf-8",
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
   tickVm(vm: VmInstance, template: EnvironmentTemplate): ProviderTick | null {
     if (vm.status !== "running") {
       return null;
@@ -367,18 +389,26 @@ export class MockProvider implements DesktopProvider {
   ): string {
     return renderSyntheticFrame(vm, template, mode, this.state.detail);
   }
+
+  private buildSession(vmId: string): VmSession {
+    return buildMockDesktopSession(vmId, this.mockDesktopTransport);
+  }
 }
 
-function buildMockProviderState(): ProviderState {
+function buildMockProviderState(
+  desktopTransport: MockDesktopTransport,
+): ProviderState {
   return {
     kind: "mock",
     available: true,
     detail:
-      "Demo mode is active. Actions update persisted state and synthetic desktop frames.",
+      desktopTransport === "selkies"
+        ? "Demo mode is active. Actions update persisted state and mock Selkies browser sessions."
+        : "Demo mode is active. Actions update persisted state and synthetic desktop frames.",
     hostStatus: "ready",
     binaryPath: null,
     project: null,
-    desktopTransport: "synthetic",
+    desktopTransport: desktopTransport === "selkies" ? "novnc" : "synthetic",
     nextSteps: [],
   };
 }

@@ -37,6 +37,11 @@ interface WorkspaceFallbackSurfaceProps {
   detail: VmDetail;
 }
 
+interface WorkspaceSessionRelinquishedSurfaceProps {
+  detail: VmDetail;
+  onReconnect: () => void;
+}
+
 interface EmptyWorkspaceStageProps {
   onCreate: () => void;
   summary: DashboardSummary;
@@ -195,6 +200,30 @@ export function WorkspaceFallbackSurface({
             {workspaceFallbackTitle(detail)}
           </h2>
           <p>{desktopFallbackMessage(detail)}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function WorkspaceSessionRelinquishedSurface({
+  detail,
+  onReconnect,
+}: WorkspaceSessionRelinquishedSurfaceProps): JSX.Element {
+  return (
+    <div className="workspace-fallback">
+      <StaticPatternPreview vm={detail.vm} variant="stage" />
+      <div className="workspace-fallback__copy">
+        <div className="workspace-fallback__panel">
+          <span className="surface-pill surface-pill--busy">Opened elsewhere</span>
+          <h2 className="workspace-fallback__title">Opened in another tab</h2>
+          <p>
+            This workspace is already driving a live Selkies session in another dashboard
+            tab. Reconnect here to take over the live desktop.
+          </p>
+          <button className="button button--secondary" type="button" onClick={onReconnect}>
+            Reconnect here
+          </button>
         </div>
       </div>
     </div>

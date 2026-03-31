@@ -2,6 +2,7 @@ import type {
   DashboardMetrics,
   EnvironmentTemplate,
   ResourceSpec,
+  VmDesktopTransport,
   VmInstance,
   VmNetworkMode,
 } from "./types.js";
@@ -28,6 +29,18 @@ export function describeVmNetworkMode(
   mode: VmNetworkMode | null | undefined,
 ): string {
   return normalizeVmNetworkMode(mode) === "dmz" ? "dmz" : "default bridge";
+}
+
+export function normalizeTemplateDesktopTransport(
+  transport: VmDesktopTransport | null | undefined,
+): VmDesktopTransport {
+  return transport === "vnc" ? "vnc" : "selkies";
+}
+
+export function normalizeVmDesktopTransport(
+  transport: VmDesktopTransport | null | undefined,
+): VmDesktopTransport {
+  return transport === "selkies" ? "selkies" : "vnc";
 }
 
 export function minimumCreateDiskGb(

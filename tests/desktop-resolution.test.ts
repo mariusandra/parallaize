@@ -12,6 +12,7 @@ import {
   parseResolutionControlLease,
   resolveResolutionRequest,
   resolutionControlLeaseTtlMs,
+  shouldDriveGuestResolution,
   shouldScheduleResolutionRepair,
   type ResolutionRequest,
 } from "../apps/web/src/desktopResolution.js";
@@ -180,6 +181,30 @@ test("shouldScheduleResolutionRepair returns false while requests are still queu
       targetKey: "vm-0001:1352x1233",
     }),
     false,
+  );
+});
+
+test("shouldDriveGuestResolution leaves Selkies viewport resize to the native bridge", () => {
+  assert.equal(
+    shouldDriveGuestResolution({
+      mode: "viewport",
+      sessionKind: "selkies",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldDriveGuestResolution({
+      mode: "viewport",
+      sessionKind: "vnc",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDriveGuestResolution({
+      mode: "fixed",
+      sessionKind: "selkies",
+    }),
+    true,
   );
 });
 

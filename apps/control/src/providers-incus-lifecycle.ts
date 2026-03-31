@@ -1,8 +1,9 @@
 import { slugify } from "../../../packages/shared/src/helpers.js";
-import type { VmInstance } from "../../../packages/shared/src/types.js";
+import type { VmDesktopTransport, VmInstance } from "../../../packages/shared/src/types.js";
 import {
   buildEnsureGuestDesktopBootstrapScript,
   buildGuestDisplayDiscoveryScript,
+  type GuestSelkiesRtcConfig,
 } from "./ubuntu-guest-init.js";
 import { DEFAULT_GUEST_INIT_LOG_PATH } from "./providers-contracts.js";
 
@@ -37,11 +38,22 @@ export function buildSetDisplayResolutionScript(
   height: number,
   port: number,
   guestWallpaperName?: string,
+  transport: VmDesktopTransport = "vnc",
+  selkiesPort = port,
+  selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
 ): string {
   return `set -eu
 WIDTH=${width}
 HEIGHT=${height}
-${buildEnsureGuestDesktopBootstrapScript(port, true, guestWallpaperName)}
+${buildEnsureGuestDesktopBootstrapScript(
+    port,
+    true,
+    guestWallpaperName,
+    "standard",
+    transport,
+    selkiesPort,
+    selkiesRtcConfig,
+  )}
 ${buildGuestDisplayDiscoveryScript()}
 ATTEMPT=0
 AUTH_FILE=""

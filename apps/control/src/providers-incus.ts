@@ -1,10 +1,17 @@
+import { createWriteStream } from "node:fs";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { cpus, freemem, loadavg, totalmem } from "node:os";
+import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import type {
   EnvironmentTemplate,
   ProviderState,
   ResourceSpec,
   Snapshot,
+  VmDesktopBridgeVersion,
   VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmFileEntry,
@@ -13,10 +20,16 @@ import type {
   VmInstance,
   VmLogsSnapshot,
   VmNetworkMode,
+  VmDesktopTransport,
   VmSession,
 } from "../../../packages/shared/src/types.js";
 import {
+  buildExpectedGuestDesktopBridgeVersionRecord,
   buildEnsureGuestDesktopBootstrapScript,
+  DEFAULT_GUEST_DESKTOP_BRIDGE_VERSION_FILE,
+  DEFAULT_GUEST_SELKIES_ARCHIVE_URL,
+  DEFAULT_GUEST_SELKIES_VERSION,
+  buildGuestSelkiesCloudInit,
   buildGuestVncCloudInit,
   type GuestDesktopBootstrapRepairProfile,
 } from "./ubuntu-guest-init.js";
@@ -28,6 +41,7 @@ import {
   DEFAULT_GUEST_INIT_LOG_PATH,
   DEFAULT_GUEST_INOTIFY_MAX_USER_INSTANCES,
   DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES,
+  DEFAULT_GUEST_SELKIES_PORT,
   DEFAULT_GUEST_VNC_PORT,
   DEFAULT_GUEST_WORKSPACE,
   DEFAULT_TEMPLATE_PUBLISH_HEARTBEAT_MS,
@@ -57,6 +71,7 @@ import {
 import type {
   CaptureTemplateProgressReporter,
   CaptureTemplateTarget,
+  CommandExecutionOptions,
   CommandResult,
   CommandStreamListeners,
   CreateProviderOptions,
@@ -85,6 +100,7 @@ import type {
   VmFileContent,
   VmLogsStreamHandle,
   VmLogsStreamListeners,
+  VmPreviewImage,
 } from "./providers-contracts.js";
 import {
   buildIncusProviderState,
@@ -95,6 +111,7 @@ import {
 } from "./providers-incus-host.js";
 import {
   buildBrowseVmFilesScript,
+  buildReadVmPreviewImageScript,
   buildReadVmDiskUsageScript,
   buildReadVmFileScript,
   buildReadVmTouchedFilesScript,
@@ -119,6 +136,7 @@ import {
 import {
   buildDmzAclPayload,
   buildGuestDnsProfileScript,
+  buildSelkiesSession,
   buildVncSession,
   collectHostAclAddresses,
   describeGuestDnsProfileActivity,
@@ -147,9 +165,11 @@ import {
 } from "./providers-incus-progress.js";
 import {
   collectCommandOutput,
+  isDeleteAlreadySucceededFailure,
   errorMessage,
   formatCommandFailure,
   isAlreadyRunningFailure,
+  isGuestAgentUnavailableFailure,
   isGuestAgentUnavailableExecFailure,
   isMissingDeviceConfigFailure,
   isMissingInstanceFailure,
@@ -160,9 +180,31 @@ import {
 import { SpawnIncusCommandRunner } from "./providers-incus-runtime.js";
 import { renderSyntheticFrame } from "./providers-synthetic.js";
 
+const REACHABLE_SELKIES_BOOTSTRAP_RETRY_MS = 5 * 60_000;
+
+interface ResolvedGuestSession {
+  activity: string[];
+  readyMs: number | null;
+  session: VmSession | null;
+}
+
+interface GuestBootstrapAttempt {
+  activity: string[];
+  ok: boolean;
+}
+
+interface HostSelkiesArchiveCacheResult {
+  durationMs: number;
+  hostPath: string;
+  status: "downloaded" | "hit";
+}
+
 export class IncusProvider implements DesktopProvider {
   state: ProviderState;
+  private readonly selkiesHostCacheDir: string | null;
   private readonly guestVncPort: number;
+  private readonly guestSelkiesPort: number;
+  private readonly guestSelkiesRtcConfig: CreateProviderOptions["guestSelkiesRtcConfig"] | null;
   private readonly guestInotifyMaxUserWatches: number;
   private readonly guestInotifyMaxUserInstances: number;
   private readonly guestDesktopBootstrapRetryMs: number;
@@ -180,6 +222,16 @@ export class IncusProvider implements DesktopProvider {
   private telemetryInstances = new Map<string, IncusListInstance>();
   private readonly vmCpuUsage = new Map<string, { capturedAt: number; usage: number }>();
   private readonly guestDesktopBootstrapAttemptAt = new Map<string, number>();
+  private readonly reachableSelkiesBootstrapAttemptAt = new Map<string, number>();
+  private readonly previewImageCache = new Map<
+    string,
+    {
+      capturedAt: number;
+      image: VmPreviewImage;
+    }
+  >();
+  private readonly previewImageInFlight = new Map<string, Promise<VmPreviewImage>>();
+  private selkiesHostArchivePromise: Promise<HostSelkiesArchiveCacheResult> | null = null;
   private hostNetworkDiagnosticAt = 0;
   private hostNetworkDiagnostic: HostNetworkDiagnostic = {
     status: "unknown",
@@ -197,7 +249,10 @@ export class IncusProvider implements DesktopProvider {
     private readonly incusBinary: string,
     options: CreateProviderOptions,
   ) {
+    this.selkiesHostCacheDir = options.selkiesHostCacheDir ?? null;
     this.guestVncPort = options.guestVncPort ?? DEFAULT_GUEST_VNC_PORT;
+    this.guestSelkiesPort = options.guestSelkiesPort ?? DEFAULT_GUEST_SELKIES_PORT;
+    this.guestSelkiesRtcConfig = options.guestSelkiesRtcConfig ?? null;
     this.guestInotifyMaxUserWatches =
       options.guestInotifyMaxUserWatches ?? DEFAULT_GUEST_INOTIFY_MAX_USER_WATCHES;
     this.guestInotifyMaxUserInstances =
@@ -328,16 +383,28 @@ export class IncusProvider implements DesktopProvider {
       return null;
     }
 
-    const session = await this.probeReachableSession(info);
+    const session = await this.probeReachableSession(
+      info,
+      this.resolveVmDesktopTransport(vm),
+    );
 
     if (session) {
       this.guestDesktopBootstrapAttemptAt.delete(vm.providerRef);
+      if (this.resolveVmDesktopTransport(vm) === "selkies") {
+        await this.maybeEnsureReachableSelkiesBootstrapAsync(
+          vm.providerRef,
+          resolveGuestWallpaperName(vm),
+        );
+      }
       return session;
     }
 
     const bootstrapped = await this.maybeEnsureGuestDesktopBootstrapAsync(
       vm.providerRef,
       resolveGuestWallpaperName(vm),
+      "standard",
+      this.guestDesktopBootstrapRetryMs,
+      this.resolveVmDesktopTransport(vm),
     );
 
     if (!bootstrapped) {
@@ -350,13 +417,99 @@ export class IncusProvider implements DesktopProvider {
       return null;
     }
 
-    const refreshedSession = await this.probeReachableSession(refreshedInfo);
+    const refreshedSession = await this.probeReachableSession(
+      refreshedInfo,
+      this.resolveVmDesktopTransport(vm),
+    );
 
     if (refreshedSession) {
       this.guestDesktopBootstrapAttemptAt.delete(vm.providerRef);
     }
 
     return refreshedSession;
+  }
+
+  async readVmDesktopBridgeVersion(
+    vm: VmInstance,
+  ): Promise<VmDesktopBridgeVersion | null> {
+    if (!this.state.available || vm.status !== "running") {
+      return null;
+    }
+
+    const transport = this.resolveVmDesktopTransport(vm);
+    const result = await this.runGuestExecWithRetryAsync([
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      "/",
+      "--",
+      "sh",
+      "-lc",
+      buildReadVmDesktopBridgeVersionScript(transport),
+    ]);
+    const payload = parseJson<{
+      bridge: {
+        label?: string | null;
+      } | null;
+      selkiesPatchLevel: string | null;
+      selkiesVersion: string | null;
+    }>(result.stdout);
+    const expected = buildExpectedGuestDesktopBridgeVersionRecord(transport);
+    const currentLabel =
+      typeof payload.bridge?.label === "string" && payload.bridge.label.trim()
+        ? payload.bridge.label.trim()
+        : payload.selkiesVersion && payload.selkiesPatchLevel
+          ? `bridge:unknown;selkies:${payload.selkiesVersion}+${payload.selkiesPatchLevel}`
+          : null;
+
+    return {
+      checkedAt: new Date().toISOString(),
+      currentLabel,
+      expectedLabel: expected.label,
+      runtimePatchLevel: payload.selkiesPatchLevel,
+      runtimeVersion: payload.selkiesVersion,
+      status:
+        currentLabel === expected.label
+          ? "current"
+          : currentLabel === null
+            ? "unknown"
+            : "outdated",
+      transport,
+    };
+  }
+
+  async repairVmDesktopBridge(vm: VmInstance): Promise<ProviderMutation> {
+    if (vm.status !== "running") {
+      throw new Error(`VM ${vm.name} must be running to repair the desktop bridge.`);
+    }
+
+    const transport = this.resolveVmDesktopTransport(vm);
+    await this.ensureGuestDesktopBootstrapAsync(
+      vm.providerRef,
+      resolveGuestWallpaperName(vm),
+      "aggressive",
+      transport,
+    );
+
+    const info = await this.inspectInstanceAsync(vm.providerRef);
+    const session =
+      normalizeStatus(info.status ?? info.state?.status) === "running"
+        ? await this.probeReachableSession(info, transport)
+        : null;
+    const expected = buildExpectedGuestDesktopBridgeVersionRecord(transport);
+
+    return {
+      lastAction: "Desktop bridge repaired",
+      activity: [
+        `desktop-bridge: reconciled ${transport} guest runtime to ${expected.label}`,
+      ],
+      ...(session
+        ? {
+            desktopReadyAt: new Date().toISOString(),
+            session,
+          }
+        : {}),
+    };
   }
 
   async createVm(
@@ -366,6 +519,8 @@ export class IncusProvider implements DesktopProvider {
   ): Promise<ProviderMutation> {
     this.assertAvailable();
     this.assertLaunchSource(template);
+    const desktopTransport = this.resolveVmDesktopTransport(vm);
+    const emitCreateProgress = buildProgressEmitter(report);
 
     const initArgs = [
       "init",
@@ -385,7 +540,6 @@ export class IncusProvider implements DesktopProvider {
       `limits.memory=${formatMemoryLimit(vm.resources.ramMb)}`,
     );
 
-    const emitCreateProgress = buildProgressEmitter(report);
     const allocationStartedAt = Date.now();
     let sawAllocationSample = false;
     const allocationHeartbeat = setInterval(() => {
@@ -435,16 +589,32 @@ export class IncusProvider implements DesktopProvider {
 
     await this.setRootDiskSizeAsync(vm.providerRef, vm.resources.diskGb);
     emitCreateProgress("Configuring guest", VM_CREATE_CONFIGURE_PERCENT);
-    await this.runAsync([
-      "config",
-      "set",
-      vm.providerRef,
-      "cloud-init.user-data",
-      buildGuestVncCloudInit(this.guestVncPort, {
-        maxUserWatches: this.guestInotifyMaxUserWatches,
-        maxUserInstances: this.guestInotifyMaxUserInstances,
-      }, resolveGuestWallpaperName(vm)),
-    ]);
+    const cloudInitUserData =
+      desktopTransport === "selkies"
+        ? buildGuestSelkiesCloudInit(
+            this.guestSelkiesPort,
+            {
+              maxUserWatches: this.guestInotifyMaxUserWatches,
+              maxUserInstances: this.guestInotifyMaxUserInstances,
+            },
+            resolveGuestWallpaperName(vm),
+            this.guestSelkiesRtcConfig,
+          )
+        : buildGuestVncCloudInit(
+            this.guestVncPort,
+            {
+              maxUserWatches: this.guestInotifyMaxUserWatches,
+              maxUserInstances: this.guestInotifyMaxUserInstances,
+            },
+            resolveGuestWallpaperName(vm),
+          );
+    await this.runAsync(
+      ["config", "set", vm.providerRef, "cloud-init.user-data", "-"],
+      undefined,
+      {
+        input: cloudInitUserData,
+      },
+    );
     emitCreateProgress("Preparing guest agent", VM_CREATE_GUEST_AGENT_PERCENT);
     await this.ensureAgentDeviceAsync(vm.providerRef);
     const networkMode = normalizeVmNetworkMode(vm.networkMode);
@@ -455,8 +625,9 @@ export class IncusProvider implements DesktopProvider {
     emitCreateProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await this.runAsync(["start", vm.providerRef]);
 
-    const requireBootstrapRepairBeforeReady = shouldRequireGuestBootstrapRepairBeforeReady(template);
-    const session = await this.resolveSession(vm.providerRef, emitCreateProgress, {
+    const requireBootstrapRepairBeforeReady =
+      shouldRequireGuestBootstrapRepairBeforeReady(template);
+    const { activity: sessionActivity, readyMs, session } = await this.resolveSession(vm, emitCreateProgress, {
       guestWallpaperName: resolveGuestWallpaperName(vm),
       requireBootstrapRepairBeforeReady,
       ...(requireBootstrapRepairBeforeReady
@@ -486,11 +657,17 @@ export class IncusProvider implements DesktopProvider {
           : []),
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
-        session ? `vnc: ${session.display}` : "vnc: guest network pending",
+        ...sessionActivity,
+        this.describeSessionActivity(session, desktopTransport),
+        ...(readyMs === null
+          ? []
+          : [`desktop-ready: ${desktopTransport} in ${formatReadyMs(readyMs)}`]),
       ].filter((entry): entry is string => Boolean(entry)),
       activeWindow: "terminal",
       workspacePath: DEFAULT_GUEST_WORKSPACE,
       session,
+      desktopReadyAt: readyMs === null ? null : new Date().toISOString(),
+      desktopReadyMs: readyMs,
     };
   }
 
@@ -535,7 +712,8 @@ export class IncusProvider implements DesktopProvider {
     emitProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await this.runAsync(["start", targetVm.providerRef]);
 
-    const session = await this.resolveSession(targetVm.providerRef, emitProgress, {
+    const desktopTransport = this.resolveVmDesktopTransport(targetVm);
+    const { activity: sessionActivity, readyMs, session } = await this.resolveSession(targetVm, emitProgress, {
       guestWallpaperName: resolveGuestWallpaperName(targetVm),
       // Clones boot from an existing disk image, so cloud-init will not rewrite stale guest services.
       requireBootstrapRepairBeforeReady: true,
@@ -551,11 +729,17 @@ export class IncusProvider implements DesktopProvider {
         `template: ${template.name}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
-        session ? `vnc: ${session.display}` : "vnc: guest network pending",
+        ...sessionActivity,
+        this.describeSessionActivity(session, desktopTransport),
+        ...(readyMs === null
+          ? []
+          : [`desktop-ready: ${desktopTransport} in ${formatReadyMs(readyMs)}`]),
       ].filter((entry): entry is string => Boolean(entry)),
       activeWindow: "terminal",
       workspacePath: sourceVm.workspacePath || DEFAULT_GUEST_WORKSPACE,
       session,
+      desktopReadyAt: readyMs === null ? null : new Date().toISOString(),
+      desktopReadyMs: readyMs,
     };
   }
 
@@ -578,7 +762,8 @@ export class IncusProvider implements DesktopProvider {
       }
     }
 
-    const session = await this.resolveSession(vm.providerRef, undefined, {
+    const desktopTransport = this.resolveVmDesktopTransport(vm);
+    const { activity: sessionActivity, readyMs, session } = await this.resolveSession(vm, undefined, {
       guestWallpaperName: resolveGuestWallpaperName(vm),
     });
     await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
@@ -589,11 +774,17 @@ export class IncusProvider implements DesktopProvider {
         `incus: started ${vm.providerRef}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
-        session ? `vnc: ${session.display}` : "vnc: guest network pending",
+        ...sessionActivity,
+        this.describeSessionActivity(session, desktopTransport),
+        ...(readyMs === null
+          ? []
+          : [`desktop-ready: ${desktopTransport} in ${formatReadyMs(readyMs)}`]),
       ].filter((entry): entry is string => Boolean(entry)),
       activeWindow: "terminal",
       workspacePath: vm.workspacePath || DEFAULT_GUEST_WORKSPACE,
       session,
+      desktopReadyAt: readyMs === null ? null : new Date().toISOString(),
+      desktopReadyMs: readyMs,
     };
   }
 
@@ -726,6 +917,9 @@ export class IncusProvider implements DesktopProvider {
         height,
         this.guestVncPort,
         resolveGuestWallpaperName(vm),
+        this.resolveVmDesktopTransport(vm),
+        this.guestSelkiesPort,
+        this.guestSelkiesRtcConfig,
       ),
     ]);
   }
@@ -740,6 +934,12 @@ export class IncusProvider implements DesktopProvider {
       providerRef: `${vm.providerRef}/${snapshotName}`,
       summary: `Snapshot ${label} captured from ${vm.name}.`,
     };
+  }
+
+  async deleteVmSnapshot(vm: VmInstance, snapshot: Snapshot): Promise<void> {
+    this.assertAvailable();
+    const snapshotName = parseSnapshotName(snapshot.providerRef, vm.providerRef);
+    await this.runAsync(["delete", `${vm.providerRef}/${snapshotName}`]);
   }
 
   async launchVmFromSnapshot(
@@ -783,7 +983,8 @@ export class IncusProvider implements DesktopProvider {
     emitProgress("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await this.runAsync(["start", targetVm.providerRef]);
 
-    const session = await this.resolveSession(targetVm.providerRef, emitProgress, {
+    const desktopTransport = this.resolveVmDesktopTransport(targetVm);
+    const { activity: sessionActivity, readyMs, session } = await this.resolveSession(targetVm, emitProgress, {
       guestWallpaperName: resolveGuestWallpaperName(targetVm),
       // Snapshot launches also reuse an existing filesystem and need an in-guest bootstrap repair.
       requireBootstrapRepairBeforeReady: true,
@@ -799,11 +1000,17 @@ export class IncusProvider implements DesktopProvider {
         `template: ${template.name}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
-        session ? `vnc: ${session.display}` : "vnc: guest network pending",
+        ...sessionActivity,
+        this.describeSessionActivity(session, desktopTransport),
+        ...(readyMs === null
+          ? []
+          : [`desktop-ready: ${desktopTransport} in ${formatReadyMs(readyMs)}`]),
       ].filter((entry): entry is string => Boolean(entry)),
       activeWindow: "terminal",
       workspacePath: DEFAULT_GUEST_WORKSPACE,
       session,
+      desktopReadyAt: readyMs === null ? null : new Date().toISOString(),
+      desktopReadyMs: readyMs,
     };
   }
 
@@ -823,16 +1030,20 @@ export class IncusProvider implements DesktopProvider {
     await this.runAsync(["snapshot", "restore", vm.providerRef, snapshotName]);
     await this.ensureAgentDeviceAsync(vm.providerRef);
 
+    let sessionActivity: string[] = [];
+    let readyMs: number | null = null;
     let session: VmSession | null = null;
     const networkMode = normalizeVmNetworkMode(vm.networkMode);
 
     if (wasRunning) {
       await this.runAsync(["start", vm.providerRef]);
-      session = await this.resolveSession(vm.providerRef, undefined, {
+      ({ activity: sessionActivity, readyMs, session } = await this.resolveSession(vm, undefined, {
         guestWallpaperName: resolveGuestWallpaperName(vm),
-      });
+      }));
       await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
     }
+
+    const desktopTransport = this.resolveVmDesktopTransport(vm);
 
     return {
       lastAction: `Restored ${vm.name} to ${snapshot.label}`,
@@ -841,15 +1052,19 @@ export class IncusProvider implements DesktopProvider {
         ...(wasRunning && networkMode === "dmz"
           ? [describeGuestDnsProfileActivity(networkMode)]
           : []),
+        ...(wasRunning ? sessionActivity : []),
         wasRunning
-          ? session
-            ? `vnc: ${session.display}`
-            : "vnc: guest network pending"
+          ? this.describeSessionActivity(session, desktopTransport)
           : "workspace remains stopped after restore",
+        ...(wasRunning && readyMs !== null
+          ? [`desktop-ready: ${desktopTransport} in ${formatReadyMs(readyMs)}`]
+          : []),
       ],
       activeWindow: "terminal",
       workspacePath: vm.workspacePath || DEFAULT_GUEST_WORKSPACE,
       session,
+      desktopReadyAt: readyMs === null ? null : new Date().toISOString(),
+      desktopReadyMs: readyMs,
     };
   }
 
@@ -1151,7 +1366,14 @@ export class IncusProvider implements DesktopProvider {
       }
 
       if (result.status !== 0) {
-        listeners.onError?.(new Error(formatCommandFailure(args, result)));
+        const failure = formatCommandFailure(args, result);
+
+        if (isNonFatalVmLogStreamFailure(failure)) {
+          listeners.onClose?.();
+          return;
+        }
+
+        listeners.onError?.(new Error(failure));
         return;
       }
 
@@ -1292,6 +1514,42 @@ export class IncusProvider implements DesktopProvider {
       ),
       generatedAt: new Date().toISOString(),
     };
+  }
+
+  async readVmPreviewImage(vm: VmInstance): Promise<VmPreviewImage> {
+    this.assertAvailable();
+
+    if (vm.status !== "running") {
+      throw new Error(`Workspace ${vm.name} must be running to capture a live preview.`);
+    }
+
+    const cacheKey = vm.providerRef;
+    const cached = this.previewImageCache.get(cacheKey);
+
+    if (cached && Date.now() - cached.capturedAt < 5_000) {
+      return cached.image;
+    }
+
+    const inFlight = this.previewImageInFlight.get(cacheKey);
+
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const capturePromise = this.captureVmPreviewImageWithRetry(vm)
+      .then((image) => {
+        this.previewImageCache.set(cacheKey, {
+          capturedAt: Date.now(),
+          image,
+        });
+        return image;
+      })
+      .finally(() => {
+        this.previewImageInFlight.delete(cacheKey);
+      });
+
+    this.previewImageInFlight.set(cacheKey, capturePromise);
+    return capturePromise;
   }
 
   tickVm(): ProviderTick | null {
@@ -1701,11 +1959,14 @@ export class IncusProvider implements DesktopProvider {
   }
 
   private async resolveSession(
-    instanceName: string,
+    vm: Pick<VmInstance, "providerRef" | "desktopTransport">,
     report?: ProviderProgressReporter,
     options?: ResolveSessionOptions,
-  ): Promise<VmSession | null> {
+  ): Promise<ResolvedGuestSession> {
+    const instanceName = vm.providerRef;
+    const desktopTransport = this.resolveVmDesktopTransport(vm);
     this.guestDesktopBootstrapAttemptAt.delete(instanceName);
+    const activity: string[] = [];
     let address: string | null = null;
     const waitStartedAt = Date.now();
     const emitProgress = report;
@@ -1720,28 +1981,40 @@ export class IncusProvider implements DesktopProvider {
       address = addresses[0] ?? null;
 
       if (!bootstrapConfirmed) {
-        bootstrapConfirmed = await this.ensureGuestDesktopBootstrapAsync(
+        const bootstrapAttempt = await this.ensureGuestDesktopBootstrapAsync(
           instanceName,
           options?.guestWallpaperName,
           bootstrapRepairProfile,
+          desktopTransport,
         );
+        mergeUniqueActivity(activity, bootstrapAttempt.activity);
+        bootstrapConfirmed = bootstrapAttempt.ok;
       }
 
-      const session = await this.probeReachableSessionForAddresses(addresses);
+      const session = await this.probeReachableSessionForAddresses(
+        addresses,
+        desktopTransport,
+      );
 
       if (session && bootstrapConfirmed) {
         this.guestDesktopBootstrapAttemptAt.delete(instanceName);
         emitProgress?.("Desktop session ready", VM_CREATE_READY_PERCENT);
-        return session;
+        return {
+          activity,
+          readyMs: Date.now() - waitStartedAt,
+          session,
+        };
       }
 
       if (bootstrapConfirmed) {
-        await this.maybeEnsureGuestDesktopBootstrapAsync(
+        const bootstrapAttempt = await this.maybeEnsureGuestDesktopBootstrapAsync(
           instanceName,
           options?.guestWallpaperName,
           bootstrapRepairProfile,
           bootstrapRepairRetryMs,
+          desktopTransport,
         );
+        mergeUniqueActivity(activity, bootstrapAttempt.activity);
       }
 
       if (normalizeStatus(info.status ?? info.state?.status) !== "running") {
@@ -1759,7 +2032,11 @@ export class IncusProvider implements DesktopProvider {
       await sleep(5000);
     }
 
-    return buildVncSession(address, this.guestVncPort, false);
+    return {
+      activity,
+      readyMs: null,
+      session: this.buildPendingSession(address, desktopTransport),
+    };
   }
 
   private async maybeEnsureGuestDesktopBootstrapAsync(
@@ -1767,12 +2044,16 @@ export class IncusProvider implements DesktopProvider {
     guestWallpaperName?: string,
     bootstrapRepairProfile: GuestDesktopBootstrapRepairProfile = "standard",
     bootstrapRetryMs: number = this.guestDesktopBootstrapRetryMs,
-  ): Promise<boolean> {
+    desktopTransport: VmDesktopTransport = "vnc",
+  ): Promise<GuestBootstrapAttempt> {
     const now = Date.now();
     const lastAttemptAt = this.guestDesktopBootstrapAttemptAt.get(instanceName) ?? 0;
 
     if (now - lastAttemptAt < bootstrapRetryMs) {
-      return false;
+      return {
+        activity: [],
+        ok: false,
+      };
     }
 
     this.guestDesktopBootstrapAttemptAt.set(instanceName, now);
@@ -1780,6 +2061,7 @@ export class IncusProvider implements DesktopProvider {
       instanceName,
       guestWallpaperName,
       bootstrapRepairProfile,
+      desktopTransport,
     );
   }
 
@@ -1787,27 +2069,184 @@ export class IncusProvider implements DesktopProvider {
     instanceName: string,
     guestWallpaperName?: string,
     bootstrapRepairProfile: GuestDesktopBootstrapRepairProfile = "standard",
-  ): Promise<boolean> {
+    desktopTransport: VmDesktopTransport = "vnc",
+  ): Promise<GuestBootstrapAttempt> {
+    const activity: string[] = [];
+
+    if (desktopTransport === "selkies") {
+      mergeUniqueActivity(
+        activity,
+        await this.ensureGuestSelkiesArchiveAsync(instanceName),
+      );
+    }
+
     const args = [
       "exec",
       instanceName,
       "--",
       "sh",
-      "-lc",
-      buildEnsureGuestDesktopBootstrapScript(
+      "-s",
+    ];
+    const result = await this.executeGuestExecWithRetryAsync(args, undefined, {
+      input: buildEnsureGuestDesktopBootstrapScript(
         this.guestVncPort,
         false,
         guestWallpaperName,
         bootstrapRepairProfile,
+        desktopTransport,
+        this.guestSelkiesPort,
+        this.guestSelkiesRtcConfig,
       ),
-    ];
-    const result = await this.executeGuestExecWithRetryAsync(args);
+    });
 
     if (result.status !== 0 && isGuestAgentUnavailableExecFailure(args, result)) {
       throw new Error(formatCommandFailure(args, result));
     }
 
-    return result.status === 0;
+    return {
+      activity,
+      ok: result.status === 0,
+    };
+  }
+
+  private async maybeEnsureReachableSelkiesBootstrapAsync(
+    instanceName: string,
+    guestWallpaperName?: string,
+  ): Promise<void> {
+    const now = Date.now();
+    const lastAttemptAt = this.reachableSelkiesBootstrapAttemptAt.get(instanceName) ?? 0;
+
+    if (now - lastAttemptAt < REACHABLE_SELKIES_BOOTSTRAP_RETRY_MS) {
+      return;
+    }
+
+    this.reachableSelkiesBootstrapAttemptAt.set(instanceName, now);
+
+    try {
+      await this.ensureGuestDesktopBootstrapAsync(
+        instanceName,
+        guestWallpaperName,
+        "standard",
+        "selkies",
+      );
+    } catch {
+      // Keep the current session usable even if the maintenance repair fails.
+    }
+  }
+
+  private async ensureGuestSelkiesArchiveAsync(instanceName: string): Promise<string[]> {
+    if (!this.selkiesHostCacheDir) {
+      return [];
+    }
+
+    const guestArchiveCheckArgs = [
+      "exec",
+      instanceName,
+      "--",
+      "test",
+      "-s",
+      `/var/cache/parallaize/selkies/v${DEFAULT_GUEST_SELKIES_VERSION}.tar.gz`,
+    ];
+    const guestArchiveCheckResult =
+      await this.executeGuestExecWithRetryAsync(guestArchiveCheckArgs);
+
+    if (
+      guestArchiveCheckResult.status !== 0 &&
+      isGuestAgentUnavailableExecFailure(guestArchiveCheckArgs, guestArchiveCheckResult)
+    ) {
+      throw new Error(formatCommandFailure(guestArchiveCheckArgs, guestArchiveCheckResult));
+    }
+
+    if (guestArchiveCheckResult.status === 0) {
+      return [];
+    }
+
+    const hostArchive = await this.ensureSelkiesArchiveCachedOnHostAsync();
+    const pushStartedAt = Date.now();
+    const pushArgs = [
+      "file",
+      "push",
+      "--create-dirs",
+      hostArchive.hostPath,
+      `${instanceName}/var/cache/parallaize/selkies/v${DEFAULT_GUEST_SELKIES_VERSION}.tar.gz`,
+    ];
+    const pushResult = await this.executeGuestFilePushWithRetryAsync(pushArgs);
+
+    if (pushResult.status !== 0) {
+      throw new Error(formatCommandFailure(pushArgs, pushResult));
+    }
+
+    return [
+      hostArchive.status === "downloaded"
+        ? `selkies-cache: downloaded v${DEFAULT_GUEST_SELKIES_VERSION} to host in ${formatReadyMs(hostArchive.durationMs)}`
+        : `selkies-cache: host cache hit in ${formatReadyMs(hostArchive.durationMs)}`,
+      `selkies-cache: uploaded archive to guest in ${formatReadyMs(Date.now() - pushStartedAt)}`,
+    ];
+  }
+
+  private async ensureSelkiesArchiveCachedOnHostAsync(): Promise<HostSelkiesArchiveCacheResult> {
+    if (!this.selkiesHostCacheDir) {
+      throw new Error("Selkies host cache directory is not configured.");
+    }
+
+    if (this.selkiesHostArchivePromise) {
+      return this.selkiesHostArchivePromise;
+    }
+
+    const hostPath = join(
+      this.selkiesHostCacheDir,
+      `v${DEFAULT_GUEST_SELKIES_VERSION}.tar.gz`,
+    );
+    const promise = (async (): Promise<HostSelkiesArchiveCacheResult> => {
+      const startedAt = Date.now();
+      const existingStat = await stat(hostPath).catch(() => null);
+
+      if (existingStat?.isFile() && existingStat.size > 0) {
+        return {
+          durationMs: Date.now() - startedAt,
+          hostPath,
+          status: "hit",
+        };
+      }
+
+      await mkdir(dirname(hostPath), { recursive: true });
+      const tempPath = `${hostPath}.tmp-${process.pid}-${Date.now()}`;
+
+      try {
+        const response = await fetch(DEFAULT_GUEST_SELKIES_ARCHIVE_URL);
+
+        if (!response.ok || !response.body) {
+          throw new Error(
+            `Failed to download Selkies archive from ${DEFAULT_GUEST_SELKIES_ARCHIVE_URL} (${response.status}).`,
+          );
+        }
+
+        await pipeline(
+          Readable.fromWeb(response.body as any),
+          createWriteStream(tempPath),
+        );
+        await rename(tempPath, hostPath);
+      } catch (error) {
+        await rm(tempPath, { force: true }).catch(() => undefined);
+        throw error;
+      }
+
+      return {
+        durationMs: Date.now() - startedAt,
+        hostPath,
+        status: "downloaded",
+      };
+    })();
+
+    this.selkiesHostArchivePromise = promise;
+
+    try {
+      return await promise;
+    } finally {
+      if (this.selkiesHostArchivePromise === promise) {
+        this.selkiesHostArchivePromise = null;
+      }
+    }
   }
 
   private async runGuestInitCommandsAsync(
@@ -1830,11 +2269,71 @@ export class IncusProvider implements DesktopProvider {
     ]);
   }
 
-  private async probeReachableSession(instance: IncusListInstance): Promise<VmSession | null> {
-    return this.probeReachableSessionForAddresses(findGuestAddressCandidates(instance));
+  private async captureVmPreviewImageWithRetry(vm: VmInstance): Promise<VmPreviewImage> {
+    try {
+      return await this.captureVmPreviewImage(vm);
+    } catch (error) {
+      if (!shouldRetryVmPreviewCapture(error)) {
+        throw error;
+      }
+
+      await this.ensureGuestDesktopBootstrapAsync(
+        vm.providerRef,
+        resolveGuestWallpaperName(vm),
+        "standard",
+        this.resolveVmDesktopTransport(vm),
+      );
+      return this.captureVmPreviewImage(vm);
+    }
   }
 
-  private async probeReachableSessionForAddresses(addresses: string[]): Promise<VmSession | null> {
+  private async captureVmPreviewImage(vm: VmInstance): Promise<VmPreviewImage> {
+    const result = await this.runGuestExecWithRetryAsync([
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      "/",
+      "--",
+      "sh",
+      "-lc",
+      buildReadVmPreviewImageScript(),
+    ]);
+    const payload = parseJson<{
+      contentBase64: string;
+      contentType: string;
+    }>(result.stdout);
+
+    return {
+      content: Buffer.from(payload.contentBase64, "base64"),
+      contentType: payload.contentType,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  private async probeReachableSession(
+    instance: IncusListInstance,
+    desktopTransport: VmDesktopTransport = "vnc",
+  ): Promise<VmSession | null> {
+    return this.probeReachableSessionForAddresses(
+      findGuestAddressCandidates(instance),
+      desktopTransport,
+    );
+  }
+
+  private async probeReachableSessionForAddresses(
+    addresses: string[],
+    desktopTransport: VmDesktopTransport,
+  ): Promise<VmSession | null> {
+    if (desktopTransport === "selkies") {
+      for (const address of addresses) {
+        if (await this.probeSelkiesHealth(address, this.guestSelkiesPort)) {
+          return buildSelkiesSession(address, this.guestSelkiesPort);
+        }
+      }
+
+      return null;
+    }
+
     for (const address of addresses) {
       if (await this.guestPortProbe.probe(address, this.guestVncPort)) {
         return buildVncSession(address, this.guestVncPort);
@@ -1842,6 +2341,62 @@ export class IncusProvider implements DesktopProvider {
     }
 
     return null;
+  }
+
+  private buildPendingSession(
+    address: string | null,
+    desktopTransport: VmDesktopTransport,
+  ): VmSession {
+    return desktopTransport === "selkies"
+      ? buildSelkiesSession(address, this.guestSelkiesPort, false)
+      : buildVncSession(address, this.guestVncPort, false);
+  }
+
+  private describeSessionActivity(
+    session: VmSession | null,
+    desktopTransport: VmDesktopTransport,
+  ): string {
+    if (!session) {
+      return desktopTransport === "selkies"
+        ? "selkies: guest network pending"
+        : "vnc: guest network pending";
+    }
+
+    return `${desktopTransport}: ${session.display}`;
+  }
+
+  private resolveVmDesktopTransport(
+    vm: Pick<VmInstance, "desktopTransport">,
+  ): VmDesktopTransport {
+    return vm.desktopTransport === "selkies" ? "selkies" : "vnc";
+  }
+
+  private async probeSelkiesHealth(host: string, port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const request = httpRequest(
+        {
+          host,
+          method: "GET",
+          path: "/",
+          port,
+          timeout: 2000,
+        },
+        (response) => {
+          response.resume();
+          const statusCode = response.statusCode ?? 500;
+          resolve(statusCode >= 200 && statusCode < 400);
+        },
+      );
+
+      request.on("error", () => {
+        resolve(false);
+      });
+      request.on("timeout", () => {
+        request.destroy();
+        resolve(false);
+      });
+      request.end();
+    });
   }
 
   private inspectInstance(instanceName: string): IncusListInstance {
@@ -2042,22 +2597,46 @@ export class IncusProvider implements DesktopProvider {
   private async executeAsync(
     args: string[],
     listeners?: CommandStreamListeners,
+    options?: CommandExecutionOptions,
   ): Promise<CommandResult> {
     return this.runner.executeStreaming
-      ? this.runner.executeStreaming(args, listeners)
-      : this.runner.execute(args);
+      ? this.runner.executeStreaming(args, listeners, options)
+      : this.runner.execute(args, options);
   }
 
   private async executeGuestExecWithRetryAsync(
     args: string[],
     listeners?: CommandStreamListeners,
+    options?: CommandExecutionOptions,
   ): Promise<CommandResult> {
     const deadlineAt = Date.now() + this.guestAgentRetryTimeoutMs;
 
     while (true) {
-      const result = await this.executeAsync(args, listeners);
+      const result = await this.executeAsync(args, listeners, options);
 
       if (result.status === 0 || !isGuestAgentUnavailableExecFailure(args, result)) {
+        return result;
+      }
+
+      if (Date.now() >= deadlineAt) {
+        return result;
+      }
+
+      await sleep(this.guestAgentRetryMs);
+    }
+  }
+
+  private async executeGuestFilePushWithRetryAsync(
+    args: string[],
+    listeners?: CommandStreamListeners,
+    options?: CommandExecutionOptions,
+  ): Promise<CommandResult> {
+    const deadlineAt = Date.now() + this.guestAgentRetryTimeoutMs;
+
+    while (true) {
+      const result = await this.executeAsync(args, listeners, options);
+
+      if (result.status === 0 || !isGuestAgentUnavailableFailure(result)) {
         return result;
       }
 
@@ -2072,8 +2651,9 @@ export class IncusProvider implements DesktopProvider {
   private async runAsync(
     args: string[],
     listeners?: CommandStreamListeners,
+    options?: CommandExecutionOptions,
   ): Promise<CommandResult> {
-    const result = await this.executeAsync(args, listeners);
+    const result = await this.executeAsync(args, listeners, options);
 
     if (result.status === 0) {
       return result;
@@ -2085,8 +2665,9 @@ export class IncusProvider implements DesktopProvider {
   private async runGuestExecWithRetryAsync(
     args: string[],
     listeners?: CommandStreamListeners,
+    options?: CommandExecutionOptions,
   ): Promise<CommandResult> {
-    const result = await this.executeGuestExecWithRetryAsync(args, listeners);
+    const result = await this.executeGuestExecWithRetryAsync(args, listeners, options);
 
     if (result.status === 0) {
       return result;
@@ -2098,10 +2679,11 @@ export class IncusProvider implements DesktopProvider {
   private async runStreaming(
     args: string[],
     listeners?: CommandStreamListeners,
+    options?: CommandExecutionOptions,
   ): Promise<CommandResult> {
     const result = this.runner.executeStreaming
-      ? await this.runner.executeStreaming(args, listeners)
-      : this.runner.execute(args);
+      ? await this.runner.executeStreaming(args, listeners, options)
+      : this.runner.execute(args, options);
 
     if (result.status === 0) {
       return result;
@@ -2117,9 +2699,88 @@ export class IncusProvider implements DesktopProvider {
     if (deleteResult.status !== 0) {
       const failure = formatCommandFailure(deleteArgs, deleteResult);
 
-      if (!isMissingInstanceFailure(failure)) {
-        throw new Error(failure);
+      if (isMissingInstanceFailure(failure)) {
+        return;
       }
+
+      if (isDeleteAlreadySucceededFailure(failure)) {
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          if ((await this.inspectInstanceSafeAsync(instanceName)) === null) {
+            return;
+          }
+          await sleep(500);
+        }
+      }
+
+      throw new Error(failure);
     }
   }
+}
+
+function buildReadVmDesktopBridgeVersionScript(
+  transport: VmDesktopTransport,
+): string {
+  return `python3 - <<'PY'
+import json
+from pathlib import Path
+
+bridge_path = Path(${JSON.stringify(DEFAULT_GUEST_DESKTOP_BRIDGE_VERSION_FILE)})
+selkies_version_path = Path("/opt/parallaize/selkies-gstreamer/.parallaize-selkies-version")
+selkies_patch_path = Path("/opt/parallaize/selkies-gstreamer/.parallaize-selkies-patch-level")
+
+bridge = None
+if bridge_path.is_file():
+    try:
+        bridge = json.loads(bridge_path.read_text())
+    except json.JSONDecodeError:
+        bridge = {
+            "label": bridge_path.read_text().strip() or None,
+        }
+
+payload = {
+    "bridge": bridge,
+    "selkiesPatchLevel": selkies_patch_path.read_text().strip() if selkies_patch_path.is_file() else None,
+    "selkiesVersion": selkies_version_path.read_text().strip() if selkies_version_path.is_file() else None,
+    "transport": ${JSON.stringify(transport)},
+}
+print(json.dumps(payload))
+PY`;
+}
+
+function formatReadyMs(value: number): string {
+  if (value < 1000) {
+    return `${Math.max(0, Math.round(value))} ms`;
+  }
+
+  if (value < 60_000) {
+    return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} s`;
+  }
+
+  const minutes = Math.floor(value / 60_000);
+  const seconds = Math.round((value % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
+function mergeUniqueActivity(target: string[], additions: readonly string[]): void {
+  for (const entry of additions) {
+    if (!target.includes(entry)) {
+      target.push(entry);
+    }
+  }
+}
+
+function isNonFatalVmLogStreamFailure(message: string): boolean {
+  return message.toLowerCase().includes("inappropriate ioctl for device");
+}
+
+function shouldRetryVmPreviewCapture(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+
+  return (
+    message.includes("xauthority") ||
+    message.includes("preview capture requires imagemagick import") ||
+    message.includes("unable to open x server") ||
+    message.includes("can't open display") ||
+    message.includes("cannot open display")
+  );
 }

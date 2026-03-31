@@ -4,13 +4,13 @@ import {
   type ProviderState,
   type Snapshot,
   type VmInstance,
-  type VmSession,
 } from "../../../packages/shared/src/types.js";
 import {
   buildSeedTemplateSummary,
   type DefaultTemplateLaunchSourceOptions,
   resolveDefaultTemplateLaunchSource,
 } from "./template-defaults.js";
+import { buildMockDesktopSession } from "./mock-selkies.js";
 
 export function createSeedState(
   provider: ProviderState,
@@ -34,6 +34,7 @@ export function createSeedState(
         diskGb: 80,
       },
       defaultForwardedPorts: [],
+      defaultDesktopTransport: "selkies",
       defaultNetworkMode: "default",
       initCommands: [],
       tags: ["coding", "agents", "ubuntu"],
@@ -77,7 +78,9 @@ export function createSeedState(
     };
   }
 
-  const syntheticSession = createSyntheticSession();
+  const mockDesktopTransport =
+    provider.desktopTransport === "synthetic" ? "synthetic" : "selkies";
+  const syntheticSession = buildMockDesktopSession("vm-0001", mockDesktopTransport);
 
   const vms: VmInstance[] = [
     {
@@ -101,8 +104,11 @@ export function createSeedState(
       screenSeed: 38,
       activeWindow: "editor",
       workspacePath: "/srv/workspaces/alpha-workbench",
+      desktopTransport: undefined,
       networkMode: "default",
       session: syntheticSession,
+      desktopReadyAt: null,
+      desktopReadyMs: null,
       forwardedPorts: [],
       activityLog: [
         "boot: desktop session resumed",
@@ -145,16 +151,5 @@ export function createSeedState(
     jobs: [],
     adminSessions: [],
     lastUpdated: now,
-  };
-}
-
-function createSyntheticSession(): VmSession {
-  return {
-    kind: "synthetic",
-    host: null,
-    port: null,
-    webSocketPath: null,
-    browserPath: null,
-    display: "Synthetic frame stream",
   };
 }

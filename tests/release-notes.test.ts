@@ -64,7 +64,7 @@ test("commit batching respects both commit-count and text-size limits", () => {
   assert.match(batches[0].promptText, /apps\/control\/src\/network\.ts/);
 });
 
-test("fallback release notes include scope, compare link, and commit reference details", () => {
+test("fallback release notes use a short lead paragraph and concise bullets", () => {
   const body = releaseNotesModule.formatFallbackReleaseNotes({
     releaseVersion: "0.1.9",
     packageRelease: "2",
@@ -106,12 +106,31 @@ test("fallback release notes include scope, compare link, and commit reference d
     ],
   });
 
-  assert.match(body, /^## Highlights/m);
-  assert.match(body, /^## Release Scope/m);
-  assert.match(body, /^## Full Compare/m);
-  assert.match(body, /^## Commit Reference/m);
-  assert.match(body, /v0\.1\.9-2/);
-  assert.match(body, /apps\/control\/src\/network\.ts/);
+  assert.doesNotMatch(body, /^## /m);
+  assert.match(
+    body,
+    /^This release focuses on Control plane and API, Debian packaging, with 2 commits since v0\.1\.8\.\n\n- Release `v0\.1\.9-2` changes 4 files with 44 insertions and 11 deletions\./,
+  );
+  assert.match(body, /- Highest-churn files: `apps\/control\/src\/network\.ts` \(\+21\/-4\) and `tests\/network\.test\.ts` \(\+12\/-1\)\./);
+  assert.match(body, /- This publishes package revision `2` for release `0\.1\.9`\./);
+  assert.match(body, /- \[Full compare]\(https:\/\/github\.com\/example\/parallaize\/compare\/v0\.1\.8\.\.\.v0\.1\.9-2\)/);
+});
+
+test("assembled release notes keep the lead paragraph and append the compare link as a bullet", () => {
+  const body = releaseNotesModule.assembleReleaseNotes("Headline feature landed.\n\n- Secondary fix shipped.", {
+    compareUrl: "https://github.com/example/parallaize/compare/v0.1.8...v0.1.9",
+  });
+
+  assert.equal(
+    body,
+    [
+      "Headline feature landed.",
+      "",
+      "- Secondary fix shipped.",
+      "",
+      "- [Full compare](https://github.com/example/parallaize/compare/v0.1.8...v0.1.9)",
+    ].join("\n"),
+  );
 });
 
 test("response text extraction reads output_text content from responses payloads", () => {
@@ -122,18 +141,21 @@ test("response text extraction reads output_text content from responses payloads
         content: [
           {
             type: "output_text",
-            text: "## Highlights\n- Example release note",
+            text: "Headline feature landed.\n\n- Example release note",
           },
         ],
       },
     ],
   });
 
-  assert.equal(text, "## Highlights\n- Example release note");
+  assert.equal(text, "Headline feature landed.\n\n- Example release note");
 });
 
 test("response text extraction accepts top-level helpers and nested text values", () => {
-  assert.equal(releaseNotesModule.extractResponseText({ output_text: "## Highlights\n- Helper output" }), "## Highlights\n- Helper output");
+  assert.equal(
+    releaseNotesModule.extractResponseText({ output_text: "Headline feature landed.\n\n- Helper output" }),
+    "Headline feature landed.\n\n- Helper output",
+  );
 
   const nestedText = releaseNotesModule.extractResponseText({
     output: [
@@ -143,7 +165,7 @@ test("response text extraction accepts top-level helpers and nested text values"
           {
             type: "output_text",
             text: {
-              value: "## Highlights\n- Nested output",
+              value: "Headline feature landed.\n\n- Nested output",
             },
           },
         ],
@@ -151,7 +173,7 @@ test("response text extraction accepts top-level helpers and nested text values"
     ],
   });
 
-  assert.equal(nestedText, "## Highlights\n- Nested output");
+  assert.equal(nestedText, "Headline feature landed.\n\n- Nested output");
 });
 
 test("requestOpenAIText retries once when the first response exhausts tokens without visible output", async () => {
@@ -194,7 +216,7 @@ test("requestOpenAIText retries once when the first response exhausts tokens wit
             content: [
               {
                 type: "output_text",
-                text: "## Highlights\n- Retry succeeded",
+                text: "Headline feature landed.\n\n- Retry succeeded",
               },
             ],
           },
@@ -219,7 +241,7 @@ test("requestOpenAIText retries once when the first response exhausts tokens wit
       maxOutputTokens: 900,
     });
 
-    assert.equal(text, "## Highlights\n- Retry succeeded");
+    assert.equal(text, "Headline feature landed.\n\n- Retry succeeded");
     assert.equal(requests.length, 2);
     assert.equal(requests[0]?.max_output_tokens, 900);
     assert.equal(requests[1]?.max_output_tokens, 1800);

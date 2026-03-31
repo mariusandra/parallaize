@@ -4,6 +4,7 @@ import {
   applySafeRfbEncodingPatch,
   buildRfbSocketUrls,
   clipboardPasteShortcutLabel,
+  copyTextWithSelection,
   primeClipboardPasteCaptureTarget,
   readBrowserClipboardText,
   readClipboardEventText,
@@ -774,32 +775,6 @@ function connectionStateClassName(state: ConnectionState): string {
 
 function joinClassNames(...values: Array<string | null | undefined | false>): string {
   return values.filter(Boolean).join(" ");
-}
-
-function copyTextWithSelection(text: string): boolean {
-  const documentRef = globalThis.document;
-
-  if (!documentRef?.body || typeof documentRef.execCommand !== "function") {
-    return false;
-  }
-
-  const textarea = documentRef.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  textarea.style.opacity = "0";
-  documentRef.body.append(textarea);
-  textarea.select();
-  textarea.setSelectionRange(0, text.length);
-
-  try {
-    return documentRef.execCommand("copy");
-  } catch {
-    return false;
-  } finally {
-    textarea.remove();
-  }
 }
 
 async function loadRfbModule(): Promise<{

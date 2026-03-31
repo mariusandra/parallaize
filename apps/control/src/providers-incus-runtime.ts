@@ -8,6 +8,8 @@ import type {
   IncusCommandRunner,
 } from "./providers-contracts.js";
 
+const INCUS_SYNC_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+
 export class SpawnIncusCommandRunner implements IncusCommandRunner {
   constructor(
     private readonly incusBinary: string,
@@ -20,6 +22,8 @@ export class SpawnIncusCommandRunner implements IncusCommandRunner {
       : args;
     const result = spawnSync(this.incusBinary, fullArgs, {
       encoding: "utf8",
+      input: options?.input,
+      maxBuffer: INCUS_SYNC_MAX_BUFFER_BYTES,
       timeout: options?.timeoutMs,
     });
 
@@ -35,20 +39,38 @@ export class SpawnIncusCommandRunner implements IncusCommandRunner {
   async executeStreaming(
     args: string[],
     listeners: CommandStreamListeners = {},
+    options?: CommandExecutionOptions,
   ): Promise<CommandResult> {
-    return this.startStreaming(args, listeners).completed;
+    return this.startStreaming(args, listeners, options).completed;
   }
 
   startStreaming(
     args: string[],
     listeners: CommandStreamListeners = {},
+    options?: CommandExecutionOptions,
   ): CommandStreamHandle {
     const fullArgs = this.project
       ? ["--project", this.project, ...args]
       : args;
-    const child = spawn(this.incusBinary, fullArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let child: ReturnType<typeof spawn>;
+
+    try {
+      child = spawn(this.incusBinary, fullArgs, {
+        stdio: [options?.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      return {
+        close() {},
+        completed: Promise.resolve({
+          args: fullArgs,
+          status: null,
+          stdout: "",
+          stderr: "",
+          error: error instanceof Error ? error : new Error(String(error)),
+        }),
+      };
+    }
+
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -73,6 +95,13 @@ export class SpawnIncusCommandRunner implements IncusCommandRunner {
         stderr += chunk;
         listeners.onStderr?.(chunk);
       });
+
+      child.stdin?.on("error", () => {
+        // Ignore EPIPE-style failures when the command exits before consuming stdin.
+      });
+      if (options?.input !== undefined) {
+        child.stdin?.end(options.input);
+      }
 
       child.on("error", (error) => {
         finish({

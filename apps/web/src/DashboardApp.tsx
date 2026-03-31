@@ -1,4 +1,5 @@
 import {
+  createRef,
   startTransition,
   useDeferredValue,
   useEffect,
@@ -11,6 +12,7 @@ import {
   type JSX,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type RefObject,
 } from "react";
 
 declare const __PARALLAIZE_VERSION__: string;
@@ -53,6 +55,7 @@ import {
   emptyViewportBounds,
   enqueueResolutionRequest,
   resolveResolutionRequest,
+  shouldDriveGuestResolution,
   shouldScheduleResolutionRepair,
   type ResolutionRequest,
   type ViewportBounds,
@@ -62,6 +65,17 @@ import {
   orderIdentifiedCollectionByIds,
 } from "./deferredCollections.js";
 import {
+  attachEmbeddedFrameFocusBridge,
+  focusEmbeddedFrameTarget,
+} from "./embeddedFrameFocus.js";
+import {
+  kickEmbeddedBrowserStream,
+  readEmbeddedBrowserStreamState,
+  setEmbeddedBrowserStreamScale,
+  type EmbeddedBrowserStreamState,
+} from "./embeddedBrowserStream.js";
+import {
+  hasBrowserDesktopSession,
   hasBrowserVncSession,
   mergeSelectedVmDetail,
   resolveDisplayedDesktopSession,
@@ -70,6 +84,7 @@ import {
   type RetainedDesktopSession,
 } from "./desktopSession.js";
 import { NoVncViewport } from "./NoVncViewport.js";
+import { SelkiesClipboardOverlay } from "./SelkiesClipboardOverlay.js";
 import {
   appPackageReleaseLabel,
   classifyAvailableRelease,
@@ -147,6 +162,7 @@ import {
   WorkspaceControlLockOverlay,
   WorkspaceFallbackSurface,
   WorkspaceLogsSurface,
+  WorkspaceSessionRelinquishedSurface,
 } from "./dashboardStage.js";
 import { DashboardWorkspaceRail } from "./dashboardWorkspaceRail.js";
 import {
@@ -159,9 +175,12 @@ import {
   clampDisplayedRailWidth,
   clampDisplayedSidepanelWidth,
   clampRailWidthPreference,
+  computeSelkiesViewportFallbackScale,
   defaultDesktopResolutionPreference,
   formatViewportScale,
+  isSelkiesViewportManagedResolution,
   liveCaptureWarningCopy,
+  normalizeBrowserDevicePixelRatio,
   normalizeDesktopResolutionPreference,
   normalizeGuestDisplayResolution,
   railExpandedMinWidth,
@@ -179,6 +198,7 @@ import {
   railCompactWidth,
   railDefaultWidth,
   railMaxWidth,
+  shouldPixelateSelkiesViewport,
   vmDiskUsagePollIntervalMs,
 } from "./dashboardShell.js";
 import type {
@@ -225,6 +245,12 @@ import {
   writeStoredString,
 } from "./dashboardPersistence.js";
 import {
+  claimDesktopSessionLease,
+  desktopSessionLeaseStorageKeyPrefix,
+  parseDesktopSessionLease,
+  releaseDesktopSessionLease,
+} from "./desktopSessionLease.js";
+import {
   claimResolutionControlLease,
   createTabId,
   readOrCreateResolutionControlClientId,
@@ -242,6 +268,98 @@ import { createDashboardAppMutations } from "./dashboardAppMutations.js";
 
 const appVersionLabel = __PARALLAIZE_VERSION__;
 const githubReleaseTagBaseUrl = "https://github.com/mariusandra/parallaize/releases/tag/v";
+const selkiesAutoKickWaitingThresholdMs = 12_000;
+const selkiesAutoKickFailedThresholdMs = 2_500;
+const selkiesAutoKickCooldownMs = 15_000;
+const selkiesAutoReloadCooldownMs = 5_000;
+const selkiesAutoReloadAfterWaitingKickMs = 30_000;
+const selkiesAutoReloadAfterFailedKickMs = 7_500;
+
+interface CachedStageBrowserSession {
+  browserPath: string;
+  name: string;
+  nativeScale: number | null;
+  reloadToken: number;
+  viewportBounds: ViewportBounds;
+}
+
+interface SelkiesStageScaleDescriptor {
+  fallbackFrameStyle?: CSSProperties;
+  pixelated: boolean;
+}
+
+function sameSelkiesStageScale(
+  left: number | null | undefined,
+  right: number,
+): boolean {
+  return left !== null && left !== undefined && Math.abs(left - right) <= 0.001;
+}
+
+function sameOptionalSelkiesStageScale(
+  left: number | null | undefined,
+  right: number | null | undefined,
+): boolean {
+  if (left === null || left === undefined || right === null || right === undefined) {
+    return left === right;
+  }
+
+  return sameSelkiesStageScale(left, right);
+}
+
+function appendQueryParam(path: string, key: string, value: string): string {
+  const hashIndex = path.indexOf("#");
+  const hash = hashIndex >= 0 ? path.slice(hashIndex) : "";
+  const basePath = hashIndex >= 0 ? path.slice(0, hashIndex) : path;
+  const separator = basePath.includes("?") ? "&" : "?";
+  return `${basePath}${separator}${key}=${encodeURIComponent(value)}${hash}`;
+}
+
+function buildSelkiesStageFrameSrc(
+  browserPath: string,
+  reloadToken: number,
+): string {
+  return reloadToken > 0
+    ? appendQueryParam(browserPath, "parallaize_reload", String(reloadToken))
+    : browserPath;
+}
+
+function buildSelkiesStageSessionKey(
+  browserPath: string,
+  reloadToken: number,
+): string {
+  return `${browserPath}#${reloadToken}`;
+}
+
+function describeSelkiesStageScale(
+  preference: DesktopResolutionPreference,
+  browserDevicePixelRatio: number,
+  nativeScale: number | null,
+): SelkiesStageScaleDescriptor {
+  if (preference.mode !== "viewport") {
+    return {
+      pixelated: false,
+    };
+  }
+
+  const appliedScale = clampDesktopViewportScale(preference.scale);
+  const fallbackScale = computeSelkiesViewportFallbackScale(
+    appliedScale,
+    browserDevicePixelRatio,
+  );
+  const usesNativeScale = sameSelkiesStageScale(nativeScale, appliedScale);
+
+  return {
+    fallbackFrameStyle:
+      !usesNativeScale && Math.abs(fallbackScale - 1) > 0.001
+        ? ({
+            height: `${100 / fallbackScale}%`,
+            transform: `scale(${fallbackScale})`,
+            width: `${100 / fallbackScale}%`,
+          } satisfies CSSProperties)
+        : undefined,
+    pixelated: shouldPixelateSelkiesViewport(appliedScale, browserDevicePixelRatio),
+  };
+}
 
 const emptyCreateDraft: CreateDraft = {
   launchSource: "",
@@ -250,6 +368,7 @@ const emptyCreateDraft: CreateDraft = {
   cpu: "",
   ramGb: "",
   diskGb: "",
+  desktopTransport: "selkies",
   networkMode: "default",
   initCommands: "",
   shutdownSourceBeforeClone: false,
@@ -292,6 +411,78 @@ const defaultLoginDraft: LoginDraft = {
   username: "admin",
   password: "",
 };
+
+function readCurrentBrowserDevicePixelRatio(): number {
+  return typeof window === "undefined"
+    ? 1
+    : normalizeBrowserDevicePixelRatio(window.devicePixelRatio);
+}
+
+function shouldSuspendStageBrowserFocusHandoff(
+  target: EventTarget | null,
+): boolean {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  return (
+    target.closest(".dialog-panel") !== null ||
+    target.closest(".workspace-sidepanel") !== null ||
+    target.closest(".portal-popover") !== null
+  );
+}
+
+function blurEmbeddedFrameTarget(
+  frame: HTMLIFrameElement | null,
+): void {
+  if (!frame) {
+    return;
+  }
+
+  try {
+    frame.blur();
+  } catch {
+    // Ignore blur failures from transient frame states.
+  }
+
+  try {
+    frame.contentWindow?.blur();
+  } catch {
+    // Ignore same-origin access races while the frame is navigating.
+  }
+}
+
+function resolveSelkiesStreamKickCandidate(
+  state: EmbeddedBrowserStreamState | null,
+): "failed" | "waiting" | null {
+  if (!state || state.ready) {
+    return null;
+  }
+
+  const normalizedStatus = state.status?.trim().toLowerCase() ?? "";
+
+  if (normalizedStatus.length === 0) {
+    return null;
+  }
+
+  if (normalizedStatus.includes("waiting for stream")) {
+    return "waiting";
+  }
+
+  if (
+    normalizedStatus.includes("connection failed") ||
+    normalizedStatus.includes("peer connection failed") ||
+    normalizedStatus.includes("server closed connection") ||
+    normalizedStatus.includes("error from server") ||
+    normalizedStatus === "failed" ||
+    normalizedStatus === "disconnected" ||
+    normalizedStatus === "closed"
+  ) {
+    return "failed";
+  }
+
+  return null;
+}
 
 export function DashboardApp(): JSX.Element {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -368,6 +559,9 @@ export function DashboardApp(): JSX.Element {
     readStoredBoolean(livePreviewsStorageKey, true),
   );
   const [viewportWidth, setViewportWidth] = useState(() => readViewportWidth());
+  const [browserDevicePixelRatio, setBrowserDevicePixelRatio] = useState(() =>
+    readCurrentBrowserDevicePixelRatio(),
+  );
   const [railWidthPreference, setRailWidthPreference] = useState(() =>
     clampRailWidthPreference(readStoredNumber(railWidthStorageKey) ?? railDefaultWidth),
   );
@@ -384,6 +578,7 @@ export function DashboardApp(): JSX.Element {
   const [desktopResolution, setDesktopResolution] =
     useState<DesktopResolutionState>(emptyResolutionState);
   const [documentVisible, setDocumentVisible] = useState(() => readDocumentVisible());
+  const [relinquishedStageVmId, setRelinquishedStageVmId] = useState<string | null>(null);
   const [resolutionControlStatus, setResolutionControlStatus] =
     useState<ResolutionControlStatus>({
       controllerClientId: null,
@@ -397,6 +592,7 @@ export function DashboardApp(): JSX.Element {
   const [sidepanelResizeActive, setSidepanelResizeActive] = useState(false);
   const selectedVmIdRef = useRef<string | null>(null);
   const liveResolutionVmIdRef = useRef<string | null>(null);
+  const stageSessionLeaseVmIdsRef = useRef<Set<string>>(new Set());
   const vmDragDropCommittedRef = useRef(false);
   const clientIdRef = useRef<string>(readOrCreateResolutionControlClientId());
   const tabIdRef = useRef<string>(createTabId());
@@ -415,6 +611,12 @@ export function DashboardApp(): JSX.Element {
   const pendingSidepanelWidthRef = useRef<number | null>(null);
   const stageViewportShellRef = useRef<HTMLDivElement | null>(null);
   const stageViewportFrameRef = useRef<HTMLDivElement | null>(null);
+  const stageBrowserFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const cachedStageBrowserFrameRefsRef = useRef(
+    new Map<string, RefObject<HTMLIFrameElement | null>>(),
+  );
+  const stageBrowserFrameFocusBridgeCleanupRef = useRef<(() => void) | null>(null);
+  const stageBrowserFocusHandoffSuspendedRef = useRef(false);
   const lastResolutionRequestKeyRef = useRef<string | null>(null);
   const resolutionRequestSequenceRef = useRef(0);
   const resolutionRequestQueueRef = useRef(emptyResolutionRequestQueue);
@@ -436,6 +638,20 @@ export function DashboardApp(): JSX.Element {
     useState<PendingManualResolutionSync | null>(null);
   const [retainedStageSession, setRetainedStageSession] =
     useState<RetainedDesktopSession | null>(null);
+  const [cachedStageBrowserSessions, setCachedStageBrowserSessions] =
+    useState<Record<string, CachedStageBrowserSession>>({});
+
+  function resolveStageBrowserFrameRef(vmId: string): RefObject<HTMLIFrameElement | null> {
+    const existing = cachedStageBrowserFrameRefsRef.current.get(vmId);
+
+    if (existing) {
+      return existing;
+    }
+
+    const nextRef = createRef<HTMLIFrameElement>();
+    cachedStageBrowserFrameRefsRef.current.set(vmId, nextRef);
+    return nextRef;
+  }
 
   const deferredVms = useDeferredValue(summary?.vms ?? []);
   const deferredTemplates = useDeferredValue(summary?.templates ?? []);
@@ -475,11 +691,60 @@ export function DashboardApp(): JSX.Element {
     currentStageSession,
     retainedStageSession,
   );
+  const stageSessionRelinquished =
+    currentStageVm !== null &&
+    relinquishedStageVmId === currentStageVm.id &&
+    hasBrowserDesktopSession(displayedStageSession);
+  const activeStageBrowserSession =
+    currentStageVm &&
+    displayedStageSession?.kind === "selkies" &&
+    displayedStageSession.browserPath &&
+    !stageSessionRelinquished
+      ? {
+          browserPath: displayedStageSession.browserPath,
+          name: currentStageVm.name,
+          nativeScale:
+            cachedStageBrowserSessions[currentStageVm.id]?.browserPath ===
+            displayedStageSession.browserPath
+              ? cachedStageBrowserSessions[currentStageVm.id]?.nativeScale ?? null
+              : null,
+          reloadToken:
+            cachedStageBrowserSessions[currentStageVm.id]?.browserPath ===
+            displayedStageSession.browserPath
+              ? cachedStageBrowserSessions[currentStageVm.id]?.reloadToken ?? 0
+              : 0,
+        }
+      : null;
+  const activeStageBrowserVmId =
+    activeStageBrowserSession && currentStageVm
+      ? currentStageVm.id
+      : null;
+  const stageBrowserSessionsByVm =
+    activeStageBrowserSession && currentStageVm
+      ? {
+          ...cachedStageBrowserSessions,
+          [currentStageVm.id]: {
+            browserPath: activeStageBrowserSession.browserPath,
+            name: activeStageBrowserSession.name,
+            nativeScale: activeStageBrowserSession.nativeScale,
+            reloadToken: activeStageBrowserSession.reloadToken,
+            viewportBounds: emptyViewportBounds,
+          },
+        }
+      : cachedStageBrowserSessions;
+  const desktopSessionLeaseVmIds = Array.from(
+    new Set(
+      (activeStageBrowserVmId !== null ? [activeStageBrowserVmId] : []).concat(
+        Object.keys(cachedStageBrowserSessions),
+      ),
+    ),
+  );
+  const desktopSessionLeaseVmIdsKey = desktopSessionLeaseVmIds.join("\u0000");
   const showWorkspaceLogs =
     currentDetail !== null && shouldShowWorkspaceLogsSurface(currentDetail);
   const liveResolutionVmId =
     currentStageVm?.status === "running" &&
-    hasBrowserVncSession(displayedStageSession)
+    hasBrowserDesktopSession(displayedStageSession)
       ? currentStageVm.id
       : null;
   const ownsLiveResolutionControl =
@@ -518,6 +783,10 @@ export function DashboardApp(): JSX.Element {
   const persistence = health?.persistence ?? null;
   const incusStorage = health?.incusStorage ?? null;
   const desktopResolutionMode = selectedDesktopResolutionPreference.mode;
+  const selkiesViewportManaged = isSelkiesViewportManagedResolution({
+    mode: desktopResolutionMode,
+    sessionKind: displayedStageSession?.kind,
+  });
   const appliedDesktopViewportScale = clampDesktopViewportScale(
     selectedDesktopResolutionPreference.scale,
   );
@@ -554,12 +823,27 @@ export function DashboardApp(): JSX.Element {
         height: `${viewportFrameBounds.height}px`,
       } satisfies CSSProperties)
     : undefined;
+  const activeStageViewportBounds =
+    desktopResolutionMode === "fixed"
+      ? {
+          height: appliedDesktopHeight,
+          width: appliedDesktopWidth,
+        }
+      : observedViewportBounds.width !== null && observedViewportBounds.height !== null
+        ? observedViewportBounds
+        : availableViewportBounds;
   const effectiveDesktopResolution = applyViewportBoundsToResolution(
     desktopResolution,
     observedViewportBounds,
   );
+  const drivesGuestResolution =
+    liveResolutionVmId !== null &&
+    shouldDriveGuestResolution({
+      mode: desktopResolutionMode,
+      sessionKind: displayedStageSession?.kind,
+    });
   const desiredDesktopResolutionTarget =
-    liveResolutionVmId &&
+    drivesGuestResolution &&
     (desktopResolutionMode === "fixed" ||
       (effectiveDesktopResolution.clientWidth && effectiveDesktopResolution.clientHeight))
       ? buildDesktopResolutionTarget(
@@ -593,6 +877,237 @@ export function DashboardApp(): JSX.Element {
         gridTemplateColumns: `${railWidth}px minmax(0, 1fr) ${displayedSidepanelWidth}px`,
       } satisfies CSSProperties)
     : undefined;
+
+  function resolveMirroredStageFrameRef(
+    vmId: string,
+  ): RefObject<HTMLIFrameElement | null> | null {
+    return stageBrowserSessionsByVm[vmId]
+      ? resolveStageBrowserFrameRef(vmId)
+      : null;
+  }
+
+  function shutdownStageBrowserFrame(frame: HTMLIFrameElement | null): void {
+    if (!frame) {
+      return;
+    }
+
+    try {
+      const target = frame.contentWindow as (Window & {
+        shutdownSelkiesStream?: () => void;
+      }) | null;
+
+      if (typeof target?.shutdownSelkiesStream === "function") {
+        target.shutdownSelkiesStream();
+      }
+    } catch {
+      // Ignore same-origin access races while the stage iframe is navigating.
+    }
+  }
+
+  function setStageBrowserFrameBackgroundMode(
+    frame: HTMLIFrameElement | null,
+    background: boolean,
+  ): void {
+    if (!frame) {
+      return;
+    }
+
+    try {
+      const target = frame.contentWindow as (Window & {
+        parallaizeSetBackgroundMode?: (background: boolean) => void;
+      }) | null;
+
+      target?.parallaizeSetBackgroundMode?.(background);
+    } catch {
+      // Ignore same-origin access races while the stage iframe is navigating.
+    }
+  }
+
+  function markStageBrowserFrameScalePending(
+    vmId: string,
+    browserPath: string,
+    name: string,
+  ): void {
+    setCachedStageBrowserSessions((current) => {
+      const existing = current[vmId];
+      const nextViewportBounds = existing?.viewportBounds ?? emptyViewportBounds;
+
+      if (
+        existing?.browserPath === browserPath &&
+        existing?.name === name &&
+        existing?.nativeScale === null
+      ) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [vmId]: {
+          browserPath,
+          name,
+          nativeScale: null,
+          reloadToken: existing?.reloadToken ?? 0,
+          viewportBounds: nextViewportBounds,
+        },
+      };
+    });
+  }
+
+  function requestStageBrowserReload(
+    vmId: string,
+    browserPath: string,
+    name: string,
+  ): void {
+    const frameRef = resolveStageBrowserFrameRef(vmId);
+    const frame = frameRef.current;
+
+    if (stageBrowserFrameRef.current === frame) {
+      clearStageBrowserFrameFocusBridge();
+      stageBrowserFrameRef.current = null;
+    }
+
+    shutdownStageBrowserFrame(frame);
+    frameRef.current = null;
+
+    setCachedStageBrowserSessions((current) => {
+      const existing = current[vmId];
+      const nextViewportBounds = existing?.viewportBounds ?? emptyViewportBounds;
+      const nextReloadToken =
+        existing?.browserPath === browserPath
+          ? (existing.reloadToken ?? 0) + 1
+          : 1;
+
+      if (
+        existing?.browserPath === browserPath &&
+        existing?.name === name &&
+        existing?.nativeScale === null &&
+        existing?.reloadToken === nextReloadToken
+      ) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [vmId]: {
+          browserPath,
+          name,
+          nativeScale: null,
+          reloadToken: nextReloadToken,
+          viewportBounds: nextViewportBounds,
+        },
+      };
+    });
+  }
+
+  function syncSelkiesStageNativeScale(frame: HTMLIFrameElement | null): boolean {
+    if (
+      activeStageBrowserVmId === null ||
+      displayedStageSession?.kind !== "selkies" ||
+      !displayedStageSession.browserPath ||
+      stageSessionRelinquished ||
+      desktopResolutionMode !== "viewport"
+    ) {
+      return false;
+    }
+
+    const activeBrowserPath = displayedStageSession.browserPath;
+    const activeVmName = currentStageVm?.name ?? "Desktop";
+    const activeSession = cachedStageBrowserSessions[activeStageBrowserVmId];
+
+    if (
+      activeSession?.browserPath === activeBrowserPath &&
+      sameSelkiesStageScale(activeSession.nativeScale, appliedDesktopViewportScale)
+    ) {
+      return true;
+    }
+
+    const applied = setEmbeddedBrowserStreamScale(frame, appliedDesktopViewportScale);
+
+    if (!applied) {
+      return false;
+    }
+
+    setCachedStageBrowserSessions((current) => {
+      const existing = current[activeStageBrowserVmId];
+      const nextViewportBounds = existing?.viewportBounds ?? emptyViewportBounds;
+
+      if (
+        existing?.browserPath === activeBrowserPath &&
+        existing?.name === activeVmName &&
+        existing !== undefined &&
+        sameViewportBounds(nextViewportBounds, existing.viewportBounds) &&
+        sameSelkiesStageScale(existing.nativeScale, appliedDesktopViewportScale)
+      ) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [activeStageBrowserVmId]: {
+          browserPath: activeBrowserPath,
+          name: currentStageVm?.name ?? existing?.name ?? activeVmName,
+          nativeScale: appliedDesktopViewportScale,
+          reloadToken: existing?.reloadToken ?? 0,
+          viewportBounds: nextViewportBounds,
+        },
+      };
+    });
+
+    return applied;
+  }
+
+  function releaseOwnedDesktopSessionLeases(vmIds = stageSessionLeaseVmIdsRef.current): void {
+    for (const vmId of vmIds) {
+      releaseDesktopSessionLease(vmId, tabIdRef.current);
+    }
+
+    if (vmIds === stageSessionLeaseVmIdsRef.current) {
+      stageSessionLeaseVmIdsRef.current.clear();
+    }
+  }
+
+  function disconnectCachedStageBrowserSession(vmId: string): void {
+    const frameRef = cachedStageBrowserFrameRefsRef.current.get(vmId);
+    const frame = frameRef?.current ?? null;
+
+    if (stageBrowserFrameRef.current === frame) {
+      clearStageBrowserFrameFocusBridge();
+      stageBrowserFrameRef.current = null;
+    }
+
+    shutdownStageBrowserFrame(frame);
+
+    if (frameRef) {
+      frameRef.current = null;
+      cachedStageBrowserFrameRefsRef.current.delete(vmId);
+    }
+
+    stageSessionLeaseVmIdsRef.current.delete(vmId);
+    setCachedStageBrowserSessions((current) => {
+      if (!(vmId in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[vmId];
+      return next;
+    });
+  }
+
+  function relinquishDesktopSessionVm(vmId: string): void {
+    stageSessionLeaseVmIdsRef.current.delete(vmId);
+
+    if (currentStageVm?.id === vmId) {
+      clearStageBrowserFrameFocusBridge();
+      stageBrowserFrameRef.current = null;
+      setRelinquishedStageVmId(vmId);
+      setRetainedStageSession((current) =>
+        current?.vmId === vmId ? null : current,
+      );
+    }
+
+    disconnectCachedStageBrowserSession(vmId);
+  }
 
   const {
     activeCpuThresholdForVm,
@@ -798,6 +1313,464 @@ export function DashboardApp(): JSX.Element {
   }, [selectedVmId]);
 
   useEffect(() => {
+    if (
+      currentStageVm &&
+      displayedStageSession?.kind === "selkies" &&
+      displayedStageSession.browserPath
+    ) {
+      return;
+    }
+
+    clearStageBrowserFrameFocusBridge();
+    stageBrowserFrameRef.current = null;
+  }, [
+    currentStageVm?.id,
+    displayedStageSession?.kind,
+    displayedStageSession?.browserPath,
+  ]);
+
+  function clearStageBrowserFrameFocusBridge(): void {
+    stageBrowserFrameFocusBridgeCleanupRef.current?.();
+    stageBrowserFrameFocusBridgeCleanupRef.current = null;
+  }
+
+  function armStageBrowserFrameFocus(): void {
+    armEmbeddedFrameFocusBridge(stageBrowserFrameRef.current);
+  }
+
+  function armEmbeddedFrameFocusBridge(
+    frame: HTMLIFrameElement | null,
+  ): void {
+    clearStageBrowserFrameFocusBridge();
+
+    if (!frame) {
+      return;
+    }
+
+    stageBrowserFocusHandoffSuspendedRef.current = false;
+    focusEmbeddedFrameTarget(frame);
+    stageBrowserFrameFocusBridgeCleanupRef.current =
+      attachEmbeddedFrameFocusBridge(frame);
+  }
+
+  useEffect(() => {
+    if (
+      activeStageBrowserVmId === null ||
+      displayedStageSession?.kind !== "selkies" ||
+      !displayedStageSession.browserPath ||
+      stageSessionRelinquished
+    ) {
+      return;
+    }
+
+    armStageBrowserFrameFocus();
+  }, [
+    activeStageBrowserVmId,
+    displayedStageSession?.kind,
+    displayedStageSession?.browserPath,
+    stageSessionRelinquished,
+  ]);
+
+  useEffect(() => {
+    if (
+      activeStageBrowserVmId === null ||
+      displayedStageSession?.kind !== "selkies" ||
+      !displayedStageSession.browserPath ||
+      stageSessionRelinquished
+    ) {
+      return;
+    }
+
+    function handOffFocusedIframe(): void {
+      const frame = stageBrowserFrameRef.current;
+
+      if (!frame || stageBrowserFocusHandoffSuspendedRef.current) {
+        return;
+      }
+
+      window.requestAnimationFrame(() => {
+        if (stageBrowserFocusHandoffSuspendedRef.current) {
+          return;
+        }
+
+        if (document.activeElement === frame) {
+          focusEmbeddedFrameTarget(frame);
+        }
+      });
+    }
+
+    function handleDocumentPointerDown(event: PointerEvent): void {
+      const frame = stageBrowserFrameRef.current;
+
+      if (!frame) {
+        return;
+      }
+
+      if (event.target === frame) {
+        stageBrowserFocusHandoffSuspendedRef.current = false;
+        return;
+      }
+
+      if (shouldSuspendStageBrowserFocusHandoff(event.target)) {
+        stageBrowserFocusHandoffSuspendedRef.current = true;
+        blurEmbeddedFrameTarget(frame);
+      }
+    }
+
+    function handleDocumentFocusIn(event: FocusEvent): void {
+      const frame = stageBrowserFrameRef.current;
+
+      if (!frame) {
+        return;
+      }
+
+      if (event.target === frame) {
+        stageBrowserFocusHandoffSuspendedRef.current = false;
+        handOffFocusedIframe();
+        return;
+      }
+
+      if (shouldSuspendStageBrowserFocusHandoff(event.target)) {
+        stageBrowserFocusHandoffSuspendedRef.current = true;
+        blurEmbeddedFrameTarget(frame);
+        return;
+      }
+
+      handOffFocusedIframe();
+    }
+
+    handOffFocusedIframe();
+    document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+    document.addEventListener("focusin", handleDocumentFocusIn);
+
+    return () => {
+      document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+      document.removeEventListener("focusin", handleDocumentFocusIn);
+    };
+  }, [
+    activeStageBrowserVmId,
+    displayedStageSession?.kind,
+    displayedStageSession?.browserPath,
+    stageSessionRelinquished,
+  ]);
+
+  useEffect(() => {
+    if (
+      activeStageBrowserVmId === null ||
+      displayedStageSession?.kind !== "selkies" ||
+      !displayedStageSession.browserPath ||
+      stageSessionRelinquished
+    ) {
+      return;
+    }
+
+    const browserPath = displayedStageSession.browserPath;
+    const vmName = currentStageVm?.name ?? "Desktop";
+    let trackedCandidate: "failed" | "waiting" | null = null;
+    let candidateSinceMs = 0;
+    let kickCount = 0;
+    let lastRecoveryAttemptMs = 0;
+
+    const pollStreamRecovery = (): void => {
+      const state = readEmbeddedBrowserStreamState(stageBrowserFrameRef.current);
+      const candidate = resolveSelkiesStreamKickCandidate(state);
+
+      if (candidate === null) {
+        trackedCandidate = null;
+        candidateSinceMs = 0;
+        kickCount = 0;
+        lastRecoveryAttemptMs = 0;
+        return;
+      }
+
+      const now = Date.now();
+
+      if (trackedCandidate !== candidate) {
+        trackedCandidate = candidate;
+        candidateSinceMs = now;
+        kickCount = 0;
+        lastRecoveryAttemptMs = 0;
+        return;
+      }
+
+      const reloadThresholdMs =
+        candidate === "failed"
+          ? selkiesAutoReloadAfterFailedKickMs
+          : selkiesAutoReloadAfterWaitingKickMs;
+
+      if (
+        kickCount > 0 &&
+        now - candidateSinceMs >= reloadThresholdMs &&
+        now - lastRecoveryAttemptMs >= selkiesAutoReloadCooldownMs
+      ) {
+        requestStageBrowserReload(
+          activeStageBrowserVmId,
+          browserPath,
+          vmName,
+        );
+        candidateSinceMs = now;
+        kickCount = 0;
+        lastRecoveryAttemptMs = now;
+        return;
+      }
+
+      if (kickCount > 0) {
+        return;
+      }
+
+      const thresholdMs =
+        candidate === "failed"
+          ? selkiesAutoKickFailedThresholdMs
+          : selkiesAutoKickWaitingThresholdMs;
+
+      if (now - candidateSinceMs < thresholdMs) {
+        return;
+      }
+
+      if (now - lastRecoveryAttemptMs < selkiesAutoKickCooldownMs) {
+        return;
+      }
+
+      lastRecoveryAttemptMs = now;
+      if (kickEmbeddedBrowserStream(stageBrowserFrameRef.current, `auto-${candidate}`)) {
+        kickCount += 1;
+        return;
+      }
+
+      requestStageBrowserReload(
+        activeStageBrowserVmId,
+        browserPath,
+        vmName,
+      );
+      candidateSinceMs = now;
+      lastRecoveryAttemptMs = now;
+    };
+
+    pollStreamRecovery();
+    const pollId = window.setInterval(pollStreamRecovery, 1_000);
+
+    return () => {
+      window.clearInterval(pollId);
+    };
+  }, [
+    activeStageBrowserVmId,
+    currentStageVm?.name,
+    displayedStageSession?.kind,
+    displayedStageSession?.browserPath,
+    stageSessionRelinquished,
+  ]);
+
+  useEffect(() => {
+    if (
+      activeStageBrowserVmId === null ||
+      displayedStageSession?.kind !== "selkies" ||
+      !displayedStageSession.browserPath ||
+      stageSessionRelinquished ||
+      desktopResolutionMode !== "viewport"
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    let attempts = 0;
+
+    const syncScale = (): void => {
+      const applied = syncSelkiesStageNativeScale(stageBrowserFrameRef.current);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (!applied && attempts < 20) {
+        attempts += 1;
+        retryTimer = window.setTimeout(syncScale, 250);
+      }
+    };
+
+    syncScale();
+
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
+    };
+  }, [
+    activeStageBrowserVmId,
+    appliedDesktopViewportScale,
+    desktopResolutionMode,
+    displayedStageSession?.browserPath,
+    displayedStageSession?.kind,
+    stageSessionRelinquished,
+  ]);
+
+  function renderStageBrowserHost(): JSX.Element | null {
+    const stageBrowserSessions = Object.entries(stageBrowserSessionsByVm);
+
+    if (stageBrowserSessions.length === 0) {
+      return null;
+    }
+
+    return (
+      <>
+        {stageBrowserSessions.map(([vmId, session]) => {
+          const frameRef = resolveStageBrowserFrameRef(vmId);
+          const active = activeStageBrowserVmId === vmId;
+          const sessionResolutionPreference =
+            desktopResolutionByVm[vmId] ?? defaultDesktopResolutionPreference;
+          const sessionScaleDescriptor = describeSelkiesStageScale(
+            sessionResolutionPreference,
+            browserDevicePixelRatio,
+            session.nativeScale,
+          );
+          const cachedViewportStyle =
+            !active &&
+            session.viewportBounds.width !== null &&
+            session.viewportBounds.height !== null
+              ? ({
+                  width: `${session.viewportBounds.width}px`,
+                  height: `${session.viewportBounds.height}px`,
+                } satisfies CSSProperties)
+              : undefined;
+
+          return (
+            <div
+              key={`${vmId}:${session.browserPath}:${session.reloadToken}`}
+              ref={active ? stageViewportShellRef : undefined}
+              className={joinClassNames(
+                "workspace-stage__browser-host",
+                "workspace-stage__viewport-shell",
+                active
+                  ? desktopResolutionMode === "fixed"
+                    ? "workspace-stage__viewport-shell--fixed"
+                    : "workspace-stage__viewport-shell--viewport"
+                  : "workspace-stage__viewport-shell--viewport",
+                active
+                  ? "workspace-stage__browser-host--active"
+                  : "workspace-stage__browser-host--cached",
+              )}
+              aria-hidden={active ? undefined : true}
+            >
+              <div
+                ref={active ? stageViewportFrameRef : undefined}
+                className={joinClassNames(
+                  "workspace-stage__viewport-frame",
+                  active && desktopResolutionMode === "fixed"
+                    ? "workspace-stage__viewport-frame--fixed"
+                    : "",
+                )}
+                style={active ? stageViewportFrameStyle : cachedViewportStyle}
+              >
+                <div
+                  className={joinClassNames(
+                    "workspace-stage__browser-frame-shell",
+                    sessionScaleDescriptor.pixelated
+                      ? "workspace-stage__browser-frame-shell--pixelated"
+                      : "",
+                  )}
+                >
+                  <div
+                    className={joinClassNames(
+                      "workspace-stage__browser-frame-scale",
+                      sessionScaleDescriptor.pixelated
+                        ? "workspace-stage__browser-frame-scale--pixelated"
+                        : "",
+                    )}
+                    style={sessionScaleDescriptor.fallbackFrameStyle}
+                  >
+                    <iframe
+                      ref={(node) => {
+                        frameRef.current = node;
+
+                        if (active) {
+                          stageBrowserFrameRef.current = node;
+                        } else if (stageBrowserFrameRef.current === node) {
+                          stageBrowserFrameRef.current = null;
+                        }
+                      }}
+                      className={joinClassNames(
+                        "workspace-stage__browser-frame",
+                        sessionScaleDescriptor.pixelated
+                          ? "workspace-stage__browser-frame--pixelated"
+                          : "",
+                      )}
+                      src={buildSelkiesStageFrameSrc(
+                        session.browserPath,
+                        session.reloadToken,
+                      )}
+                      title={`${session.name} desktop`}
+                      allow="autoplay; clipboard-read; clipboard-write; fullscreen; microphone; camera"
+                      allowFullScreen
+                      tabIndex={active ? 0 : -1}
+                      aria-hidden={active ? undefined : true}
+                      onFocus={
+                        active
+                          ? (event) => {
+                              armEmbeddedFrameFocusBridge(event.currentTarget);
+                            }
+                          : undefined
+                      }
+                      onLoad={() => {
+                        markStageBrowserFrameScalePending(
+                          vmId,
+                          session.browserPath,
+                          session.name,
+                        );
+
+                        if (active) {
+                          armEmbeddedFrameFocusBridge(frameRef.current);
+                          syncSelkiesStageNativeScale(frameRef.current);
+                        }
+                        setStageBrowserFrameBackgroundMode(frameRef.current, !active);
+                      }}
+                      onPointerDownCapture={active ? armStageBrowserFrameFocus : undefined}
+                    />
+                  </div>
+                </div>
+                {active ? (
+                  <SelkiesClipboardOverlay
+                    frameRef={frameRef}
+                    sessionKey={buildSelkiesStageSessionKey(
+                      session.browserPath,
+                      session.reloadToken,
+                    )}
+                  />
+                ) : null}
+                {active &&
+                currentStageVm &&
+                blocksLiveResolutionControl &&
+                resolutionControlHeading &&
+                resolutionControlMessage ? (
+                  <WorkspaceControlLockOverlay
+                    disabled={isBusy || resolutionControlTakeoverBusy}
+                    message={resolutionControlMessage}
+                    takeOverLabel={resolutionControlTakeoverLabel}
+                    takeoverBusy={resolutionControlTakeoverBusy}
+                    title={resolutionControlHeading}
+                    onTakeOver={() => void handleTakeOverResolutionControl(currentStageVm)}
+                  />
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </>
+    );
+  }
+
+  function reconnectStageHere(): void {
+    if (!currentStageVm) {
+      return;
+    }
+
+    setRetainedStageSession(null);
+    setRelinquishedStageVmId((current) =>
+      current === currentStageVm.id ? null : current,
+    );
+  }
+
+  useEffect(() => {
     liveResolutionVmIdRef.current = liveResolutionVmId;
   }, [liveResolutionVmId]);
 
@@ -822,8 +1795,81 @@ export function DashboardApp(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    const previousLeaseVmIds = stageSessionLeaseVmIdsRef.current;
+    const nextLeaseVmIds = new Set(desktopSessionLeaseVmIds);
+
+    for (const vmId of previousLeaseVmIds) {
+      if (!nextLeaseVmIds.has(vmId)) {
+        releaseDesktopSessionLease(vmId, tabIdRef.current);
+      }
+    }
+
+    for (const vmId of nextLeaseVmIds) {
+      if (!previousLeaseVmIds.has(vmId)) {
+        claimDesktopSessionLease(vmId, tabIdRef.current);
+      }
+    }
+
+    stageSessionLeaseVmIdsRef.current = nextLeaseVmIds;
+  }, [desktopSessionLeaseVmIdsKey]);
+
+  useEffect(() => {
+    if (desktopSessionLeaseVmIds.length === 0) {
+      return;
+    }
+
+    const leasedVmIdSet = new Set(desktopSessionLeaseVmIds);
+
+    function handleStorage(event: StorageEvent): void {
+      const leaseKey = event.key;
+
+      if (
+        typeof leaseKey !== "string" ||
+        !leaseKey.startsWith(desktopSessionLeaseStorageKeyPrefix)
+      ) {
+        return;
+      }
+
+      const vmId = leaseKey.slice(desktopSessionLeaseStorageKeyPrefix.length);
+
+      if (vmId.length === 0 || !leasedVmIdSet.has(vmId)) {
+        return;
+      }
+
+      const lease = parseDesktopSessionLease(event.newValue);
+
+      if (!lease || lease.vmId !== vmId || lease.tabId === tabIdRef.current) {
+        return;
+      }
+
+      relinquishDesktopSessionVm(vmId);
+    }
+
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [currentStageVm?.id, desktopSessionLeaseVmIdsKey]);
+
+  useEffect(() => {
+    const releaseLeases = () => {
+      releaseOwnedDesktopSessionLeases();
+    };
+
+    window.addEventListener("beforeunload", releaseLeases);
+    window.addEventListener("pagehide", releaseLeases);
+
+    return () => {
+      window.removeEventListener("beforeunload", releaseLeases);
+      window.removeEventListener("pagehide", releaseLeases);
+      releaseLeases();
+    };
+  }, []);
+
+  useEffect(() => {
     function handleViewportResize(): void {
       setViewportWidth(readViewportWidth());
+      setBrowserDevicePixelRatio(readCurrentBrowserDevicePixelRatio());
     }
 
     window.addEventListener("resize", handleViewportResize);
@@ -1174,66 +2220,34 @@ export function DashboardApp(): JSX.Element {
       setVmDiskUsageLoading(false);
       return;
     }
+    setVmFileBrowser(null);
+    setVmFileBrowserError(null);
+    setVmFileBrowserLoading(false);
+    setVmTouchedFiles(null);
+    setVmTouchedFilesError(null);
+    setVmTouchedFilesLoading(false);
+    setVmDiskUsage(null);
+    setVmDiskUsageError(null);
+    setVmDiskUsageLoading(false);
+  }, [authState, detail?.vm.id, detail?.vm.workspacePath]);
+
+  useEffect(() => {
+    if (authState !== "ready" || !detail) {
+      return;
+    }
 
     let cancelled = false;
     let refreshTimer: number | null = null;
     const vmId = detail.vm.id;
 
-    setVmFileBrowserLoading(true);
-    setVmFileBrowserError(null);
-    setVmTouchedFilesLoading(true);
-    setVmTouchedFilesError(null);
     setVmDiskUsageLoading(true);
     setVmDiskUsageError(null);
 
-    const loadSnapshots = async (): Promise<void> => {
-      try {
-        const [browserSnapshot, touchedSnapshot, diskUsageSnapshot] = await Promise.all([
-          fetchJson<VmFileBrowserSnapshot>(`/api/vms/${vmId}/files`),
-          fetchJson<VmTouchedFilesSnapshot>(`/api/vms/${vmId}/files/touched`),
-          fetchJson<VmDiskUsageSnapshot>(`/api/vms/${vmId}/disk-usage`),
-        ]);
-
-        if (cancelled) {
-          return;
-        }
-
-        setVmFileBrowser(browserSnapshot);
-        setVmTouchedFiles(touchedSnapshot);
-        setVmDiskUsage(diskUsageSnapshot);
-        setVmFileBrowserError(null);
-        setVmTouchedFilesError(null);
-        setVmDiskUsageError(null);
-      } catch (error) {
-        if (error instanceof AuthRequiredError) {
-          requireLogin();
-          return;
-        }
-
-        if (cancelled) {
-          return;
-        }
-
-        const message = errorMessage(error);
-        setVmFileBrowserError(message);
-        setVmTouchedFilesError(message);
-        setVmDiskUsageError(message);
-      } finally {
-        if (cancelled) {
-          return;
-        }
-
-        setVmFileBrowserLoading(false);
-        setVmTouchedFilesLoading(false);
-        setVmDiskUsageLoading(false);
-      }
-    };
-
     const refreshDiskUsage = async (): Promise<void> => {
-      setVmDiskUsageLoading(true);
-
       try {
-        const diskUsageSnapshot = await fetchJson<VmDiskUsageSnapshot>(`/api/vms/${vmId}/disk-usage`);
+        const diskUsageSnapshot = await fetchJson<VmDiskUsageSnapshot>(
+          `/api/vms/${vmId}/disk-usage`,
+        );
 
         if (cancelled) {
           return;
@@ -1267,13 +2281,7 @@ export function DashboardApp(): JSX.Element {
       }
     };
 
-    void loadSnapshots().then(() => {
-      if (!cancelled && detail.vm.status === "running") {
-        refreshTimer = window.setTimeout(() => {
-          void refreshDiskUsage();
-        }, vmDiskUsagePollIntervalMs);
-      }
-    });
+    void refreshDiskUsage();
 
     return () => {
       cancelled = true;
@@ -1556,7 +2564,7 @@ export function DashboardApp(): JSX.Element {
     }
 
     const nextStageSession =
-      currentStageSession && hasBrowserVncSession(currentStageSession)
+      currentStageSession && hasBrowserDesktopSession(currentStageSession)
         ? currentStageSession
         : null;
 
@@ -1567,7 +2575,8 @@ export function DashboardApp(): JSX.Element {
     setRetainedStageSession((current) =>
       current?.vmId === currentStageVm.id &&
       current.session?.kind === nextStageSession.kind &&
-      current.session?.webSocketPath === nextStageSession.webSocketPath
+      current.session?.webSocketPath === nextStageSession.webSocketPath &&
+      current.session?.browserPath === nextStageSession.browserPath
         ? current
         : {
             vmId: currentStageVm.id,
@@ -1579,19 +2588,145 @@ export function DashboardApp(): JSX.Element {
     currentStageVm?.status,
     currentStageSession?.kind,
     currentStageSession?.webSocketPath,
+    currentStageSession?.browserPath,
   ]);
 
   useEffect(() => {
     if (
       !currentStageVm ||
-      displayedStageSession?.kind !== "vnc" ||
-      !displayedStageSession.webSocketPath
+      currentStageVm.status !== "running" ||
+      displayedStageSession?.kind !== "selkies" ||
+      !displayedStageSession.browserPath ||
+      stageSessionRelinquished
+    ) {
+      return;
+    }
+
+    const browserPath = displayedStageSession.browserPath;
+
+    setCachedStageBrowserSessions((current) => {
+      const existing = current[currentStageVm.id];
+      const nextViewportBounds =
+        activeStageViewportBounds.width !== null && activeStageViewportBounds.height !== null
+          ? activeStageViewportBounds
+          : existing?.viewportBounds ?? emptyViewportBounds;
+      const nextNativeScale =
+        desktopResolutionMode === "viewport" &&
+        existing?.browserPath === browserPath &&
+        sameSelkiesStageScale(existing.nativeScale, appliedDesktopViewportScale)
+          ? existing.nativeScale
+          : null;
+      const nextReloadToken =
+        existing?.browserPath === browserPath ? existing.reloadToken ?? 0 : 0;
+
+      if (
+        existing?.browserPath === displayedStageSession.browserPath &&
+        existing?.name === currentStageVm.name &&
+        existing !== undefined &&
+        existing.reloadToken === nextReloadToken &&
+        sameOptionalSelkiesStageScale(existing.nativeScale, nextNativeScale) &&
+        sameViewportBounds(existing.viewportBounds, nextViewportBounds)
+      ) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [currentStageVm.id]: {
+          browserPath,
+          name: currentStageVm.name,
+          nativeScale: nextNativeScale,
+          reloadToken: nextReloadToken,
+          viewportBounds: nextViewportBounds,
+        },
+      };
+    });
+  }, [
+    currentStageVm?.id,
+    currentStageVm?.name,
+    currentStageVm?.status,
+    displayedStageSession?.kind,
+    displayedStageSession?.browserPath,
+    activeStageViewportBounds.width,
+    activeStageViewportBounds.height,
+    appliedDesktopViewportScale,
+    desktopResolutionMode,
+    stageSessionRelinquished,
+  ]);
+
+  useEffect(() => {
+    const runningVmIds = new Set(
+      (summary?.vms ?? [])
+        .filter((vm) => vm.status === "running")
+        .map((vm) => vm.id),
+    );
+
+    setCachedStageBrowserSessions((current) => {
+      let changed = false;
+      const next: Record<string, CachedStageBrowserSession> = {};
+
+      for (const [vmId, session] of Object.entries(current)) {
+        if (!runningVmIds.has(vmId)) {
+          shutdownStageBrowserFrame(resolveStageBrowserFrameRef(vmId).current);
+          resolveStageBrowserFrameRef(vmId).current = null;
+          cachedStageBrowserFrameRefsRef.current.delete(vmId);
+          changed = true;
+          continue;
+        }
+
+        next[vmId] = session;
+      }
+
+      return changed ? next : current;
+    });
+  }, [summary?.vms]);
+
+  useEffect(() => {
+    const activeStageSession = displayedStageSession;
+
+    if (
+      !currentStageVm ||
+      !activeStageSession ||
+      !hasBrowserDesktopSession(activeStageSession)
     ) {
       setDesktopResolution(emptyResolutionState);
       setAvailableViewportBounds(emptyViewportBounds);
       setObservedViewportBounds(emptyViewportBounds);
+      return;
     }
-  }, [currentStageVm?.id, displayedStageSession?.kind, displayedStageSession?.webSocketPath]);
+
+    if (activeStageSession.kind !== "vnc") {
+      setDesktopResolution((current) =>
+        current.clientWidth === null &&
+        current.clientHeight === null &&
+        current.remoteWidth === null &&
+        current.remoteHeight === null
+          ? current
+          : emptyResolutionState,
+      );
+    }
+  }, [
+    currentStageVm?.id,
+    displayedStageSession?.kind,
+    displayedStageSession?.webSocketPath,
+    displayedStageSession?.browserPath,
+  ]);
+
+  useEffect(() => {
+    if (!selkiesViewportManaged) {
+      return;
+    }
+
+    setDesktopResolution((current) =>
+      current.remoteWidth === null && current.remoteHeight === null
+        ? current
+        : {
+            ...current,
+            remoteWidth: null,
+            remoteHeight: null,
+          },
+    );
+  }, [selkiesViewportManaged]);
 
   useEffect(() => {
     clearResolutionRetryTimer();
@@ -1641,6 +2776,7 @@ export function DashboardApp(): JSX.Element {
     currentStageVm?.id,
     displayedStageSession?.kind,
     displayedStageSession?.webSocketPath,
+    displayedStageSession?.browserPath,
   ]);
 
   useEffect(() => {
@@ -1681,8 +2817,25 @@ export function DashboardApp(): JSX.Element {
     currentStageVm?.id,
     displayedStageSession?.kind,
     displayedStageSession?.webSocketPath,
+    displayedStageSession?.browserPath,
     desktopResolutionMode,
   ]);
+
+  useEffect(() => {
+    for (const [vmId, frameRef] of cachedStageBrowserFrameRefsRef.current.entries()) {
+      setStageBrowserFrameBackgroundMode(frameRef.current, activeStageBrowserVmId !== vmId);
+    }
+  }, [activeStageBrowserVmId, desktopSessionLeaseVmIdsKey]);
+
+  useEffect(() => {
+    return () => {
+      for (const frameRef of cachedStageBrowserFrameRefsRef.current.values()) {
+        shutdownStageBrowserFrame(frameRef.current);
+      }
+
+      shutdownStageBrowserFrame(stageBrowserFrameRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     currentResolutionTargetRef.current = desiredDesktopResolutionTarget;
@@ -2003,10 +3156,21 @@ export function DashboardApp(): JSX.Element {
 
   useEffect(() => {
     return () => {
+      clearStageBrowserFrameFocusBridge();
       flushQueuedRailWidthPreference();
       flushQueuedSidepanelWidthPreference();
     };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      clearStageBrowserFrameFocusBridge();
+    };
+  }, [
+    currentStageVm?.id,
+    displayedStageSession?.kind,
+    displayedStageSession?.browserPath,
+  ]);
 
   function canDriveResolutionForVm(vmId: string): boolean {
     return (
@@ -2134,6 +3298,21 @@ export function DashboardApp(): JSX.Element {
           height: request.height,
           width: request.width,
         } satisfies SetVmResolutionInput);
+
+        if (
+          liveResolutionVmIdRef.current === request.vmId &&
+          displayedStageSession?.kind === "selkies"
+        ) {
+          setDesktopResolution((current) =>
+            current.remoteWidth === request.width && current.remoteHeight === request.height
+              ? current
+              : {
+                  ...current,
+                  remoteWidth: request.width,
+                  remoteHeight: request.height,
+                },
+          );
+        }
       } catch (error) {
         if (
           resolutionRequestQueueRef.current.inFlight?.requestId !== request.requestId ||
@@ -2444,6 +3623,29 @@ export function DashboardApp(): JSX.Element {
     );
   }
 
+  async function handleDeleteSnapshot(
+    vm: VmInstance,
+    snapshot: Snapshot,
+  ): Promise<void> {
+    const confirmed = window.confirm(
+      `Delete snapshot "${snapshot.label}" from ${vm.name}? You will no longer be able to launch or restore from it.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    await runMutation(
+      `Deleting snapshot ${snapshot.label}`,
+      async () => {
+        await postJson(`/api/vms/${vm.id}/snapshots/${snapshot.id}/delete`, {});
+        await refreshSummary();
+        await refreshDetail(vm.id);
+      },
+      `Queued snapshot delete for ${snapshot.label}.`,
+    );
+  }
+
   async function handleCaptureTemplate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
@@ -2714,6 +3916,7 @@ export function DashboardApp(): JSX.Element {
             onVmStripDragOver={handleVmStripDragOver}
             onVmStripDrop={handleVmStripDrop}
             resolveActiveCpuThreshold={activeCpuThresholdForVm}
+            resolveMirroredStageFrameRef={resolveMirroredStageFrameRef}
           />
 
           <section className="workspace-stage">
@@ -2723,6 +3926,7 @@ export function DashboardApp(): JSX.Element {
                 selectedVm ? "" : "workspace-stage__surface--idle",
               )}
             >
+              {renderStageBrowserHost()}
               {selectedVm ? (
                 hasBrowserVncSession(displayedStageSession) ? (
                   <div
@@ -2774,7 +3978,12 @@ export function DashboardApp(): JSX.Element {
                       ) : null}
                     </div>
                   </div>
-                ) : !currentDetail ? (
+                ) : stageSessionRelinquished && currentDetail ? (
+                  <WorkspaceSessionRelinquishedSurface
+                    detail={currentDetail}
+                    onReconnect={reconnectStageHere}
+                  />
+                ) : activeStageBrowserVmId ? null : !currentDetail ? (
                   <div className="workspace-stage__placeholder">
                     <div className="workspace-stage__placeholder-block skeleton-shell" />
                   </div>
@@ -2844,6 +4053,7 @@ export function DashboardApp(): JSX.Element {
                 onApplyResolution={handleApplyResolution}
                 onResize={handleResize}
                 onSaveForward={handleAddForward}
+                onDeleteSnapshot={handleDeleteSnapshot}
                 onLaunchFromSnapshot={handleLaunchFromSnapshot}
                 onSnapshot={handleSnapshot}
                 onPowerAction={handleVmAction}

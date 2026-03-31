@@ -16,6 +16,7 @@ import type {
   UpdateVmInput,
   UpdateVmNetworkInput,
   VmDetail,
+  VmDesktopBridgeVersion,
   VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmLogsSnapshot,
@@ -23,6 +24,10 @@ import type {
   VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
 import type { DesktopManager } from "./manager.js";
+import {
+  buildMockSelkiesBrowserPath,
+  buildMockSelkiesDocument,
+} from "./mock-selkies.js";
 import {
   readJsonBody,
   serveVmFileDownload,
@@ -48,6 +53,40 @@ export async function handleVmRoute({
   response,
   url,
 }: HandleVmRouteOptions): Promise<boolean> {
+  const mockSelkiesMatch = url.pathname.match(/^\/mock-selkies\/([^/]+)\/?$/);
+  if (method === "GET" && mockSelkiesMatch) {
+    const vm = manager.getVmDetail(mockSelkiesMatch[1]).vm;
+    const session = vm.session;
+
+    if (
+      session?.kind !== "selkies" ||
+      session.browserPath !== buildMockSelkiesBrowserPath(vm.id)
+    ) {
+      writeJson(response, 404, {
+        ok: false,
+        error: `Mock Selkies session not found for ${vm.id}.`,
+      });
+      return true;
+    }
+
+    const preview = url.searchParams.get("parallaize_preview") === "1";
+    const frameHref = `/api/vms/${encodeURIComponent(vm.id)}/frame.svg?mode=${preview ? "tile" : "detail"}`;
+
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    response.end(
+      buildMockSelkiesDocument({
+        frameHref,
+        preview,
+        vmId: vm.id,
+        vmName: vm.name,
+      }),
+    );
+    return true;
+  }
+
   const vmMatch = url.pathname.match(/^\/api\/vms\/([^/]+)$/);
   if (method === "GET" && vmMatch) {
     writeJson<VmDetail>(response, 200, {
@@ -109,6 +148,44 @@ export async function handleVmRoute({
     return true;
   }
 
+  const vmPreviewMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/preview$/);
+  if ((method === "GET" || method === "HEAD") && vmPreviewMatch) {
+    const preview = await manager.getVmPreviewImage(vmPreviewMatch[1]);
+    response.writeHead(200, {
+      "content-type": preview.contentType,
+      "content-length": String(preview.content.byteLength),
+      "cache-control": "no-store",
+    });
+
+    if (method === "HEAD") {
+      response.end();
+    } else {
+      response.end(preview.content);
+    }
+
+    return true;
+  }
+
+  const vmDesktopBridgeMatch = url.pathname.match(/^\/api\/vms\/([^/]+)\/desktop-bridge$/);
+  if (method === "GET" && vmDesktopBridgeMatch) {
+    writeJson<VmDesktopBridgeVersion | null>(response, 200, {
+      ok: true,
+      data: await manager.getVmDesktopBridgeVersion(vmDesktopBridgeMatch[1]),
+    });
+    return true;
+  }
+
+  const vmDesktopBridgeRepairMatch = url.pathname.match(
+    /^\/api\/vms\/([^/]+)\/desktop-bridge\/repair$/,
+  );
+  if (method === "POST" && vmDesktopBridgeRepairMatch) {
+    writeJson<VmDetail>(response, 200, {
+      ok: true,
+      data: await manager.repairVmDesktopBridge(vmDesktopBridgeRepairMatch[1]),
+    });
+    return true;
+  }
+
   if (method === "POST" && url.pathname === "/api/vms/reorder") {
     const payload = await readJsonBody<ReorderVmsInput>(request);
     writeJson<DashboardSummary>(response, 200, {
@@ -141,7 +218,7 @@ export async function handleVmRoute({
   }
 
   const snapshotActionMatch = url.pathname.match(
-    /^\/api\/vms\/([^/]+)\/snapshots\/([^/]+)\/(launch|restore)$/,
+    /^\/api\/vms\/([^/]+)\/snapshots\/([^/]+)\/(launch|restore|delete)$/,
   );
   if (method === "POST" && snapshotActionMatch) {
     const vmId = snapshotActionMatch[1];
@@ -158,6 +235,12 @@ export async function handleVmRoute({
         ok: true,
         data: vm,
       });
+      return true;
+    }
+
+    if (action === "delete") {
+      manager.deleteVmSnapshot(vmId, snapshotId);
+      writeAccepted(response);
       return true;
     }
 

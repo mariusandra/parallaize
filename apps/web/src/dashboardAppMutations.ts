@@ -444,6 +444,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
                 name: requestedName,
                 wallpaperName: createDraft.wallpaperName.trim() || requestedName,
                 resources: requestedResources,
+                desktopTransport: createDraft.desktopTransport,
                 networkMode: createDraft.networkMode,
                 ...(selectedSource.kind === "snapshot"
                   ? { snapshotId: selectedSource.snapshot?.id }
@@ -515,6 +516,11 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
           return {
             ...current,
             diskGb: value,
+          };
+        case "desktopTransport":
+          return {
+            ...current,
+            desktopTransport: normalizeActiveVmDesktopTransport(value),
           };
         case "networkMode":
           return {
@@ -1467,4 +1473,8 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
 
 function normalizeActiveVmNetworkMode(value: string): CreateDraft["networkMode"] {
   return value === "dmz" ? "dmz" : "default";
+}
+
+function normalizeActiveVmDesktopTransport(value: string): CreateDraft["desktopTransport"] {
+  return value === "vnc" ? "vnc" : "selkies";
 }
