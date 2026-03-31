@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createSelkiesStreamRecoveryState,
   kickEmbeddedBrowserStream,
+  readEmbeddedBrowserStreamScale,
   readEmbeddedBrowserStreamState,
   setEmbeddedBrowserStreamScale,
+  updateSelkiesStreamRecoveryState,
 } from "../apps/web/src/embeddedBrowserStream.js";
 
 test("readEmbeddedBrowserStreamState reads the guest bridge payload", () => {
@@ -122,4 +125,92 @@ test("setEmbeddedBrowserStreamScale returns false when the bridge is unavailable
 
   assert.equal(setEmbeddedBrowserStreamScale(frame, 1.25), false);
   assert.equal(setEmbeddedBrowserStreamScale(frame, Number.NaN), false);
+});
+
+test("readEmbeddedBrowserStreamScale reads the guest bridge payload", () => {
+  const frame = {
+    contentWindow: {
+      parallaizeGetStreamScale: () => 1.25,
+    },
+  } as unknown as HTMLIFrameElement & {
+    contentWindow: {
+      parallaizeGetStreamScale: () => number;
+    };
+  };
+
+  assert.equal(readEmbeddedBrowserStreamScale(frame), 1.25);
+  assert.equal(readEmbeddedBrowserStreamScale(null), null);
+});
+
+test("Selkies recovery state survives a kicked reconnecting phase", () => {
+  const waitingState = {
+    ready: false,
+    status: "Waiting for stream.",
+  };
+  const reconnectingState = {
+    ready: false,
+    status: "Reconnecting stream.",
+  };
+
+  let recovery = updateSelkiesStreamRecoveryState(
+    createSelkiesStreamRecoveryState(),
+    waitingState,
+    "waiting",
+    1_000,
+  );
+  recovery = {
+    ...recovery,
+    kickCount: 1,
+    lastRecoveryAttemptMs: 13_000,
+  };
+
+  recovery = updateSelkiesStreamRecoveryState(
+    recovery,
+    reconnectingState,
+    null,
+    13_250,
+  );
+  assert.deepEqual(recovery, {
+    candidateSinceMs: 1_000,
+    kickCount: 1,
+    lastRecoveryAttemptMs: 13_000,
+    trackedCandidate: "waiting",
+  });
+
+  recovery = updateSelkiesStreamRecoveryState(
+    recovery,
+    waitingState,
+    "waiting",
+    14_000,
+  );
+  assert.deepEqual(recovery, {
+    candidateSinceMs: 1_000,
+    kickCount: 1,
+    lastRecoveryAttemptMs: 13_000,
+    trackedCandidate: "waiting",
+  });
+});
+
+test("Selkies recovery state resets once the stream is healthy again", () => {
+  const recovery = updateSelkiesStreamRecoveryState(
+    {
+      candidateSinceMs: 1_000,
+      kickCount: 1,
+      lastRecoveryAttemptMs: 13_000,
+      trackedCandidate: "failed",
+    },
+    {
+      ready: true,
+      status: "",
+    },
+    null,
+    14_000,
+  );
+
+  assert.deepEqual(recovery, {
+    candidateSinceMs: 0,
+    kickCount: 0,
+    lastRecoveryAttemptMs: 0,
+    trackedCandidate: null,
+  });
 });

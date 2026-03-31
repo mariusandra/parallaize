@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer as createHttpServer, request, type IncomingMessage } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -9,11 +9,13 @@ import { join } from "node:path";
 import process from "node:process";
 import type { Readable } from "node:stream";
 import test from "node:test";
+import WebSocket from "ws";
 
 import type {
   VmLogsSnapshot,
   VmResolutionControlSnapshot,
 } from "../packages/shared/src/types.js";
+import { buildVmStreamHealthToken } from "../apps/control/src/stream-health.js";
 
 type SpawnedServerProcess = ChildProcessByStdio<null, Readable, Readable>;
 
@@ -96,6 +98,70 @@ test("control plane serves the shell and unauthenticated auth status while admin
       mode: "unauthenticated",
     },
   });
+});
+
+test("guest stream-health websocket can auto-repair an unhealthy Selkies session", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-server-stream-health-"));
+  const dataFilePath = join(tempDir, "state.json");
+  const { port } = await startServer(context, {
+    adminPassword: "",
+    tempDirPrefix: "parallaize-server-stream-health-",
+    dataFilePath,
+    extraEnv: {
+      PARALLAIZE_MOCK_DESKTOP_TRANSPORT: "selkies",
+    },
+  });
+  let client: WebSocket | null = null;
+
+  context.after(() => {
+    client?.terminate();
+  });
+
+  const secret = readFileSync(join(tempDir, "stream-health.secret"), "utf8").trim();
+  const token = buildVmStreamHealthToken(secret, "vm-0001");
+  client = new WebSocket(
+    `ws://127.0.0.1:${port}/api/vms/vm-0001/stream-health?token=${token}`,
+  );
+  await once(client, "open");
+
+  client.send(
+    JSON.stringify({
+      desktopHealthy: false,
+      localReachable: false,
+      reason: "guest desktop bridge service is inactive",
+      sampledAt: new Date().toISOString(),
+      serviceActive: false,
+      source: "test-suite",
+      status: "unhealthy",
+    }),
+  );
+
+  await waitForTimeout(150);
+
+  const detailResponse = await sendRequest(port, {
+    path: "/api/vms/vm-0001",
+    method: "GET",
+    headers: {
+      accept: "application/json",
+    },
+  });
+  assert.equal(detailResponse.statusCode, 200);
+  const detailPayload = JSON.parse(detailResponse.body) as {
+    ok: boolean;
+    data: {
+      vm: {
+        activityLog: string[];
+        lastAction: string;
+      };
+    };
+  };
+  assert.equal(detailPayload.ok, true);
+  assert.equal(detailPayload.data.vm.lastAction, "Desktop bridge auto-repaired");
+  assert.ok(
+    detailPayload.data.vm.activityLog.includes(
+      "stream-health: automatic desktop bridge repair (guest desktop bridge service is inactive)",
+    ),
+  );
 });
 
 test("file browser defaults to the ubuntu home and downloads mock guest files", async (context) => {

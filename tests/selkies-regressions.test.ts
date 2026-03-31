@@ -60,6 +60,10 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
     "standard",
     "selkies",
     6080,
+    null,
+    "vm-0001",
+    "stream-health-token",
+    3000,
   );
 
   assert.match(script, /DESKTOP_SERVICE_NAME="parallaize-selkies\.service"/);
@@ -90,6 +94,13 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   );
   assert.match(script, /var parallaizeVideoPlayRetryTimer = null;/);
   assert.match(script, /var parallaizeVideoPlayRetryCount = 0;/);
+  assert.match(script, /var parallaizeDataChannelOpen = false;/);
+  assert.match(script, /var parallaizePendingDataChannelMessages = \[\];/);
+  assert.match(script, /function parallaizeHasRenderableVideo\(\) \{/);
+  assert.match(script, /function parallaizeHasActiveVideoPlayback\(\) \{/);
+  assert.match(script, /function parallaizeSyncPlayableStreamState\(\) \{/);
+  assert.match(script, /function parallaizeSendDataChannelMessage\(message, queueIfUnavailable = true\) \{/);
+  assert.match(script, /function parallaizeFlushPendingDataChannelMessages\(\) \{/);
   assert.match(script, /function parallaizeScheduleAutoplayRetry\(delay\) \{/);
   assert.match(script, /var parallaizeAudioActivationPending = !parallaizePreviewMode;/);
   assert.match(script, /var parallaizeAudioConnectRequested = parallaizePreviewMode;/);
@@ -100,7 +111,13 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
     script,
     /function parallaizeMaybeAutoplayVideo\(delay = 0\) \{\n    if \(parallaizePreviewMode\) \{\n        return;\n    \}/,
   );
+  assert.match(script, /if \(videoElement\.srcObject === null\) \{/);
   assert.match(script, /const playPromise = videoElement\.play\(\);/);
+  assert.match(script, /parallaizeSyncPlayableStreamState\(\);\n            parallaizeMaybeConnectAudio\(\);/);
+  assert.match(
+    script,
+    /videoElement\.addEventListener\('playing', \(\) => \{\n    if \(parallaizePreviewMode\) \{\n        return;\n    \}\n    parallaizeSyncPlayableStreamState\(\);\n    parallaizeMaybeConnectAudio\(\);\n    parallaizeMaybeActivateAudio\(\);\n\}\)/,
+  );
   assert.match(script, /connectionType: "preview"/);
   assert.match(script, /async def on_audio_signalling_connect\(\):\n       return/);
   assert.match(script, /async def on_preview_signalling_connect\(\):\n       return/);
@@ -155,7 +172,7 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.match(script, /parallaizeMaybeConnectAudio\(\);/);
   assert.match(
     script,
-    /audio_webrtc\.onplaystreamrequired = \(\) => \{\n    if \(parallaizePreviewMode \|\| videoConnected === "connected"\) \{/,
+    /audio_webrtc\.onplaystreamrequired = \(\) => \{\n    if \(parallaizePreviewMode \|\| videoConnected === "connected" \|\| parallaizeHasActiveVideoPlayback\(\)\) \{/,
   );
   assert.match(
     script,
@@ -171,20 +188,28 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.match(script, /function parallaizeSetBackgroundMode\(background\) \{/);
   assert.match(script, /var parallaizeGuestClipboardListeners = new Set\(\);/);
   assert.match(script, /window\.parallaizeWriteGuestClipboard = \(text\) => \{/);
+  assert.match(script, /window\.parallaizeGetStreamScale = \(\) => \{/);
   assert.match(script, /window\.parallaizeSetStreamScale = \(scale\) => \{/);
   assert.match(script, /window\.parallaizeRequestGuestClipboard = \(\) => \{/);
   assert.match(script, /window\.parallaizeTriggerGuestPaste = \(\) => \{/);
   assert.match(script, /window\.parallaizeSubscribeGuestClipboard = \(listener\) => \{/);
   assert.match(script, /window\.parallaizeGetStreamState = \(\) => \{/);
+  assert.match(script, /const activeVideoPlayback = parallaizeHasActiveVideoPlayback\(\);/);
   assert.match(script, /window\.parallaizeKickStream = \(reason = 'manual'\) => \{/);
   assert.match(script, /function parallaizeResolveStreamScale\(\) \{/);
   assert.match(script, /function parallaizeApplyStreamPixelation\(\) \{/);
   assert.match(script, /function parallaizeSyncStreamScale\(sendResolution = true\) \{/);
   assert.match(script, /parallaizeNotifyGuestClipboardListeners\(content\);/);
   assert.match(script, /export SELKIES_CURSOR_SIZE="\$\{SELKIES_CURSOR_SIZE:-24\}"/);
-  assert.match(script, /SELKIES_PATCH_LEVEL="2026-03-31-6"/);
+  assert.match(script, /SELKIES_PATCH_LEVEL="2026-03-31-8"/);
   assert.match(script, /SELKIES_PATCH_LEVEL_FILE="\$SELKIES_INSTALL_DIR\/\.parallaize-selkies-patch-level"/);
   assert.match(script, /DESKTOP_BRIDGE_VERSION_FILE="\/var\/lib\/parallaize\/desktop-bridge-version\.json"/);
+  assert.match(script, /STREAM_HEALTH_SERVICE_NAME="parallaize-selkies-heartbeat\.service"/);
+  assert.match(script, /Description=Parallaize Selkies stream health/);
+  assert.match(script, /if ! python3 -c 'import websockets' >\/dev\/null 2>&1; then/);
+  assert.match(script, /SOURCE = "parallaize-selkies-heartbeat"/);
+  assert.match(script, /enable_stream_health_service\(\) \{/);
+  assert.match(script, /systemctl restart --no-block "\$STREAM_HEALTH_SERVICE_NAME" \|\| true/);
   assert.match(script, /RESET_DISPLAY_STATE_ON_REPAIR=0/);
   assert.equal(script.includes(`"label": "${expectedDesktopBridgeVersion.label}"`), true);
   assert.match(script, /validate_selkies_bundle\(\) \{/);
@@ -194,15 +219,28 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.doesNotMatch(script, /function parallaizeBuildCursorUrl\(curdata\) \{/);
   assert.doesNotMatch(script, /const cursorDevicePixelRatio = parallaizeCursorDevicePixelRatio\(\);/);
   assert.doesNotMatch(script, /parallaizeScaleCursorHotspotCoordinate\(hotspot\.x, cursorDevicePixelRatio\)/);
-  assert.match(script, /webrtc\.sendDataChannelMessage\('vb,' \+ profile\.videoBitRate\);/);
-  assert.match(script, /webrtc\.sendDataChannelMessage\('_arg_fps,' \+ profile\.videoFramerate\);/);
-  assert.match(script, /webrtc\.sendDataChannelMessage\('ab,' \+ profile\.audioBitRate\);/);
+  assert.match(script, /parallaizeSendDataChannelMessage\('vb,' \+ profile\.videoBitRate\);/);
+  assert.match(script, /parallaizeSendDataChannelMessage\('_arg_fps,' \+ profile\.videoFramerate\);/);
+  assert.match(script, /parallaizeSendDataChannelMessage\('ab,' \+ profile\.audioBitRate\);/);
+  assert.match(
+    script,
+    /webrtc\.ondatachannelopen = \(\) => \{\n    if \(parallaizePreviewMode\) \{\n        return;\n    \}\n    parallaizeDataChannelOpen = true;\n    parallaizeSyncStreamScale\(true\);\n    if \(parallaizeBackgroundMode\) \{\n        parallaizeApplyBackgroundStreamProfile\(\);\n    \}\n    parallaizeFlushPendingDataChannelMessages\(\);/,
+  );
+  assert.match(script, /webrtc\.ondatachannelclose = \(\) => \{\n    parallaizeDataChannelOpen = false;/);
   assert.match(
     script,
     /if \(!parallaizeBackgroundMode\) {\n\s+parallaizeBackgroundRestoreProfile = {\n\s+audioBitRate: app\.audioBitRate,/,
   );
   assert.match(script, /if \(parallaizeBackgroundMode\) {\n\s+parallaizeApplyBackgroundStreamProfile\(\);\n\s+}/);
   assert.match(script, /window\.parallaizeSetBackgroundMode = parallaizeSetBackgroundMode;/);
+  assert.match(
+    script,
+    /signalling\.onstatus = \(message\) => \{\n    if \(!parallaizeHasActiveVideoPlayback\(\)\) \{\n        app\.loadingText = message;\n    \}/,
+  );
+  assert.match(
+    script,
+    /audio_signalling\.onstatus = \(message\) => \{\n    if \(!parallaizeHasActiveVideoPlayback\(\)\) \{\n        app\.loadingText = message;\n    \}/,
+  );
   assert.match(
     script,
     /audio_signalling\.ondisconnect = \(\) => \{\n    console\.log\("audio signalling disconnected"\);\n    audioConnected = "";\n    if \(videoConnected === "connected"\) \{\n        app\.status = "connected";\n        app\.showStart = false;\n        app\.loadingText = "";\n    \}\n\}/,
@@ -215,6 +253,9 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
     /webrtc\.input\.onresizeend = \(\) => \{\n    if \(parallaizePreviewMode \|\| app\.resizeRemote !== true\) \{\n        return;\n    \}/,
   );
   assert.match(script, /parallaizeSyncStreamScale\(true\);/);
+  assert.match(script, /parallaizeSendDataChannelMessage\("r," \+ newRes\);/);
+  assert.match(script, /parallaizeSendDataChannelMessage\("s," \+ parallaizeResolveStreamScale\(\)\);/);
+  assert.match(script, /parallaizeDataChannelOpen = false;\n    parallaizePendingDataChannelMessages = \[\];/);
   assert.match(script, /:root\[data-parallaize-stream-pixelated="true"\] \.video \{ image-rendering: crisp-edges; image-rendering: pixelated; \}/);
   assert.match(script, /document\.documentElement\.dataset\.parallaizeStreamPixelated = pixelated \? "true" : "false";/);
   assert.match(script, /NETWORK_WAIT_ONLINE_OVERRIDE_FILE="\/etc\/systemd\/system\/systemd-networkd-wait-online\.service\.d\/10-parallaize\.conf"/);
@@ -236,6 +277,10 @@ test("Aggressive desktop bridge repair resets stale monitor layout", () => {
     "aggressive",
     "selkies",
     6080,
+    null,
+    "vm-0001",
+    "stream-health-token",
+    3000,
   );
 
   assert.match(script, /RESET_DISPLAY_STATE_ON_REPAIR=1/);
@@ -260,6 +305,10 @@ test("Selkies embedded Python patches stay syntactically valid", () => {
     "standard",
     "selkies",
     6080,
+    null,
+    "vm-0001",
+    "stream-health-token",
+    3000,
   );
   const mainPythonBlock = extractEmbeddedPythonBlock(
     script,
@@ -305,6 +354,10 @@ test("Selkies web app patch upgrades current autoplay audio hooks into the manag
     "standard",
     "selkies",
     6080,
+    null,
+    "vm-0001",
+    "stream-health-token",
+    3000,
   );
   const appPythonBlock = extractEmbeddedPythonBlock(
     script,
@@ -355,7 +408,7 @@ webrtc.onclipboardcontent = (content) => {
   const patchedContents = readFileSync(appFile, "utf8");
   assert.match(
     patchedContents,
-    /audio_webrtc\.onplaystreamrequired = \(\) => \{\n    if \(parallaizePreviewMode \|\| videoConnected === "connected"\) \{/,
+    /audio_webrtc\.onplaystreamrequired = \(\) => \{\n    if \(parallaizePreviewMode \|\| videoConnected === "connected" \|\| parallaizeHasActiveVideoPlayback\(\)\) \{/,
   );
   assert.match(patchedContents, /window\.parallaizeSetBackgroundMode = parallaizeSetBackgroundMode;/);
   assert.match(patchedContents, /window\.addEventListener\("pagehide", shutdownSelkiesStream\);/);
@@ -369,6 +422,10 @@ test("Selkies index patch removes the return-to-launcher button", (context) => {
     "standard",
     "selkies",
     6080,
+    null,
+    "vm-0001",
+    "stream-health-token",
+    3000,
   );
   const indexPythonBlock = extractRawEmbeddedPythonBlock(
     script,
@@ -414,6 +471,10 @@ test("Selkies bundle validation rejects stale patched web bundles", (context) =>
     "standard",
     "selkies",
     6080,
+    null,
+    "vm-0001",
+    "stream-health-token",
+    3000,
   );
   const validationPythonBlock = extractRawEmbeddedPythonBlock(
     script,
@@ -498,6 +559,10 @@ test("Selkies signalling client patch keeps start() syntactically valid after re
     "standard",
     "selkies",
     6080,
+    null,
+    "vm-0001",
+    "stream-health-token",
+    3000,
   );
   const signallingClientPythonBlock = extractEmbeddedPythonBlock(
     script,

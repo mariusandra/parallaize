@@ -94,7 +94,30 @@ import {
   requestVmSessionRefresh,
   syncProviderState,
 } from "./manager-workers.js";
+import {
+  buildVmStreamHealthToken,
+  sameVmStreamHealthToken,
+  type VmGuestStreamHealthSample,
+} from "./stream-health.js";
 import { resolveDefaultTemplateLaunchSource } from "./template-defaults.js";
+
+const DEFAULT_SELKIES_STREAM_HEALTH_DEGRADED_REPAIR_MS = 30_000;
+const DEFAULT_SELKIES_STREAM_HEALTH_STALE_REPAIR_MS = 60_000;
+const DEFAULT_SELKIES_STREAM_HEALTH_REPAIR_COOLDOWN_MS = 5 * 60_000;
+
+interface VmStreamHealthRecord {
+  connected: boolean;
+  desktopHealthy: boolean;
+  lastDisconnectAtMs: number | null;
+  lastHeartbeatAtMs: number | null;
+  localReachable: boolean;
+  nonReadySinceMs: number | null;
+  reason: string | null;
+  sampledAt: string | null;
+  serviceActive: boolean;
+  source: string | null;
+  status: VmGuestStreamHealthSample["status"] | null;
+}
 
 export class DesktopManager {
   private readonly listeners = new Set<(summary: DashboardSummary) => void>();
@@ -106,6 +129,14 @@ export class DesktopManager {
   private readonly hostDiskGb = detectHostDiskGb();
   private readonly defaultTemplateLaunchSource: string;
   private readonly vmSessionMaintenanceRefreshMs: number;
+  private readonly streamHealthSecret: string;
+  private readonly selkiesStreamHealthDegradedRepairMs: number;
+  private readonly selkiesStreamHealthStaleRepairMs: number;
+  private readonly selkiesStreamHealthRepairCooldownMs: number;
+  private readonly vmStreamHealth = new Map<string, VmStreamHealthRecord>();
+  private readonly vmStreamHealthTimers = new Map<string, NodeJS.Timeout>();
+  private readonly vmStreamHealthRepairAttemptAt = new Map<string, number>();
+  private readonly vmStreamHealthRepairInFlight = new Set<string>();
   private lastFullVmSessionRefreshRequestAt = 0;
   private sessionRefreshMode: VmSessionRefreshMode = "none";
   private sessionRefreshInFlight = false;
@@ -119,8 +150,21 @@ export class DesktopManager {
     this.defaultTemplateLaunchSource = resolveDefaultTemplateLaunchSource(
       this.options.defaultTemplateLaunchSource,
     );
+    this.streamHealthSecret = this.options.streamHealthSecret ?? "";
     this.vmSessionMaintenanceRefreshMs = resolveVmSessionMaintenanceRefreshMs(
       this.options.vmSessionMaintenanceRefreshMs,
+    );
+    this.selkiesStreamHealthDegradedRepairMs = resolvePositiveDelay(
+      this.options.selkiesStreamHealthDegradedRepairMs,
+      DEFAULT_SELKIES_STREAM_HEALTH_DEGRADED_REPAIR_MS,
+    );
+    this.selkiesStreamHealthStaleRepairMs = resolvePositiveDelay(
+      this.options.selkiesStreamHealthStaleRepairMs,
+      DEFAULT_SELKIES_STREAM_HEALTH_STALE_REPAIR_MS,
+    );
+    this.selkiesStreamHealthRepairCooldownMs = resolvePositiveDelay(
+      this.options.selkiesStreamHealthRepairCooldownMs,
+      DEFAULT_SELKIES_STREAM_HEALTH_REPAIR_COOLDOWN_MS,
     );
     this.runtime = this.createRuntime();
     reconcileDefaultTemplateLaunchSource(this.runtime);
@@ -150,6 +194,12 @@ export class DesktopManager {
       clearInterval(this.ticker);
       this.ticker = null;
     }
+
+    for (const timer of this.vmStreamHealthTimers.values()) {
+      clearTimeout(timer);
+    }
+
+    this.vmStreamHealthTimers.clear();
   }
 
   getProviderState(): ProviderState {
@@ -204,26 +254,90 @@ export class DesktopManager {
   }
 
   async repairVmDesktopBridge(vmId: string): Promise<VmDetail> {
-    const state = this.runtime.store.load();
-    const vm = requireVm(state, vmId);
-    this.runtime.ensureActiveProvider(vm);
-
-    if (!this.provider.repairVmDesktopBridge) {
-      throw new Error("The active provider does not support desktop bridge repair.");
-    }
-
-    const mutation = await this.provider.repairVmDesktopBridge(vm);
-    this.runtime.store.update((draft) => {
-      const current = requireVm(draft, vmId);
-      applyProviderMutation(current, mutation);
-    });
-    this.runtime.publish();
-    this.runtime.requestVmSessionRefresh("missing");
-    return getVmDetail(this.runtime, vmId);
+    return this.repairVmDesktopBridgeInternal(vmId);
   }
 
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {
     return getVmFrame(this.runtime, vmId, mode);
+  }
+
+  validateVmStreamHealthToken(vmId: string, token: string): boolean {
+    if (!this.streamHealthSecret) {
+      return false;
+    }
+
+    const vm = this.runtime.store.load().vms.find((entry) => entry.id === vmId);
+
+    if (!vm || !this.isVmEligibleForStreamHealth(vm)) {
+      return false;
+    }
+
+    return sameVmStreamHealthToken(
+      token,
+      buildVmStreamHealthToken(this.streamHealthSecret, vmId),
+    );
+  }
+
+  handleVmStreamHealthConnected(vmId: string): void {
+    const vm = this.runtime.store.load().vms.find((entry) => entry.id === vmId);
+
+    if (!vm || !this.isVmEligibleForStreamHealth(vm)) {
+      this.clearVmStreamHealth(vmId);
+      return;
+    }
+
+    const record = this.vmStreamHealth.get(vmId) ?? createVmStreamHealthRecord();
+    record.connected = true;
+    record.lastDisconnectAtMs = null;
+    this.vmStreamHealth.set(vmId, record);
+    this.syncVmStreamHealthTimer(vmId);
+  }
+
+  handleVmStreamHealthHeartbeat(vmId: string, sample: VmGuestStreamHealthSample): void {
+    const vm = this.runtime.store.load().vms.find((entry) => entry.id === vmId);
+
+    if (!vm || !this.isVmEligibleForStreamHealth(vm)) {
+      this.clearVmStreamHealth(vmId);
+      return;
+    }
+
+    const record = this.vmStreamHealth.get(vmId) ?? createVmStreamHealthRecord();
+    const now = Date.now();
+    const wasNonReady = record.status !== null && record.status !== "ready";
+
+    record.connected = true;
+    record.desktopHealthy = sample.desktopHealthy;
+    record.lastDisconnectAtMs = null;
+    record.lastHeartbeatAtMs = now;
+    record.localReachable = sample.localReachable;
+    record.reason = sample.reason;
+    record.sampledAt = sample.sampledAt;
+    record.serviceActive = sample.serviceActive;
+    record.source = sample.source;
+    record.status = sample.status;
+
+    if (sample.status === "ready") {
+      record.nonReadySinceMs = null;
+    } else if (!wasNonReady) {
+      record.nonReadySinceMs = now;
+    } else if (record.nonReadySinceMs === null) {
+      record.nonReadySinceMs = now;
+    }
+
+    this.vmStreamHealth.set(vmId, record);
+    this.syncVmStreamHealthTimer(vmId);
+  }
+
+  handleVmStreamHealthDisconnected(vmId: string): void {
+    const record = this.vmStreamHealth.get(vmId);
+
+    if (!record) {
+      return;
+    }
+
+    record.connected = false;
+    record.lastDisconnectAtMs = Date.now();
+    this.syncVmStreamHealthTimer(vmId);
   }
 
   subscribe(listener: (summary: DashboardSummary) => void): () => void {
@@ -535,4 +649,257 @@ export class DesktopManager {
       };
     }
   }
+
+  private clearVmStreamHealth(vmId: string): void {
+    const timer = this.vmStreamHealthTimers.get(vmId);
+
+    if (timer) {
+      clearTimeout(timer);
+      this.vmStreamHealthTimers.delete(vmId);
+    }
+
+    this.vmStreamHealth.delete(vmId);
+    this.vmStreamHealthRepairAttemptAt.delete(vmId);
+    this.vmStreamHealthRepairInFlight.delete(vmId);
+  }
+
+  private syncVmStreamHealthTimer(vmId: string): void {
+    const existingTimer = this.vmStreamHealthTimers.get(vmId);
+
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      this.vmStreamHealthTimers.delete(vmId);
+    }
+
+    const vm = this.runtime.store.load().vms.find((entry) => entry.id === vmId);
+    const record = this.vmStreamHealth.get(vmId);
+
+    if (!vm || !record || !this.isVmEligibleForStreamHealth(vm)) {
+      this.clearVmStreamHealth(vmId);
+      return;
+    }
+
+    const delayMs = this.resolveVmStreamHealthRepairDelay(vmId, record);
+
+    if (delayMs === null) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.vmStreamHealthTimers.delete(vmId);
+      this.evaluateVmStreamHealth(vmId);
+    }, delayMs);
+    this.vmStreamHealthTimers.set(vmId, timer);
+  }
+
+  private resolveVmStreamHealthRepairDelay(
+    vmId: string,
+    record: VmStreamHealthRecord,
+  ): number | null {
+    if (this.vmStreamHealthRepairInFlight.has(vmId)) {
+      return null;
+    }
+
+    const now = Date.now();
+    const repairAllowedAt =
+      (this.vmStreamHealthRepairAttemptAt.get(vmId) ?? 0) +
+      this.selkiesStreamHealthRepairCooldownMs;
+    const cooldownDelay = Math.max(0, repairAllowedAt - now);
+
+    if (record.status === "unhealthy") {
+      return cooldownDelay;
+    }
+
+    if (record.status === "degraded" && record.nonReadySinceMs !== null) {
+      const degradedDelay = Math.max(
+        0,
+        record.nonReadySinceMs + this.selkiesStreamHealthDegradedRepairMs - now,
+      );
+      return Math.max(cooldownDelay, degradedDelay);
+    }
+
+    if (record.lastHeartbeatAtMs !== null) {
+      const staleDelay = Math.max(
+        0,
+        record.lastHeartbeatAtMs + this.selkiesStreamHealthStaleRepairMs - now,
+      );
+      return Math.max(cooldownDelay, staleDelay);
+    }
+
+    return null;
+  }
+
+  private evaluateVmStreamHealth(vmId: string): void {
+    const vm = this.runtime.store.load().vms.find((entry) => entry.id === vmId);
+    const record = this.vmStreamHealth.get(vmId);
+
+    if (!vm || !record || !this.isVmEligibleForStreamHealth(vm)) {
+      this.clearVmStreamHealth(vmId);
+      return;
+    }
+
+    if (this.vmStreamHealthRepairInFlight.has(vmId)) {
+      return;
+    }
+
+    const reason = this.resolveVmStreamHealthRepairReason(record);
+
+    if (!reason) {
+      this.syncVmStreamHealthTimer(vmId);
+      return;
+    }
+
+    this.vmStreamHealthRepairAttemptAt.set(vmId, Date.now());
+    this.vmStreamHealthRepairInFlight.add(vmId);
+    void this.autoRepairVmDesktopBridge(vmId, reason);
+  }
+
+  private resolveVmStreamHealthRepairReason(
+    record: VmStreamHealthRecord,
+  ): string | null {
+    if (record.status === "unhealthy") {
+      return record.reason ?? buildStreamHealthFailureReason(record);
+    }
+
+    if (record.status === "degraded") {
+      return record.reason ?? buildStreamHealthFailureReason(record);
+    }
+
+    if (record.lastHeartbeatAtMs !== null) {
+      const now = Date.now();
+
+      if (now - record.lastHeartbeatAtMs >= this.selkiesStreamHealthStaleRepairMs) {
+        return record.connected
+          ? "guest stream-health heartbeat went stale"
+          : "guest stream-health heartbeat went stale after disconnect";
+      }
+    }
+
+    return null;
+  }
+
+  private async autoRepairVmDesktopBridge(vmId: string, reason: string): Promise<void> {
+    try {
+      await this.repairVmDesktopBridgeInternal(vmId, {
+        automaticReason: reason,
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+
+      this.runtime.store.update((draft) => {
+        const vm = draft.vms.find((entry) => entry.id === vmId);
+
+        if (!vm) {
+          return false;
+        }
+
+        appendActivity(vm, `stream-health: automatic repair failed: ${message}`);
+        vm.updatedAt = nowIso();
+        vm.frameRevision += 1;
+        return true;
+      });
+      this.runtime.publish();
+    } finally {
+      const record = this.vmStreamHealth.get(vmId);
+
+      if (record) {
+        record.connected = false;
+        record.lastDisconnectAtMs = Date.now();
+        record.lastHeartbeatAtMs = null;
+        record.nonReadySinceMs = null;
+        record.reason = null;
+        record.status = null;
+      }
+
+      this.vmStreamHealthRepairInFlight.delete(vmId);
+      this.syncVmStreamHealthTimer(vmId);
+    }
+  }
+
+  private async repairVmDesktopBridgeInternal(
+    vmId: string,
+    options: {
+      automaticReason?: string | null;
+    } = {},
+  ): Promise<VmDetail> {
+    const state = this.runtime.store.load();
+    const vm = requireVm(state, vmId);
+    this.runtime.ensureActiveProvider(vm);
+
+    if (!this.provider.repairVmDesktopBridge) {
+      throw new Error("The active provider does not support desktop bridge repair.");
+    }
+
+    const mutation = await this.provider.repairVmDesktopBridge(vm);
+    const automaticReason = options.automaticReason?.trim() || null;
+
+    this.runtime.store.update((draft) => {
+      const current = requireVm(draft, vmId);
+      applyProviderMutation(current, {
+        ...mutation,
+        activity:
+          automaticReason === null
+            ? mutation.activity
+            : [
+                ...mutation.activity,
+                `stream-health: automatic desktop bridge repair (${automaticReason})`,
+              ],
+        lastAction:
+          automaticReason === null
+            ? mutation.lastAction
+            : "Desktop bridge auto-repaired",
+      });
+    });
+    this.runtime.publish();
+    this.runtime.requestVmSessionRefresh("missing");
+    return getVmDetail(this.runtime, vmId);
+  }
+
+  private isVmEligibleForStreamHealth(vm: VmInstance): boolean {
+    return (
+      vm.provider === this.provider.state.kind &&
+      vm.status === "running" &&
+      (vm.desktopTransport === "selkies" || vm.session?.kind === "selkies")
+    );
+  }
+}
+
+function createVmStreamHealthRecord(): VmStreamHealthRecord {
+  return {
+    connected: false,
+    desktopHealthy: false,
+    lastDisconnectAtMs: null,
+    lastHeartbeatAtMs: null,
+    localReachable: false,
+    nonReadySinceMs: null,
+    reason: null,
+    sampledAt: null,
+    serviceActive: false,
+    source: null,
+    status: null,
+  };
+}
+
+function buildStreamHealthFailureReason(record: VmStreamHealthRecord): string {
+  if (!record.serviceActive) {
+    return "guest desktop bridge service is inactive";
+  }
+
+  if (!record.desktopHealthy) {
+    return "guest desktop health check is failing";
+  }
+
+  if (!record.localReachable) {
+    return "guest Selkies endpoint is not reachable locally";
+  }
+
+  return "guest stream-health heartbeat reported a non-ready state";
+}
+
+function resolvePositiveDelay(value: number | null | undefined, fallback: number): number {
+  if (!Number.isFinite(value) || value == null || value <= 0) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.round(value));
 }

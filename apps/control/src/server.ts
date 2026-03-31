@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import type { Socket } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { loadConfig } from "./config.js";
 import { DesktopManager } from "./manager.js";
@@ -12,17 +12,24 @@ import { isBenignConnectionError, writeJson } from "./server-http.js";
 import { createLatestReleaseMetadataCache } from "./server-release.js";
 import { handlePublicRoute } from "./server-routes-public.js";
 import { handleSystemRoute } from "./server-routes-system.js";
+import { createVmStreamHealthServer } from "./server-stream-health.js";
 import { handleTemplateRoute } from "./server-routes-templates.js";
 import { handleVmRoute } from "./server-routes-vms.js";
 import { createSeedState } from "./seed.js";
 import { createStateStore } from "./store.js";
+import { loadOrCreateStreamHealthSecret } from "./stream-health.js";
 
 const config = loadConfig();
+const streamHealthSecret = loadOrCreateStreamHealthSecret(
+  join(dirname(config.dataFile), "stream-health.secret"),
+);
 const provider = createProvider(config.providerKind, config.incusBinary, {
   project: config.incusProject ?? undefined,
   storagePool: config.incusStoragePool ?? undefined,
   selkiesHostCacheDir: join(config.appHome, "data", "cache", "selkies"),
   mockDesktopTransport: config.mockDesktopTransport,
+  streamHealthSecret,
+  controlPlanePort: config.port,
   guestVncPort: config.guestVncPort,
   guestSelkiesPort: config.guestSelkiesPort,
   guestSelkiesRtcConfig: config.guestSelkiesRtcConfig ?? undefined,
@@ -45,6 +52,7 @@ const store = await createStateStore(
 const manager = new DesktopManager(store, provider, {
   forwardedServiceHostBase: config.forwardedServiceHostBase,
   defaultTemplateLaunchSource: config.configuredDefaultTemplateLaunchSource,
+  streamHealthSecret,
 });
 const networkBridge = new VmNetworkBridge(manager);
 const auth = createServerAuth({
@@ -54,6 +62,9 @@ const auth = createServerAuth({
 const events = createServerEventStreams({
   manager,
   provider,
+});
+const streamHealth = createVmStreamHealthServer({
+  manager,
 });
 const releaseMetadataCache = createLatestReleaseMetadataCache({
   releaseMetadataUrl: config.releaseMetadataUrl,
@@ -167,6 +178,10 @@ server.on("connection", (socket) => {
 });
 
 server.on("upgrade", (request, socket, head) => {
+  if (streamHealth.maybeHandleUpgrade(request, socket as Socket, head)) {
+    return;
+  }
+
   if (!auth.resolveAuthContext(request).status.authenticated) {
     auth.writeSocketAuthRequired(socket as Socket);
     return;
@@ -209,6 +224,7 @@ function registerShutdownHandlers(): void {
     process.stdout.write(`received ${signal}, shutting down parallaize\n`);
     manager.stop();
     events.close();
+    streamHealth.close();
     networkBridge.close();
 
     await new Promise<void>((resolve) => {

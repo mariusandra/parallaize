@@ -79,6 +79,8 @@ export interface CreateProviderOptions {
   storagePool?: string;
   selkiesHostCacheDir?: string;
   mockDesktopTransport?: MockDesktopTransport;
+  streamHealthSecret?: string;
+  controlPlanePort?: number;
   guestVncPort?: number;
   guestSelkiesPort?: number;
   guestSelkiesRtcConfig?: GuestSelkiesRtcConfig;

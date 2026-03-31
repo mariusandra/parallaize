@@ -102,6 +102,7 @@ import type {
   VmLogsStreamListeners,
   VmPreviewImage,
 } from "./providers-contracts.js";
+import { buildVmStreamHealthToken } from "./stream-health.js";
 import {
   buildIncusProviderState,
   NoopHostDaemonProbe,
@@ -202,6 +203,8 @@ interface HostSelkiesArchiveCacheResult {
 export class IncusProvider implements DesktopProvider {
   state: ProviderState;
   private readonly selkiesHostCacheDir: string | null;
+  private readonly streamHealthSecret: string | null;
+  private readonly controlPlanePort: number;
   private readonly guestVncPort: number;
   private readonly guestSelkiesPort: number;
   private readonly guestSelkiesRtcConfig: CreateProviderOptions["guestSelkiesRtcConfig"] | null;
@@ -250,6 +253,8 @@ export class IncusProvider implements DesktopProvider {
     options: CreateProviderOptions,
   ) {
     this.selkiesHostCacheDir = options.selkiesHostCacheDir ?? null;
+    this.streamHealthSecret = options.streamHealthSecret?.trim() || null;
+    this.controlPlanePort = Math.max(1, Math.round(options.controlPlanePort ?? 3000));
     this.guestVncPort = options.guestVncPort ?? DEFAULT_GUEST_VNC_PORT;
     this.guestSelkiesPort = options.guestSelkiesPort ?? DEFAULT_GUEST_SELKIES_PORT;
     this.guestSelkiesRtcConfig = options.guestSelkiesRtcConfig ?? null;
@@ -392,6 +397,7 @@ export class IncusProvider implements DesktopProvider {
       this.guestDesktopBootstrapAttemptAt.delete(vm.providerRef);
       if (this.resolveVmDesktopTransport(vm) === "selkies") {
         await this.maybeEnsureReachableSelkiesBootstrapAsync(
+          vm.id,
           vm.providerRef,
           resolveGuestWallpaperName(vm),
         );
@@ -400,6 +406,7 @@ export class IncusProvider implements DesktopProvider {
     }
 
     const bootstrapped = await this.maybeEnsureGuestDesktopBootstrapAsync(
+      vm.id,
       vm.providerRef,
       resolveGuestWallpaperName(vm),
       "standard",
@@ -485,6 +492,7 @@ export class IncusProvider implements DesktopProvider {
 
     const transport = this.resolveVmDesktopTransport(vm);
     await this.ensureGuestDesktopBootstrapAsync(
+      vm.id,
       vm.providerRef,
       resolveGuestWallpaperName(vm),
       "aggressive",
@@ -599,6 +607,9 @@ export class IncusProvider implements DesktopProvider {
             },
             resolveGuestWallpaperName(vm),
             this.guestSelkiesRtcConfig,
+            vm.id,
+            this.buildStreamHealthToken(vm.id),
+            this.controlPlanePort,
           )
         : buildGuestVncCloudInit(
             this.guestVncPort,
@@ -1959,11 +1970,12 @@ export class IncusProvider implements DesktopProvider {
   }
 
   private async resolveSession(
-    vm: Pick<VmInstance, "providerRef" | "desktopTransport">,
+    vm: Pick<VmInstance, "id" | "providerRef" | "desktopTransport">,
     report?: ProviderProgressReporter,
     options?: ResolveSessionOptions,
   ): Promise<ResolvedGuestSession> {
     const instanceName = vm.providerRef;
+    const vmId = vm.id;
     const desktopTransport = this.resolveVmDesktopTransport(vm);
     this.guestDesktopBootstrapAttemptAt.delete(instanceName);
     const activity: string[] = [];
@@ -1982,6 +1994,7 @@ export class IncusProvider implements DesktopProvider {
 
       if (!bootstrapConfirmed) {
         const bootstrapAttempt = await this.ensureGuestDesktopBootstrapAsync(
+          vmId,
           instanceName,
           options?.guestWallpaperName,
           bootstrapRepairProfile,
@@ -2008,6 +2021,7 @@ export class IncusProvider implements DesktopProvider {
 
       if (bootstrapConfirmed) {
         const bootstrapAttempt = await this.maybeEnsureGuestDesktopBootstrapAsync(
+          vmId,
           instanceName,
           options?.guestWallpaperName,
           bootstrapRepairProfile,
@@ -2040,6 +2054,7 @@ export class IncusProvider implements DesktopProvider {
   }
 
   private async maybeEnsureGuestDesktopBootstrapAsync(
+    vmId: string,
     instanceName: string,
     guestWallpaperName?: string,
     bootstrapRepairProfile: GuestDesktopBootstrapRepairProfile = "standard",
@@ -2058,6 +2073,7 @@ export class IncusProvider implements DesktopProvider {
 
     this.guestDesktopBootstrapAttemptAt.set(instanceName, now);
     return this.ensureGuestDesktopBootstrapAsync(
+      vmId,
       instanceName,
       guestWallpaperName,
       bootstrapRepairProfile,
@@ -2066,6 +2082,7 @@ export class IncusProvider implements DesktopProvider {
   }
 
   private async ensureGuestDesktopBootstrapAsync(
+    vmId: string,
     instanceName: string,
     guestWallpaperName?: string,
     bootstrapRepairProfile: GuestDesktopBootstrapRepairProfile = "standard",
@@ -2096,6 +2113,9 @@ export class IncusProvider implements DesktopProvider {
         desktopTransport,
         this.guestSelkiesPort,
         this.guestSelkiesRtcConfig,
+        vmId,
+        this.buildStreamHealthToken(vmId),
+        this.controlPlanePort,
       ),
     });
 
@@ -2110,6 +2130,7 @@ export class IncusProvider implements DesktopProvider {
   }
 
   private async maybeEnsureReachableSelkiesBootstrapAsync(
+    vmId: string,
     instanceName: string,
     guestWallpaperName?: string,
   ): Promise<void> {
@@ -2124,6 +2145,7 @@ export class IncusProvider implements DesktopProvider {
 
     try {
       await this.ensureGuestDesktopBootstrapAsync(
+        vmId,
         instanceName,
         guestWallpaperName,
         "standard",
@@ -2278,6 +2300,7 @@ export class IncusProvider implements DesktopProvider {
       }
 
       await this.ensureGuestDesktopBootstrapAsync(
+        vm.id,
         vm.providerRef,
         resolveGuestWallpaperName(vm),
         "standard",
@@ -2369,6 +2392,12 @@ export class IncusProvider implements DesktopProvider {
     vm: Pick<VmInstance, "desktopTransport">,
   ): VmDesktopTransport {
     return vm.desktopTransport === "selkies" ? "selkies" : "vnc";
+  }
+
+  private buildStreamHealthToken(vmId: string): string | null {
+    return this.streamHealthSecret
+      ? buildVmStreamHealthToken(this.streamHealthSecret, vmId)
+      : null;
   }
 
   private async probeSelkiesHealth(host: string, port: number): Promise<boolean> {

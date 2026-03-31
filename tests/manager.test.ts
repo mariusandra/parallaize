@@ -1537,6 +1537,50 @@ test("failed desktop attach keeps the VM running when the provider still sees it
   );
 });
 
+test("unhealthy Selkies guest heartbeats trigger automatic desktop bridge repair", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-stream-health-repair-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus", {
+    mockDesktopTransport: "selkies",
+  });
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider, {
+    forwardedServiceHostBase: "localhost",
+    streamHealthSecret: "test-stream-health-secret",
+    selkiesStreamHealthDegradedRepairMs: 25,
+    selkiesStreamHealthRepairCooldownMs: 25,
+    selkiesStreamHealthStaleRepairMs: 25,
+  });
+
+  manager.handleVmStreamHealthConnected("vm-0001");
+  manager.handleVmStreamHealthHeartbeat("vm-0001", {
+    desktopHealthy: false,
+    localReachable: false,
+    reason: "guest desktop bridge service is inactive",
+    sampledAt: new Date().toISOString(),
+    serviceActive: false,
+    source: "test-suite",
+    status: "unhealthy",
+  });
+
+  await wait(80);
+
+  const detail = manager.getVmDetail("vm-0001");
+  assert.equal(detail.vm.lastAction, "Desktop bridge auto-repaired");
+  assert.equal(detail.vm.session?.kind, "selkies");
+  assert.ok(
+    detail.vm.activityLog.some((entry) =>
+      entry ===
+      "stream-health: automatic desktop bridge repair (guest desktop bridge service is inactive)",
+    ),
+  );
+});
+
 test("manager marks queued or running jobs as failed after a server restart", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-interrupted-jobs-"));
   context.after(() => {

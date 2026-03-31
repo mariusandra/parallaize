@@ -12,7 +12,7 @@ export const DEFAULT_GUEST_SELKIES_ARCHIVE_URL =
   `https://github.com/selkies-project/selkies/releases/download/v${DEFAULT_GUEST_SELKIES_VERSION}/selkies-gstreamer-portable-v${DEFAULT_GUEST_SELKIES_VERSION}_amd64.tar.gz`;
 export const DEFAULT_GUEST_SELKIES_ARCHIVE_FILE =
   `/var/cache/parallaize/selkies/v${DEFAULT_GUEST_SELKIES_VERSION}.tar.gz`;
-const DEFAULT_GUEST_SELKIES_PATCH_LEVEL = "2026-03-31-6";
+const DEFAULT_GUEST_SELKIES_PATCH_LEVEL = "2026-03-31-8";
 export const DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL = "2026-03-31-2";
 export const DEFAULT_GUEST_DESKTOP_BRIDGE_VERSION_FILE =
   "/var/lib/parallaize/desktop-bridge-version.json";
@@ -89,6 +89,9 @@ export function buildEnsureGuestDesktopBootstrapScript(
   transport: VmDesktopTransport = "vnc",
   selkiesPort: number = DEFAULT_GUEST_SELKIES_PORT,
   selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
+  vmId?: string,
+  streamHealthToken?: string | null,
+  controlPlanePort = 3000,
 ): string {
   return `BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"
 BOOTSTRAP_SERVICE_FILE="/etc/systemd/system/parallaize-desktop-bootstrap.service"
@@ -101,6 +104,9 @@ ${buildGuestDesktopBootstrapScript(
     transport,
     selkiesPort,
     selkiesRtcConfig,
+    vmId,
+    streamHealthToken,
+    controlPlanePort,
   )}
 PARALLAIZE_BOOTSTRAP_SCRIPT
 )"
@@ -119,6 +125,9 @@ ${buildGuestDesktopBootstrapScript(
     transport,
     selkiesPort,
     selkiesRtcConfig,
+    vmId,
+    streamHealthToken,
+    controlPlanePort,
   )}
 PARALLAIZE_BOOTSTRAP_SCRIPT
   chmod 0755 "$BOOTSTRAP_FILE"
@@ -453,6 +462,154 @@ ConditionPathExists=/usr/local/bin/parallaize-selkies
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/parallaize-selkies
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target`;
+}
+
+function buildGuestSelkiesStreamHealthScript(
+  vmId: string,
+  token: string,
+  controlPlanePort: number,
+  selkiesPort: number,
+): string {
+  return `#!/usr/bin/env python3
+import asyncio
+from datetime import datetime
+import json
+import subprocess
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+import websockets
+
+VM_ID = ${JSON.stringify(vmId)}
+TOKEN = ${JSON.stringify(token)}
+CONTROL_PLANE_PORT = ${Math.max(1, Math.round(controlPlanePort))}
+SELKIES_PORT = ${Math.max(1, Math.round(selkiesPort))}
+DESKTOP_HEALTH_CHECK = ${JSON.stringify(DEFAULT_GUEST_DESKTOP_HEALTH_CHECK)}
+HEARTBEAT_INTERVAL_SECONDS = 15
+RECONNECT_DELAY_SECONDS = 3
+SOURCE = "parallaize-selkies-heartbeat"
+
+def resolve_default_gateway():
+    try:
+        result = subprocess.run(
+            ["ip", "route", "show", "default"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "127.0.0.1"
+    for line in result.stdout.splitlines():
+        tokens = line.strip().split()
+        if len(tokens) >= 3 and tokens[0] == "default":
+            return tokens[2]
+    return "127.0.0.1"
+
+def build_websocket_url():
+    host = resolve_default_gateway()
+    return f"ws://{host}:{CONTROL_PLANE_PORT}/api/vms/{VM_ID}/stream-health?token={TOKEN}"
+
+def service_is_active(name):
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", name],
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+def run_desktop_health_check():
+    try:
+        result = subprocess.run(
+            [DESKTOP_HEALTH_CHECK],
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+def probe_local_selkies():
+    for path in ("/health", "/"):
+        try:
+            request = Request(
+                f"http://127.0.0.1:{SELKIES_PORT}{path}",
+                headers={"User-Agent": SOURCE},
+            )
+            with urlopen(request, timeout=5) as response:
+                if response.status >= 200 and response.status < 500:
+                    return True
+        except HTTPError as exc:
+            if path == "/health" and exc.code == 404:
+                continue
+        except URLError:
+            continue
+        except OSError:
+            continue
+    return False
+
+def collect_sample():
+    service_active = service_is_active("parallaize-selkies.service")
+    desktop_healthy = run_desktop_health_check()
+    local_reachable = probe_local_selkies()
+    reason = None
+    status = "ready"
+    if not service_active:
+        status = "unhealthy"
+        reason = "guest desktop bridge service is inactive"
+    elif not desktop_healthy:
+        status = "unhealthy"
+        reason = "guest desktop health check is failing"
+    elif not local_reachable:
+        status = "degraded"
+        reason = "guest Selkies endpoint is not reachable locally"
+    return {
+        "desktopHealthy": desktop_healthy,
+        "localReachable": local_reachable,
+        "reason": reason,
+        "sampledAt": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "serviceActive": service_active,
+        "source": SOURCE,
+        "status": status,
+    }
+
+async def run():
+    while True:
+        try:
+            async with websockets.connect(
+                build_websocket_url(),
+                open_timeout=10,
+                ping_interval=20,
+                ping_timeout=20,
+            ) as websocket:
+                while True:
+                    await websocket.send(json.dumps(collect_sample()))
+                    await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        except Exception:
+            await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+
+asyncio.run(run())
+`;
+}
+
+function buildGuestSelkiesStreamHealthServiceUnit(): string {
+  return `[Unit]
+Description=Parallaize Selkies stream health
+After=parallaize-selkies.service
+Wants=parallaize-selkies.service
+ConditionPathExists=/usr/local/bin/parallaize-selkies-heartbeat
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/parallaize-selkies-heartbeat
 Restart=always
 RestartSec=3
 
@@ -1796,6 +1953,79 @@ videoElement.addEventListener('loadeddata', (e) => {
 '''
 parallaize_autoplay_block = '''var parallaizeVideoPlayRetryTimer = null;
 var parallaizeVideoPlayRetryCount = 0;
+var parallaizeDataChannelOpen = false;
+var parallaizePendingDataChannelMessages = [];
+function parallaizeHasRenderableVideo() {
+    return (
+        videoElement.srcObject !== null &&
+        videoElement.readyState >= 2 &&
+        videoElement.videoWidth > 0 &&
+        videoElement.videoHeight > 0
+    );
+}
+function parallaizeHasActiveVideoPlayback() {
+    return parallaizeHasRenderableVideo() && !videoElement.paused && !videoElement.ended;
+}
+function parallaizeSyncPlayableStreamState() {
+    if (!parallaizeHasRenderableVideo()) {
+        return false;
+    }
+    parallaizeVideoPlayRetryCount = 0;
+    app.showStart = false;
+    app.loadingText = "";
+    app.status = "connected";
+    return true;
+}
+function parallaizeQueueDataChannelMessage(message) {
+    if (typeof message !== "string" || message.length === 0 || parallaizePreviewMode) {
+        return;
+    }
+    if (parallaizePendingDataChannelMessages.length >= 64) {
+        parallaizePendingDataChannelMessages.shift();
+    }
+    parallaizePendingDataChannelMessages.push(message);
+}
+function parallaizeSendDataChannelMessage(message, queueIfUnavailable = true) {
+    if (parallaizePreviewMode) {
+        return false;
+    }
+    if (!parallaizeDataChannelOpen) {
+        if (queueIfUnavailable) {
+            parallaizeQueueDataChannelMessage(message);
+        }
+        return false;
+    }
+    try {
+        webrtc.sendDataChannelMessage(message);
+        return true;
+    } catch (err) {
+        parallaizeDataChannelOpen = false;
+        if (queueIfUnavailable) {
+            parallaizeQueueDataChannelMessage(message);
+        }
+        console.warn("Parallaize control channel send failed", err);
+        return false;
+    }
+}
+function parallaizeFlushPendingDataChannelMessages() {
+    if (!parallaizeDataChannelOpen || parallaizePendingDataChannelMessages.length === 0) {
+        return;
+    }
+    var pendingMessages = parallaizePendingDataChannelMessages.slice();
+    parallaizePendingDataChannelMessages = [];
+    for (var index = 0; index < pendingMessages.length; index += 1) {
+        try {
+            webrtc.sendDataChannelMessage(pendingMessages[index]);
+        } catch (err) {
+            parallaizeDataChannelOpen = false;
+            parallaizePendingDataChannelMessages = pendingMessages.slice(index).concat(
+                parallaizePendingDataChannelMessages,
+            );
+            console.warn("Parallaize control channel flush failed", err);
+            return;
+        }
+    }
+}
 function parallaizeScheduleAutoplayRetry(delay) {
     if (parallaizeVideoPlayRetryTimer !== null) {
         clearTimeout(parallaizeVideoPlayRetryTimer);
@@ -1813,7 +2043,7 @@ function parallaizeMaybeAutoplayVideo(delay = 0) {
         parallaizeScheduleAutoplayRetry(delay);
         return;
     }
-    if (videoConnected !== "connected" || videoElement.srcObject === null) {
+    if (videoElement.srcObject === null) {
         if (parallaizeVideoPlayRetryCount < 60) {
             parallaizeVideoPlayRetryCount += 1;
             parallaizeScheduleAutoplayRetry(250);
@@ -1823,9 +2053,8 @@ function parallaizeMaybeAutoplayVideo(delay = 0) {
     const playPromise = videoElement.play();
     if (playPromise !== undefined) {
         playPromise.then(() => {
-            parallaizeVideoPlayRetryCount = 0;
-            app.showStart = false;
-            app.loadingText = "";
+            parallaizeSyncPlayableStreamState();
+            parallaizeMaybeConnectAudio();
         }).catch(() => {
             if (parallaizeVideoPlayRetryCount < 60) {
                 parallaizeVideoPlayRetryCount += 1;
@@ -1834,14 +2063,21 @@ function parallaizeMaybeAutoplayVideo(delay = 0) {
         });
         return;
     }
-    parallaizeVideoPlayRetryCount = 0;
-    app.showStart = false;
-    app.loadingText = "";
+    parallaizeSyncPlayableStreamState();
+    parallaizeMaybeConnectAudio();
 }
 
 videoElement.addEventListener('loadeddata', (e) => {
     webrtc.input.getCursorScaleFactor();
     parallaizeMaybeAutoplayVideo(50);
+})
+videoElement.addEventListener('playing', () => {
+    if (parallaizePreviewMode) {
+        return;
+    }
+    parallaizeSyncPlayableStreamState();
+    parallaizeMaybeConnectAudio();
+    parallaizeMaybeActivateAudio();
 })
 '''
 contents = contents.replace(old_parallaize_autoplay_block, parallaize_autoplay_block)
@@ -1967,7 +2203,7 @@ contents = contents.replace(
 };
 ''',
     '''signalling.onstatus = (message) => {
-    if (videoConnected !== "connected") {
+    if (!parallaizeHasActiveVideoPlayback()) {
         app.loadingText = message;
     }
     app.logEntries.push(applyTimestamp("[signalling] " + message));
@@ -1982,7 +2218,7 @@ contents = contents.replace(
 };
 ''',
     '''audio_signalling.onstatus = (message) => {
-    if (videoConnected !== "connected") {
+    if (!parallaizeHasActiveVideoPlayback()) {
         app.loadingText = message;
     }
     app.logEntries.push(applyTimestamp("[audio signalling] " + message));
@@ -2280,6 +2516,12 @@ if 'if (parallaizePreviewMode) {\\n        return;\\n    }' not in contents:
     if (parallaizePreviewMode) {
         return;
     }
+    parallaizeDataChannelOpen = true;
+    parallaizeSyncStreamScale(true);
+    if (parallaizeBackgroundMode) {
+        parallaizeApplyBackgroundStreamProfile();
+    }
+    parallaizeFlushPendingDataChannelMessages();
     // Bind gamepad connected handler.
 ''',
     )
@@ -2291,6 +2533,7 @@ if 'webrtc.ondatachannelclose = () => {\\n    if (!parallaizePreviewMode) {' not
 }
 ''',
         '''webrtc.ondatachannelclose = () => {
+    parallaizeDataChannelOpen = false;
     if (!parallaizePreviewMode) {
         webrtc.input.detach();
     }
@@ -2337,14 +2580,14 @@ contents = contents.replace(
 ''',
 )
 
-if 'audio_webrtc.onplaystreamrequired = () => {\\n    if (parallaizePreviewMode || videoConnected === "connected") {' not in contents:
+if 'audio_webrtc.onplaystreamrequired = () => {\\n    if (parallaizePreviewMode || videoConnected === "connected" || parallaizeHasActiveVideoPlayback()) {' not in contents:
     contents = contents.replace(
         '''audio_webrtc.onplaystreamrequired = () => {
     app.showStart = true;
 }
 ''',
         '''audio_webrtc.onplaystreamrequired = () => {
-    if (parallaizePreviewMode || videoConnected === "connected") {
+    if (parallaizePreviewMode || videoConnected === "connected" || parallaizeHasActiveVideoPlayback()) {
         app.showStart = false;
         return;
     }
@@ -2363,7 +2606,7 @@ if 'audio_webrtc.onplaystreamrequired = () => {\\n    if (parallaizePreviewMode 
 }
 ''',
         '''audio_webrtc.onplaystreamrequired = () => {
-    if (parallaizePreviewMode || videoConnected === "connected") {
+    if (parallaizePreviewMode || videoConnected === "connected" || parallaizeHasActiveVideoPlayback()) {
         app.showStart = false;
         return;
     }
@@ -2383,7 +2626,7 @@ if 'audio_webrtc.onplaystreamrequired = () => {\\n    if (parallaizePreviewMode 
 }
 ''',
         '''audio_webrtc.onplaystreamrequired = () => {
-    if (parallaizePreviewMode || videoConnected === "connected") {
+    if (parallaizePreviewMode || videoConnected === "connected" || parallaizeHasActiveVideoPlayback()) {
         app.showStart = false;
         return;
     }
@@ -2400,7 +2643,7 @@ if 'audio_webrtc.onplaystreamrequired = () => {\\n    if (parallaizePreviewMode 
 }
 ''',
         '''audio_webrtc.onplaystreamrequired = () => {
-    if (parallaizePreviewMode || videoConnected === "connected") {
+    if (parallaizePreviewMode || videoConnected === "connected" || parallaizeHasActiveVideoPlayback()) {
         app.showStart = false;
         return;
     }
@@ -2412,7 +2655,7 @@ if 'audio_webrtc.onplaystreamrequired = () => {\\n    if (parallaizePreviewMode 
 if 'function shutdownSelkiesStream() {' not in contents:
     contents = contents.replace(
         '''audio_webrtc.onplaystreamrequired = () => {
-    if (parallaizePreviewMode || videoConnected === "connected") {
+    if (parallaizePreviewMode || videoConnected === "connected" || parallaizeHasActiveVideoPlayback()) {
         app.showStart = false;
         return;
     }
@@ -2420,7 +2663,7 @@ if 'function shutdownSelkiesStream() {' not in contents:
 }
 ''',
         '''audio_webrtc.onplaystreamrequired = () => {
-    if (parallaizePreviewMode || videoConnected === "connected") {
+    if (parallaizePreviewMode || videoConnected === "connected" || parallaizeHasActiveVideoPlayback()) {
         app.showStart = false;
         return;
     }
@@ -2431,13 +2674,13 @@ var parallaizeBackgroundMode = false;
 var parallaizeBackgroundRestoreProfile = null;
 function parallaizeApplyTransientStreamProfile(profile) {
     if (typeof profile.videoBitRate === "number") {
-        webrtc.sendDataChannelMessage('vb,' + profile.videoBitRate);
+        parallaizeSendDataChannelMessage('vb,' + profile.videoBitRate);
     }
     if (typeof profile.videoFramerate === "number") {
-        webrtc.sendDataChannelMessage('_arg_fps,' + profile.videoFramerate);
+        parallaizeSendDataChannelMessage('_arg_fps,' + profile.videoFramerate);
     }
     if (typeof profile.audioBitRate === "number") {
-        webrtc.sendDataChannelMessage('ab,' + profile.audioBitRate);
+        parallaizeSendDataChannelMessage('ab,' + profile.audioBitRate);
     }
 }
 function parallaizeApplyBackgroundStreamProfile() {
@@ -2572,13 +2815,13 @@ if 'function parallaizeSetBackgroundMode(background) {' not in contents:
 var parallaizeBackgroundRestoreProfile = null;
 function parallaizeApplyTransientStreamProfile(profile) {
     if (typeof profile.videoBitRate === "number") {
-        webrtc.sendDataChannelMessage('vb,' + profile.videoBitRate);
+        parallaizeSendDataChannelMessage('vb,' + profile.videoBitRate);
     }
     if (typeof profile.videoFramerate === "number") {
-        webrtc.sendDataChannelMessage('_arg_fps,' + profile.videoFramerate);
+        parallaizeSendDataChannelMessage('_arg_fps,' + profile.videoFramerate);
     }
     if (typeof profile.audioBitRate === "number") {
-        webrtc.sendDataChannelMessage('ab,' + profile.audioBitRate);
+        parallaizeSendDataChannelMessage('ab,' + profile.audioBitRate);
     }
 }
 function parallaizeApplyBackgroundStreamProfile() {
@@ -2761,13 +3004,7 @@ function parallaizeNotifyGuestClipboardListeners(content) {
     });
 }
 function parallaizeSendClipboardMessage(message) {
-    try {
-        webrtc.sendDataChannelMessage(message);
-        return true;
-    } catch (err) {
-        webrtc._setStatus('Could not send clipboard contents: ' + err);
-        return false;
-    }
+    return parallaizeSendDataChannelMessage(message);
 }
 function parallaizeResolveStreamScale() {
     var scale =
@@ -2811,9 +3048,9 @@ function parallaizeSyncStreamScale(sendResolution = true) {
         if (sendResolution) {
             var newRes = parseInt(app.windowResolution[0]) + "x" + parseInt(app.windowResolution[1]);
             console.log(\`Window size changed: \${app.windowResolution[0]}x\${app.windowResolution[1]}, scaled to: \${newRes} @ \${parallaizeResolveStreamScale()}\`);
-            webrtc.sendDataChannelMessage("r," + newRes);
+            parallaizeSendDataChannelMessage("r," + newRes);
         }
-        webrtc.sendDataChannelMessage("s," + parallaizeResolveStreamScale());
+        parallaizeSendDataChannelMessage("s," + parallaizeResolveStreamScale());
         parallaizeApplyStreamPixelation();
         return true;
     } catch (err) {
@@ -2829,6 +3066,9 @@ window.parallaizeWriteGuestClipboard = (text) => {
 };
 window.parallaizeRequestGuestClipboard = () => {
     return parallaizeSendClipboardMessage("cr");
+};
+window.parallaizeGetStreamScale = () => {
+    return parallaizeResolveStreamScale();
 };
 window.parallaizeSetStreamScale = (scale) => {
     var nextScale = Number(scale);
@@ -2857,18 +3097,9 @@ window.parallaizeSubscribeGuestClipboard = (listener) => {
     };
 };
 window.parallaizeGetStreamState = () => {
-    const waitingForStream =
-        typeof app.loadingText === 'string' &&
-        app.loadingText.toLowerCase().includes('waiting for stream');
-
+    const activeVideoPlayback = parallaizeHasActiveVideoPlayback();
     return {
-        ready:
-            videoConnected === "connected" &&
-            videoElement.srcObject !== null &&
-            videoElement.videoWidth > 0 &&
-            videoElement.videoHeight > 0 &&
-            !app.showStart &&
-            !waitingForStream,
+        ready: activeVideoPlayback && !app.showStart,
         status:
             typeof app.loadingText === 'string' && app.loadingText.length > 0
                 ? app.loadingText
@@ -2888,6 +3119,8 @@ window.parallaizeKickStream = (reason = 'manual') => {
         parallaizeVideoPlayRetryTimer = null;
     }
     parallaizeVideoPlayRetryCount = 0;
+    parallaizeDataChannelOpen = false;
+    parallaizePendingDataChannelMessages = [];
     videoElement.style.cursor = "auto";
     app.showStart = false;
     app.status = "connecting";
@@ -2930,12 +3163,12 @@ window.parallaizeKickStream = (reason = 'manual') => {
 };
 window.addEventListener('focus', () => {
     // reset keyboard to avoid stuck keys.
-    webrtc.sendDataChannelMessage("kr");
+    parallaizeSendDataChannelMessage("kr");
 
     // Send clipboard contents.
     navigator.clipboard.readText()
         .then(text => {
-            webrtc.sendDataChannelMessage("cw," + stringToBase64(text))
+            parallaizeSendClipboardMessage("cw," + stringToBase64(text))
         })
         .catch(err => {
             webrtc._setStatus('Failed to read clipboard contents: ' + err);
@@ -2943,7 +3176,7 @@ window.addEventListener('focus', () => {
 });
 window.addEventListener('blur', () => {
     // reset keyboard to avoid stuck keys.
-    webrtc.sendDataChannelMessage("kr");
+    parallaizeSendDataChannelMessage("kr");
 });
 
 webrtc.onclipboardcontent = (content) => {
@@ -3326,6 +3559,8 @@ required_app_tokens = [
     "window.parallaizeSetBackgroundMode = parallaizeSetBackgroundMode;",
     "var parallaizeGuestClipboardListeners = new Set();",
     "function parallaizeApplyStreamPixelation() {",
+    "function parallaizeHasActiveVideoPlayback() {",
+    "function parallaizeSendDataChannelMessage(message, queueIfUnavailable = true) {",
     ':root[data-parallaize-stream-pixelated="true"] .video { image-rendering: crisp-edges; image-rendering: pixelated; }',
     "function parallaizeMaybeConnectAudio() {",
 ]
@@ -3573,6 +3808,9 @@ function buildGuestDesktopBootstrapScript(
   transport: VmDesktopTransport = "vnc",
   selkiesPort: number = DEFAULT_GUEST_SELKIES_PORT,
   selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
+  vmId?: string,
+  streamHealthToken?: string | null,
+  controlPlanePort = 3000,
 ): string {
   const repairTimings = resolveGuestDesktopBootstrapRepairTimings(repairProfile);
   const resetDisplayStateOnRepair = repairProfile === "aggressive";
@@ -3596,6 +3834,27 @@ function buildGuestDesktopBootstrapScript(
     transport === "selkies"
       ? buildGuestSelkiesServiceUnit()
       : buildGuestVncServiceUnit();
+  const streamHealthEnabled =
+    transport === "selkies" &&
+    typeof vmId === "string" &&
+    vmId.length > 0 &&
+    typeof streamHealthToken === "string" &&
+    streamHealthToken.length > 0;
+  const streamHealthScriptFile = "/usr/local/bin/parallaize-selkies-heartbeat";
+  const streamHealthServiceName = "parallaize-selkies-heartbeat.service";
+  const streamHealthServiceFile = `/etc/systemd/system/${streamHealthServiceName}`;
+  const desiredStreamHealthScript =
+    streamHealthEnabled && vmId && streamHealthToken
+      ? buildGuestSelkiesStreamHealthScript(
+          vmId,
+          streamHealthToken,
+          controlPlanePort,
+          selkiesPort,
+        )
+      : "";
+  const desiredStreamHealthService = streamHealthEnabled
+    ? buildGuestSelkiesStreamHealthServiceUnit()
+    : "";
   const desktopPackageChecks =
     transport === "selkies"
       ? `if ! command -v xrandr >/dev/null 2>&1 || ! command -v cvt >/dev/null 2>&1; then
@@ -3609,6 +3868,9 @@ if ! command -v import >/dev/null 2>&1; then
 fi
 if ! command -v xsel >/dev/null 2>&1; then
   MISSING_PACKAGES="$MISSING_PACKAGES xsel"
+fi
+if ! python3 -c 'import websockets' >/dev/null 2>&1; then
+  MISSING_PACKAGES="$MISSING_PACKAGES python3-websockets"
 fi
 ${buildGuestSelkiesInstallScript()}`
       : `if ! command -v x11vnc >/dev/null 2>&1; then
@@ -3626,6 +3888,9 @@ GDM_FILE="/etc/gdm3/custom.conf"
 DESKTOP_SERVICE_NAME="${desktopServiceName}"
 LAUNCHER_FILE="${launcherFile}"
 SERVICE_FILE="${serviceFile}"
+STREAM_HEALTH_SERVICE_NAME="${streamHealthServiceName}"
+STREAM_HEALTH_SCRIPT_FILE="${streamHealthScriptFile}"
+STREAM_HEALTH_SERVICE_FILE="${streamHealthServiceFile}"
 RENDERING_ENV_FILE="/etc/environment.d/90-parallaize-rendering.conf"
 SESSION_HEALTH_FILE="${DEFAULT_GUEST_DESKTOP_HEALTH_CHECK}"
 SESSION_SETUP_FILE="/usr/local/bin/parallaize-desktop-session-setup"
@@ -3658,6 +3923,16 @@ SCRIPT
 CURRENT_SERVICE="$(cat "$SERVICE_FILE" 2>/dev/null || true)"
 DESIRED_SERVICE="$(cat <<'UNIT'
 ${desiredService}
+UNIT
+)"
+CURRENT_STREAM_HEALTH_SCRIPT="$(cat "$STREAM_HEALTH_SCRIPT_FILE" 2>/dev/null || true)"
+DESIRED_STREAM_HEALTH_SCRIPT="$(cat <<'SCRIPT'
+${desiredStreamHealthScript}
+SCRIPT
+)"
+CURRENT_STREAM_HEALTH_SERVICE="$(cat "$STREAM_HEALTH_SERVICE_FILE" 2>/dev/null || true)"
+DESIRED_STREAM_HEALTH_SERVICE="$(cat <<'UNIT'
+${desiredStreamHealthService}
 UNIT
 )"
 CURRENT_RENDERING_ENV="$(cat "$RENDERING_ENV_FILE" 2>/dev/null || true)"
@@ -3705,6 +3980,7 @@ DESKTOP
 )"
 RESTART_GDM=0
 RESTART_DESKTOP=0
+RESTART_STREAM_HEALTH=0
 RESTART_WAIT_ONLINE=0
 STOP_PLYMOUTH_QUIT_WAIT=0
 MISSING_PACKAGES=""
@@ -3714,6 +3990,17 @@ enable_desktop_service() {
   fi
   mkdir -p /etc/systemd/system/multi-user.target.wants
   ln -sf "$SERVICE_FILE" "/etc/systemd/system/multi-user.target.wants/$DESKTOP_SERVICE_NAME"
+  systemctl daemon-reload
+}
+enable_stream_health_service() {
+  if [ -z "$DESIRED_STREAM_HEALTH_SCRIPT" ] || [ -z "$DESIRED_STREAM_HEALTH_SERVICE" ]; then
+    return 0
+  fi
+  if systemctl enable "$STREAM_HEALTH_SERVICE_NAME" >/dev/null 2>&1; then
+    return 0
+  fi
+  mkdir -p /etc/systemd/system/multi-user.target.wants
+  ln -sf "$STREAM_HEALTH_SERVICE_FILE" "/etc/systemd/system/multi-user.target.wants/$STREAM_HEALTH_SERVICE_NAME"
   systemctl daemon-reload
 }
 reset_guest_display_state() {
@@ -3808,6 +4095,25 @@ ${desiredService}
 UNIT
   RESTART_DESKTOP=1
 fi
+if [ -n "$DESIRED_STREAM_HEALTH_SCRIPT" ] && [ "$CURRENT_STREAM_HEALTH_SCRIPT" != "$DESIRED_STREAM_HEALTH_SCRIPT" ]; then
+  mkdir -p /usr/local/bin
+  cat > "$STREAM_HEALTH_SCRIPT_FILE" <<'SCRIPT'
+${desiredStreamHealthScript}
+SCRIPT
+  chmod 0755 "$STREAM_HEALTH_SCRIPT_FILE"
+  RESTART_STREAM_HEALTH=1
+fi
+if [ -n "$DESIRED_STREAM_HEALTH_SERVICE" ] && [ "$CURRENT_STREAM_HEALTH_SERVICE" != "$DESIRED_STREAM_HEALTH_SERVICE" ]; then
+  mkdir -p /etc/systemd/system
+  cat > "$STREAM_HEALTH_SERVICE_FILE" <<'UNIT'
+${desiredStreamHealthService}
+UNIT
+  RESTART_STREAM_HEALTH=1
+fi
+if [ -z "$DESIRED_STREAM_HEALTH_SCRIPT" ] || [ -z "$DESIRED_STREAM_HEALTH_SERVICE" ]; then
+  systemctl disable --now "$STREAM_HEALTH_SERVICE_NAME" >/dev/null 2>&1 || true
+  rm -f "$STREAM_HEALTH_SCRIPT_FILE" "$STREAM_HEALTH_SERVICE_FILE"
+fi
 if [ "$CURRENT_RENDERING_ENV" != "$DESIRED_RENDERING_ENV" ]; then
   mkdir -p /etc/environment.d
   cat > "$RENDERING_ENV_FILE" <<'ENV'
@@ -3875,6 +4181,7 @@ if [ "$STOP_PLYMOUTH_QUIT_WAIT" -eq 1 ]; then
   systemctl stop --no-block plymouth-quit-wait.service >/dev/null 2>&1 || true
 fi
 enable_desktop_service
+enable_stream_health_service
 if [ "$RESTART_GDM" -eq 1 ]; then
   systemctl restart gdm3 || true
   sleep 2
@@ -3882,6 +4189,11 @@ fi
 repair_guest_desktop_if_unhealthy
 if [ "$RESTART_DESKTOP" -eq 1 ] || ! systemctl is-active --quiet "$DESKTOP_SERVICE_NAME"; then
   systemctl restart --no-block "$DESKTOP_SERVICE_NAME"
+fi
+if [ -n "$DESIRED_STREAM_HEALTH_SCRIPT" ] && [ -n "$DESIRED_STREAM_HEALTH_SERVICE" ]; then
+  if [ "$RESTART_STREAM_HEALTH" -eq 1 ] || ! systemctl is-active --quiet "$STREAM_HEALTH_SERVICE_NAME"; then
+    systemctl restart --no-block "$STREAM_HEALTH_SERVICE_NAME" || true
+  fi
 fi`;
 }
 
@@ -3963,6 +4275,9 @@ function buildGuestCloudInit(
   inotifySettings: GuestInotifySettings,
   vmName?: string,
   selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
+  vmId?: string,
+  streamHealthToken?: string | null,
+  controlPlanePort = 3000,
 ): string {
   const launcherPath =
     transport === "selkies"
@@ -4014,6 +4329,9 @@ ${indentBlock(
           transport,
           port,
           selkiesRtcConfig,
+          vmId,
+          streamHealthToken,
+          controlPlanePort,
         ),
         "      ",
       )}
@@ -4069,8 +4387,20 @@ export function buildGuestSelkiesCloudInit(
   inotifySettings: GuestInotifySettings,
   vmName?: string,
   selkiesRtcConfig: GuestSelkiesRtcConfig | null = null,
+  vmId?: string,
+  streamHealthToken?: string | null,
+  controlPlanePort = 3000,
 ): string {
-  return buildGuestCloudInit("selkies", port, inotifySettings, vmName, selkiesRtcConfig);
+  return buildGuestCloudInit(
+    "selkies",
+    port,
+    inotifySettings,
+    vmName,
+    selkiesRtcConfig,
+    vmId,
+    streamHealthToken,
+    controlPlanePort,
+  );
 }
 
 function indentBlock(value: string, prefix: string): string {

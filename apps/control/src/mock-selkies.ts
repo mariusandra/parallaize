@@ -268,6 +268,14 @@ export function buildMockSelkiesDocument({
       window.parallaizeSetStreamStatus = (status) => {
         setStreamStatus(typeof status === "string" ? status : "");
       };
+      window.parallaizeGetStreamScale = () => {
+        if (!(shell instanceof HTMLElement)) {
+          return null;
+        }
+
+        const scale = Number(shell.dataset.streamScale ?? "");
+        return Number.isFinite(scale) && scale > 0 ? scale : null;
+      };
       window.parallaizeGetStreamState = () => {
         return {
           ready: !(shell instanceof HTMLElement) || shell.dataset.streamReady !== "false",

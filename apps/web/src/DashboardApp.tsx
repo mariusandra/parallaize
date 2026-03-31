@@ -69,10 +69,13 @@ import {
   focusEmbeddedFrameTarget,
 } from "./embeddedFrameFocus.js";
 import {
+  createSelkiesStreamRecoveryState,
   kickEmbeddedBrowserStream,
+  readEmbeddedBrowserStreamScale,
   readEmbeddedBrowserStreamState,
   setEmbeddedBrowserStreamScale,
   type EmbeddedBrowserStreamState,
+  updateSelkiesStreamRecoveryState,
 } from "./embeddedBrowserStream.js";
 import {
   hasBrowserDesktopSession,
@@ -274,6 +277,8 @@ const selkiesAutoKickCooldownMs = 15_000;
 const selkiesAutoReloadCooldownMs = 5_000;
 const selkiesAutoReloadAfterWaitingKickMs = 30_000;
 const selkiesAutoReloadAfterFailedKickMs = 7_500;
+const selkiesAutoRepairThresholdMs = 45_000;
+const selkiesAutoRepairCooldownMs = 5 * 60_000;
 
 interface CachedStageBrowserSession {
   browserPath: string;
@@ -333,7 +338,6 @@ function buildSelkiesStageSessionKey(
 function describeSelkiesStageScale(
   preference: DesktopResolutionPreference,
   browserDevicePixelRatio: number,
-  nativeScale: number | null,
 ): SelkiesStageScaleDescriptor {
   if (preference.mode !== "viewport") {
     return {
@@ -346,11 +350,10 @@ function describeSelkiesStageScale(
     appliedScale,
     browserDevicePixelRatio,
   );
-  const usesNativeScale = sameSelkiesStageScale(nativeScale, appliedScale);
 
   return {
     fallbackFrameStyle:
-      !usesNativeScale && Math.abs(fallbackScale - 1) > 0.001
+      Math.abs(fallbackScale - 1) > 0.001
         ? ({
             height: `${100 / fallbackScale}%`,
             transform: `scale(${fallbackScale})`,
@@ -579,6 +582,7 @@ export function DashboardApp(): JSX.Element {
     useState<DesktopResolutionState>(emptyResolutionState);
   const [documentVisible, setDocumentVisible] = useState(() => readDocumentVisible());
   const [relinquishedStageVmId, setRelinquishedStageVmId] = useState<string | null>(null);
+  const [sessionRecoveryBusyVmId, setSessionRecoveryBusyVmId] = useState<string | null>(null);
   const [resolutionControlStatus, setResolutionControlStatus] =
     useState<ResolutionControlStatus>({
       controllerClientId: null,
@@ -630,6 +634,7 @@ export function DashboardApp(): JSX.Element {
   });
   const resolutionRetryStateRef = useRef<ResolutionRetryState | null>(null);
   const resolutionRetryTimerRef = useRef<number | null>(null);
+  const selkiesAutoRepairAttemptAtRef = useRef<Map<string, number>>(new Map());
   const [availableViewportBounds, setAvailableViewportBounds] =
     useState<ViewportBounds>(emptyViewportBounds);
   const [observedViewportBounds, setObservedViewportBounds] =
@@ -719,6 +724,23 @@ export function DashboardApp(): JSX.Element {
     activeStageBrowserSession && currentStageVm
       ? currentStageVm.id
       : null;
+  const selectedSelkiesRecoveryTarget =
+    selectedVm &&
+    currentStageVm?.id === selectedVm.id &&
+    activeStageBrowserVmId === selectedVm.id &&
+    displayedStageSession?.kind === "selkies" &&
+    displayedStageSession.browserPath &&
+    !stageSessionRelinquished
+      ? {
+          browserPath: displayedStageSession.browserPath,
+          vmName: currentStageVm?.name ?? selectedVm.name,
+        }
+      : null;
+  const canRepairSelectedDesktopBridge =
+    selectedVm !== null &&
+    selectedVm.status === "running" &&
+    selectedVm.provider === "incus" &&
+    summary?.provider.kind === "incus";
   const stageBrowserSessionsByVm =
     activeStageBrowserSession && currentStageVm
       ? {
@@ -999,6 +1021,129 @@ export function DashboardApp(): JSX.Element {
     });
   }
 
+  function kickBrowserStream(vm: VmInstance): void {
+    if (!selectedSelkiesRecoveryTarget || selectedVm?.id !== vm.id) {
+      setNotice({
+        tone: "error",
+        message: `Open ${vm.name} on this stage before kicking its Selkies stream.`,
+      });
+      return;
+    }
+
+    if (kickEmbeddedBrowserStream(stageBrowserFrameRef.current, "manual-sidepanel")) {
+      setNotice({
+        tone: "info",
+        message: `Requested a Selkies reconnect for ${vm.name}.`,
+      });
+      return;
+    }
+
+    requestStageBrowserReload(vm.id, selectedSelkiesRecoveryTarget.browserPath, vm.name);
+    setNotice({
+      tone: "info",
+      message: `Fell back to a full Selkies frame reload for ${vm.name}.`,
+    });
+  }
+
+  function reloadBrowserStream(vm: VmInstance): void {
+    if (!selectedSelkiesRecoveryTarget || selectedVm?.id !== vm.id) {
+      setNotice({
+        tone: "error",
+        message: `Open ${vm.name} on this stage before reloading its Selkies frame.`,
+      });
+      return;
+    }
+
+    requestStageBrowserReload(vm.id, selectedSelkiesRecoveryTarget.browserPath, vm.name);
+    setNotice({
+      tone: "info",
+      message: `Reloading the Selkies frame for ${vm.name}.`,
+    });
+  }
+
+  async function repairDesktopBridge(
+    vm: VmInstance,
+    mode: "automatic" | "manual" = "manual",
+  ): Promise<void> {
+    if (sessionRecoveryBusyVmId === vm.id) {
+      return;
+    }
+
+    if (
+      vm.status !== "running" ||
+      vm.provider !== "incus" ||
+      summary?.provider.kind !== "incus"
+    ) {
+      if (mode === "manual") {
+        setNotice({
+          tone: "error",
+          message: `Desktop bridge repair is only available for running Incus VMs.`,
+        });
+      }
+      return;
+    }
+
+    setSessionRecoveryBusyVmId(vm.id);
+
+    if (mode === "automatic") {
+      setNotice({
+        tone: "info",
+        message: `${vm.name} stayed stuck in Selkies recovery. Repairing the guest desktop bridge.`,
+      });
+    }
+
+    try {
+      const repairedDetail = await postJson<VmDetail>(
+        `/api/vms/${vm.id}/desktop-bridge/repair`,
+        {},
+      );
+
+      if (selectedVmIdRef.current === vm.id) {
+        startTransition(() => {
+          setDetail(repairedDetail);
+        });
+      }
+
+      await refreshSummary();
+      if (selectedVmIdRef.current === vm.id) {
+        await refreshDetail(vm.id);
+      }
+
+      const activeRecoveryTarget =
+        currentStageVm?.id === vm.id &&
+        displayedStageSession?.kind === "selkies" &&
+        displayedStageSession.browserPath &&
+        !stageSessionRelinquished
+          ? {
+              browserPath: displayedStageSession.browserPath,
+              vmName: currentStageVm?.name ?? vm.name,
+            }
+          : null;
+
+      if (activeRecoveryTarget) {
+        requestStageBrowserReload(vm.id, activeRecoveryTarget.browserPath, activeRecoveryTarget.vmName);
+      }
+
+      setNotice({
+        tone: "success",
+        message:
+          mode === "automatic"
+            ? `Repaired ${vm.name} after its Selkies stream stayed stuck.`
+            : `Repaired the desktop bridge for ${vm.name}.`,
+      });
+    } catch (error: unknown) {
+      setNotice({
+        tone: "error",
+        message:
+          mode === "automatic"
+            ? `Automatic desktop bridge repair failed for ${vm.name}: ${errorMessage(error)}`
+            : errorMessage(error),
+      });
+    } finally {
+      setSessionRecoveryBusyVmId((current) => (current === vm.id ? null : current));
+    }
+  }
+
   function syncSelkiesStageNativeScale(frame: HTMLIFrameElement | null): boolean {
     if (
       activeStageBrowserVmId === null ||
@@ -1012,16 +1157,11 @@ export function DashboardApp(): JSX.Element {
 
     const activeBrowserPath = displayedStageSession.browserPath;
     const activeVmName = currentStageVm?.name ?? "Desktop";
-    const activeSession = cachedStageBrowserSessions[activeStageBrowserVmId];
-
-    if (
-      activeSession?.browserPath === activeBrowserPath &&
-      sameSelkiesStageScale(activeSession.nativeScale, appliedDesktopViewportScale)
-    ) {
-      return true;
-    }
-
-    const applied = setEmbeddedBrowserStreamScale(frame, appliedDesktopViewportScale);
+    const currentScale = readEmbeddedBrowserStreamScale(frame);
+    const applied =
+      (currentScale !== null &&
+        sameSelkiesStageScale(currentScale, appliedDesktopViewportScale)) ||
+      setEmbeddedBrowserStreamScale(frame, appliedDesktopViewportScale);
 
     if (!applied) {
       return false;
@@ -1466,74 +1606,74 @@ export function DashboardApp(): JSX.Element {
 
     const browserPath = displayedStageSession.browserPath;
     const vmName = currentStageVm?.name ?? "Desktop";
-    let trackedCandidate: "failed" | "waiting" | null = null;
-    let candidateSinceMs = 0;
-    let kickCount = 0;
-    let lastRecoveryAttemptMs = 0;
+    let recoveryState = createSelkiesStreamRecoveryState();
 
     const pollStreamRecovery = (): void => {
       const state = readEmbeddedBrowserStreamState(stageBrowserFrameRef.current);
       const candidate = resolveSelkiesStreamKickCandidate(state);
-
-      if (candidate === null) {
-        trackedCandidate = null;
-        candidateSinceMs = 0;
-        kickCount = 0;
-        lastRecoveryAttemptMs = 0;
-        return;
-      }
-
       const now = Date.now();
+      recoveryState = updateSelkiesStreamRecoveryState(
+        recoveryState,
+        state,
+        candidate,
+        now,
+      );
 
-      if (trackedCandidate !== candidate) {
-        trackedCandidate = candidate;
-        candidateSinceMs = now;
-        kickCount = 0;
-        lastRecoveryAttemptMs = 0;
+      if (recoveryState.trackedCandidate === null) {
         return;
       }
 
+      const trackedCandidate = recoveryState.trackedCandidate;
       const reloadThresholdMs =
-        candidate === "failed"
+        trackedCandidate === "failed"
           ? selkiesAutoReloadAfterFailedKickMs
           : selkiesAutoReloadAfterWaitingKickMs;
 
       if (
-        kickCount > 0 &&
-        now - candidateSinceMs >= reloadThresholdMs &&
-        now - lastRecoveryAttemptMs >= selkiesAutoReloadCooldownMs
+        recoveryState.kickCount > 0 &&
+        now - recoveryState.candidateSinceMs >= reloadThresholdMs &&
+        now - recoveryState.lastRecoveryAttemptMs >= selkiesAutoReloadCooldownMs
       ) {
         requestStageBrowserReload(
           activeStageBrowserVmId,
           browserPath,
           vmName,
         );
-        candidateSinceMs = now;
-        kickCount = 0;
-        lastRecoveryAttemptMs = now;
+        recoveryState = {
+          ...recoveryState,
+          candidateSinceMs: now,
+          kickCount: 0,
+          lastRecoveryAttemptMs: now,
+        };
         return;
       }
 
-      if (kickCount > 0) {
+      if (recoveryState.kickCount > 0) {
         return;
       }
 
       const thresholdMs =
-        candidate === "failed"
+        trackedCandidate === "failed"
           ? selkiesAutoKickFailedThresholdMs
           : selkiesAutoKickWaitingThresholdMs;
 
-      if (now - candidateSinceMs < thresholdMs) {
+      if (now - recoveryState.candidateSinceMs < thresholdMs) {
         return;
       }
 
-      if (now - lastRecoveryAttemptMs < selkiesAutoKickCooldownMs) {
+      if (now - recoveryState.lastRecoveryAttemptMs < selkiesAutoKickCooldownMs) {
         return;
       }
 
-      lastRecoveryAttemptMs = now;
+      recoveryState = {
+        ...recoveryState,
+        lastRecoveryAttemptMs: now,
+      };
       if (kickEmbeddedBrowserStream(stageBrowserFrameRef.current, `auto-${candidate}`)) {
-        kickCount += 1;
+        recoveryState = {
+          ...recoveryState,
+          kickCount: recoveryState.kickCount + 1,
+        };
         return;
       }
 
@@ -1542,8 +1682,11 @@ export function DashboardApp(): JSX.Element {
         browserPath,
         vmName,
       );
-      candidateSinceMs = now;
-      lastRecoveryAttemptMs = now;
+      recoveryState = {
+        ...recoveryState,
+        candidateSinceMs: now,
+        lastRecoveryAttemptMs: now,
+      };
     };
 
     pollStreamRecovery();
@@ -1557,6 +1700,78 @@ export function DashboardApp(): JSX.Element {
     currentStageVm?.name,
     displayedStageSession?.kind,
     displayedStageSession?.browserPath,
+    stageSessionRelinquished,
+  ]);
+
+  useEffect(() => {
+    if (
+      activeStageBrowserVmId === null ||
+      displayedStageSession?.kind !== "selkies" ||
+      !displayedStageSession.browserPath ||
+      stageSessionRelinquished ||
+      !currentStageVm ||
+      currentStageVm.status !== "running" ||
+      currentStageVm.provider !== "incus"
+    ) {
+      return;
+    }
+
+    let trackedCandidate: "failed" | "waiting" | null = null;
+    let candidateSinceMs = 0;
+
+    const pollAutomaticRepair = (): void => {
+      const state = readEmbeddedBrowserStreamState(stageBrowserFrameRef.current);
+      const candidate = resolveSelkiesStreamKickCandidate(state);
+      const normalizedStatus = state?.status?.trim().toLowerCase() ?? "";
+      const reconnecting =
+        normalizedStatus.includes("reconnecting stream") && state?.ready !== true;
+      const now = Date.now();
+
+      if (candidate !== null) {
+        if (trackedCandidate !== candidate) {
+          trackedCandidate = candidate;
+          candidateSinceMs = now;
+        }
+      } else if (!(reconnecting && trackedCandidate !== null)) {
+        trackedCandidate = null;
+        candidateSinceMs = 0;
+        return;
+      }
+
+      const lastAttemptAt =
+        selkiesAutoRepairAttemptAtRef.current.get(currentStageVm.id) ?? 0;
+
+      if (
+        candidateSinceMs === 0 ||
+        sessionRecoveryBusyVmId === currentStageVm.id ||
+        busyLabel !== null ||
+        now - candidateSinceMs < selkiesAutoRepairThresholdMs ||
+        now - lastAttemptAt < selkiesAutoRepairCooldownMs
+      ) {
+        return;
+      }
+
+      selkiesAutoRepairAttemptAtRef.current.set(currentStageVm.id, now);
+      void repairDesktopBridge(currentStageVm, "automatic");
+    };
+
+    pollAutomaticRepair();
+    const pollId = window.setInterval(pollAutomaticRepair, 1_000);
+
+    return () => {
+      window.clearInterval(pollId);
+    };
+  }, [
+    activeStageBrowserVmId,
+    busyLabel,
+    currentStageVm,
+    currentStageVm?.id,
+    currentStageVm?.provider,
+    currentStageVm?.status,
+    displayedStageSession?.browserPath,
+    displayedStageSession?.kind,
+    repairDesktopBridge,
+    sessionRecoveryBusyVmId,
     stageSessionRelinquished,
   ]);
 
@@ -1622,7 +1837,6 @@ export function DashboardApp(): JSX.Element {
           const sessionScaleDescriptor = describeSelkiesStageScale(
             sessionResolutionPreference,
             browserDevicePixelRatio,
-            session.nativeScale,
           );
           const cachedViewportStyle =
             !active &&
@@ -4029,6 +4243,7 @@ export function DashboardApp(): JSX.Element {
                 resolutionDraft={resolutionDraft}
                 resolutionState={effectiveDesktopResolution}
                 resourceDraft={resourceDraft}
+                sessionRecoveryBusy={sessionRecoveryBusyVmId === selectedVm.id}
                 summary={summary}
                 touchedFiles={vmTouchedFiles}
                 touchedFilesError={vmTouchedFilesError}
@@ -4040,6 +4255,9 @@ export function DashboardApp(): JSX.Element {
                 onCommandDraftChange={setCommandDraft}
                 onDelete={handleDelete}
                 onForwardDraftChange={setForwardDraft}
+                onKickBrowserStream={kickBrowserStream}
+                onReloadBrowserStream={reloadBrowserStream}
+                onRepairDesktopBridge={repairDesktopBridge}
                 onResolutionModeChange={(mode) => applyResolutionMode(selectedVm.id, mode)}
                 onResolutionDraftChange={setResolutionDraft}
                 onTakeOverResolutionControl={handleTakeOverResolutionControl}
@@ -4068,6 +4286,9 @@ export function DashboardApp(): JSX.Element {
                 resizable={!compactSidepanelLayout}
                 style={sidepanelStyle}
                 width={displayedSidepanelWidth}
+                canKickBrowserStream={selectedSelkiesRecoveryTarget !== null}
+                canReloadBrowserStream={selectedSelkiesRecoveryTarget !== null}
+                canRepairDesktopBridge={canRepairSelectedDesktopBridge}
                 onResizeKeyDown={handleSidepanelResizeKeyDown}
                 onResizePointerDown={handleSidepanelResizeStart}
               />

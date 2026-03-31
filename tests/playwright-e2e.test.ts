@@ -170,6 +170,41 @@ test("Chromium Playwright dashboard browser integration", async (context) => {
     });
   });
 
+  await context.test("Selkies recovery controls can kick and reload the active stream", async (subtest) => {
+    await withDashboard(subtest, async ({ page }) => {
+      const vmName = "selkies-e2e-recovery-controls";
+
+      await createVm(page, vmName);
+      await openVm(page, vmName);
+
+      await setMockStreamState(page, vmName, {
+        ready: false,
+        status: "Connection failed.",
+      });
+      await page.getByRole("button", { name: "Kick stream" }).click();
+
+      await waitFor(
+        `${vmName} kick recovery control restores the stream`,
+        async () =>
+          (await mockStreamKickCount(page, vmName)) >= 1 &&
+          (await mockStreamReady(page, vmName)) === true,
+        6_000,
+      );
+
+      await requireMockReloadRecovery(page, vmName);
+      const reloadCountBefore = await mockStreamReloadCount(page, vmName);
+      await page.getByRole("button", { name: "Reload frame" }).click();
+
+      await waitFor(
+        `${vmName} reload recovery control refreshes the iframe`,
+        async () =>
+          (await mockStreamReloadCount(page, vmName)) > reloadCountBefore &&
+          (await mockStreamReady(page, vmName)) === true,
+        8_000,
+      );
+    });
+  });
+
   await context.test("opening a Selkies VM keeps a visible rail preview while the captured image loads", async (subtest) => {
     await withDashboard(subtest, async ({ page }) => {
       const firstVm = "selkies-e2e-preview-handoff-a";
@@ -288,6 +323,53 @@ test("Chromium Playwright dashboard browser integration", async (context) => {
       await waitFor(
         `${vmName} marks the stream as pixelated while the browser upscales it`,
         async () => (await mockStreamPixelated(page, vmName)) === true,
+      );
+      await waitFor(
+        `${vmName} keeps the stage fallback scale active after the frame settles`,
+        async () => {
+          const style = await page
+            .locator(".workspace-stage__browser-host--active .workspace-stage__browser-frame-scale")
+            .getAttribute("style");
+
+          return style?.includes("scale(2)") === true &&
+            style.includes("width: 50%") &&
+            style.includes("height: 50%");
+        },
+      );
+    }, {
+      deviceScaleFactor: 2,
+      viewport: {
+        width: 1600,
+        height: 1000,
+      },
+    });
+  });
+
+  await context.test("reloading a Selkies frame reapplies the requested scale on high-DPI browsers", async (subtest) => {
+    await withDashboard(subtest, async ({ page }) => {
+      const vmName = "selkies-e2e-scale-reload";
+
+      await createVm(page, vmName);
+      await openVm(page, vmName);
+
+      await waitFor(
+        `${vmName} normalizes the initial mock stream scale back to DPR 1`,
+        async () => (await mockStreamScale(page, vmName)) === "1",
+      );
+
+      await requireMockReloadRecovery(page, vmName);
+      const reloadCountBefore = await mockStreamReloadCount(page, vmName);
+      await page.getByRole("button", { name: "Reload frame" }).click();
+
+      await waitFor(
+        `${vmName} reloads the Selkies frame`,
+        async () => (await mockStreamReloadCount(page, vmName)) > reloadCountBefore,
+        8_000,
+      );
+      await waitFor(
+        `${vmName} reapplies the requested stream scale after reload`,
+        async () => (await mockStreamScale(page, vmName)) === "1",
+        8_000,
       );
     }, {
       deviceScaleFactor: 2,

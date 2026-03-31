@@ -112,6 +112,7 @@ export interface WorkspaceSidepanelProps {
   resolutionDraft: ResolutionDraft;
   resolutionState: DesktopResolutionState;
   resourceDraft: ResourceDraft;
+  sessionRecoveryBusy: boolean;
   summary: DashboardSummary;
   touchedFiles: VmTouchedFilesSnapshot | null;
   touchedFilesError: string | null;
@@ -127,6 +128,9 @@ export interface WorkspaceSidepanelProps {
   onRename: (vm: VmInstance) => Promise<void>;
   onResolutionModeChange: (mode: DesktopResolutionMode) => void;
   onResolutionDraftChange: (draft: ResolutionDraft) => void;
+  onKickBrowserStream: (vm: VmInstance) => void;
+  onReloadBrowserStream: (vm: VmInstance) => void;
+  onRepairDesktopBridge: (vm: VmInstance) => Promise<void>;
   onTakeOverResolutionControl: (vm: VmInstance) => Promise<void>;
   onViewportScaleChange: (scale: number) => void;
   onRefreshTouchedFiles: () => Promise<void>;
@@ -152,6 +156,9 @@ export interface WorkspaceSidepanelProps {
   width: number;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  canKickBrowserStream: boolean;
+  canReloadBrowserStream: boolean;
+  canRepairDesktopBridge: boolean;
 }
 
 interface SidepanelResizeHandleProps {
@@ -387,6 +394,7 @@ export function WorkspaceSidepanel({
   resolutionDraft,
   resolutionState,
   resourceDraft,
+  sessionRecoveryBusy,
   summary,
   touchedFiles,
   touchedFilesError,
@@ -399,6 +407,9 @@ export function WorkspaceSidepanel({
   onCommandDraftChange,
   onDelete,
   onForwardDraftChange,
+  onKickBrowserStream,
+  onReloadBrowserStream,
+  onRepairDesktopBridge,
   onRename,
   onResolutionModeChange,
   onResolutionDraftChange,
@@ -425,6 +436,9 @@ export function WorkspaceSidepanel({
   resizing,
   style,
   width,
+  canKickBrowserStream,
+  canReloadBrowserStream,
+  canRepairDesktopBridge,
   onResizeKeyDown,
   onResizePointerDown,
 }: WorkspaceSidepanelProps): JSX.Element {
@@ -462,6 +476,8 @@ export function WorkspaceSidepanel({
   const showTouchedFilesLoading =
     touchedFilesLoading ||
     (touchedFilesSectionOpen && currentTouchedFiles === null && touchedFilesError === null);
+  const showSelkiesRecoveryControls =
+    detail?.vm.session?.kind === "selkies" || vm.desktopTransport === "selkies";
 
   useEffect(() => {
     if (!detail || !filesSectionOpen || currentFileBrowser) {
@@ -614,6 +630,42 @@ export function WorkspaceSidepanel({
                     </button>
                   </div>
                 </SidepanelSection>
+
+                {showSelkiesRecoveryControls ? (
+                  <SidepanelSection title="Recovery" defaultOpen>
+                    <p className="empty-copy">
+                      If a Selkies desktop sticks on waiting for stream, try these in
+                      order: kick the browser stream, reload the frame, repair the guest
+                      desktop bridge, then restart the VM if the guest runtime is still wedged.
+                    </p>
+                    <div className="action-grid">
+                      <button
+                        className="button button--secondary"
+                        type="button"
+                        onClick={() => onKickBrowserStream(vm)}
+                        disabled={busy || sessionRecoveryBusy || !canKickBrowserStream}
+                      >
+                        Kick stream
+                      </button>
+                      <button
+                        className="button button--ghost"
+                        type="button"
+                        onClick={() => onReloadBrowserStream(vm)}
+                        disabled={busy || sessionRecoveryBusy || !canReloadBrowserStream}
+                      >
+                        Reload frame
+                      </button>
+                      <button
+                        className="button button--ghost"
+                        type="button"
+                        onClick={() => void onRepairDesktopBridge(vm)}
+                        disabled={busy || sessionRecoveryBusy || !canRepairDesktopBridge}
+                      >
+                        {sessionRecoveryBusy ? "Repairing..." : "Repair desktop bridge"}
+                      </button>
+                    </div>
+                  </SidepanelSection>
+                ) : null}
 
                 <SidepanelSection title="Session" defaultOpen>
                   <div className="compact-grid">

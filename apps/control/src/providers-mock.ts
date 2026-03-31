@@ -309,6 +309,20 @@ export class MockProvider implements DesktopProvider {
     };
   }
 
+  async repairVmDesktopBridge(vm: VmInstance): Promise<ProviderMutation> {
+    return {
+      lastAction: "Desktop bridge repaired",
+      activity: [
+        "desktop-bridge: mock Selkies runtime reconciled",
+        "session: mock desktop heartbeat restored",
+      ],
+      activeWindow: "logs",
+      session: this.buildSession(vm.id),
+      desktopReadyAt: new Date().toISOString(),
+      desktopReadyMs: 0,
+    };
+  }
+
   async readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot> {
     const commandSections = (vm.commandHistory ?? []).flatMap((entry) => [
       "",

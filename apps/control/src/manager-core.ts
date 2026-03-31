@@ -51,6 +51,10 @@ export interface DesktopManagerOptions {
   forwardedServiceHostBase?: string | null;
   defaultTemplateLaunchSource?: string | null;
   vmSessionMaintenanceRefreshMs?: number | null;
+  streamHealthSecret?: string | null;
+  selkiesStreamHealthDegradedRepairMs?: number | null;
+  selkiesStreamHealthStaleRepairMs?: number | null;
+  selkiesStreamHealthRepairCooldownMs?: number | null;
 }
 
 export type JobProgressReporter = (message: string, progressPercent: number | null) => void;

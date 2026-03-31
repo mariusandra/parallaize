@@ -3,6 +3,13 @@ export interface EmbeddedBrowserStreamState {
   status: string | null;
 }
 
+export interface SelkiesStreamRecoveryState {
+  candidateSinceMs: number;
+  kickCount: number;
+  lastRecoveryAttemptMs: number;
+  trackedCandidate: "failed" | "waiting" | null;
+}
+
 interface EmbeddedBrowserStreamBridgeWindow extends Window {
   app?: {
     loadingText?: unknown;
@@ -10,6 +17,7 @@ interface EmbeddedBrowserStreamBridgeWindow extends Window {
     showStart?: unknown;
     status?: unknown;
   };
+  parallaizeGetStreamScale?: (() => number | string | null | undefined) | undefined;
   parallaizeGetStreamState?:
     | (() => {
         ready?: unknown;
@@ -27,6 +35,46 @@ interface EmbeddedBrowserStreamBridgeWindow extends Window {
     peerConnection?: unknown;
     reset?: (() => void) | undefined;
   } | null;
+}
+
+export function createSelkiesStreamRecoveryState(): SelkiesStreamRecoveryState {
+  return {
+    candidateSinceMs: 0,
+    kickCount: 0,
+    lastRecoveryAttemptMs: 0,
+    trackedCandidate: null,
+  };
+}
+
+export function updateSelkiesStreamRecoveryState(
+  current: SelkiesStreamRecoveryState,
+  state: EmbeddedBrowserStreamState | null,
+  candidate: "failed" | "waiting" | null,
+  nowMs: number,
+): SelkiesStreamRecoveryState {
+  if (candidate === null) {
+    return current.kickCount > 0 && current.trackedCandidate !== null && state?.ready !== true
+      ? current
+      : createSelkiesStreamRecoveryState();
+  }
+
+  if (current.trackedCandidate !== candidate) {
+    if (current.kickCount > 0 && state?.ready !== true) {
+      return {
+        ...current,
+        candidateSinceMs: current.candidateSinceMs || nowMs,
+        trackedCandidate: candidate,
+      };
+    }
+
+    return {
+      ...createSelkiesStreamRecoveryState(),
+      candidateSinceMs: nowMs,
+      trackedCandidate: candidate,
+    };
+  }
+
+  return current;
 }
 
 export function readEmbeddedBrowserStreamState(
@@ -98,6 +146,33 @@ export function readEmbeddedBrowserStreamState(
       ready: false,
       status: null,
     };
+  } catch {
+    return null;
+  }
+}
+
+export function readEmbeddedBrowserStreamScale(
+  frame: HTMLIFrameElement | null,
+): number | null {
+  if (!frame) {
+    return null;
+  }
+
+  try {
+    const target = frame.contentWindow as EmbeddedBrowserStreamBridgeWindow | null;
+    const bridgedScale = target?.parallaizeGetStreamScale?.();
+    const resolvedScale =
+      typeof bridgedScale === "number"
+        ? bridgedScale
+        : typeof bridgedScale === "string"
+          ? Number(bridgedScale)
+          : Number.NaN;
+
+    if (!Number.isFinite(resolvedScale) || resolvedScale <= 0) {
+      return null;
+    }
+
+    return Math.round(resolvedScale * 100) / 100;
   } catch {
     return null;
   }
