@@ -30,7 +30,7 @@ export interface ResolutionControlLease {
   vmId: string;
 }
 
-export type DesktopResolutionSessionKind = "selkies" | "synthetic" | "vnc";
+export type DesktopResolutionSessionKind = "selkies" | "synthetic" | "vnc" | "guacamole";
 
 export const emptyViewportBounds: ViewportBounds = {
   height: null,
@@ -166,8 +166,8 @@ export function shouldDriveGuestResolution(input: {
     return true;
   }
 
-  // Selkies handles viewport resize through its own data channel; only noVNC needs dashboard-managed viewport resizes.
-  return input.sessionKind === "vnc";
+  // Selkies handles viewport resize through its own data channel; the socket-based transports rely on dashboard-managed resizes.
+  return input.sessionKind === "vnc" || input.sessionKind === "guacamole";
 }
 
 export function buildResolutionControlLeaseStorageKey(vmId: string): string {

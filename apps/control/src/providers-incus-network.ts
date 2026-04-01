@@ -5,7 +5,8 @@ import {
   describeVmNetworkMode,
   normalizeVmNetworkMode,
 } from "../../../packages/shared/src/helpers.js";
-import type { VmNetworkMode, VmSession } from "../../../packages/shared/src/types.js";
+import type { VmDesktopTransport, VmNetworkMode, VmSession } from "../../../packages/shared/src/types.js";
+import { buildDesktopSession } from "./desktop-session.js";
 import {
   PARALLAIZE_DMZ_GUEST_DNS_DROPIN_PATH,
   PARALLAIZE_DMZ_PUBLIC_DNS_SERVERS,
@@ -128,44 +129,13 @@ export function findGuestAddressCandidates(instance: IncusListInstance): string[
   return [...new Set(candidates.map((candidate) => candidate.address))];
 }
 
-export function buildVncSession(
+export function buildIncusDesktopSession(
   host: string | null,
   port: number,
+  transport: VmDesktopTransport,
   reachable = true,
 ): VmSession {
-  return {
-    kind: "vnc",
-    host,
-    port,
-    reachable,
-    webSocketPath: null,
-    browserPath: null,
-    display: host
-      ? reachable
-        ? `${formatNetworkEndpoint(host, port)}`
-        : `${formatNetworkEndpoint(host, port)} pending VNC`
-      : `guest VNC on port ${port} pending DHCP`,
-  };
-}
-
-export function buildSelkiesSession(
-  host: string | null,
-  port: number,
-  reachable = true,
-): VmSession {
-  return {
-    kind: "selkies",
-    host,
-    port,
-    reachable,
-    webSocketPath: null,
-    browserPath: null,
-    display: host
-      ? reachable
-        ? `${formatNetworkEndpoint(host, port)}`
-        : `${formatNetworkEndpoint(host, port)} pending Selkies`
-      : `guest Selkies on port ${port} pending DHCP`,
-  };
+  return buildDesktopSession(host, port, transport, reachable);
 }
 
 export function describeGuestDnsProfileActivity(mode: VmNetworkMode): string {
@@ -367,9 +337,6 @@ function scoreGuestAddressCandidate(
   return score;
 }
 
-function formatNetworkEndpoint(host: string, port: number): string {
-  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
-}
 
 export function normalizeAclHostAddress(addressWithPrefix: string | undefined): string | null {
   const value = addressWithPrefix?.trim();

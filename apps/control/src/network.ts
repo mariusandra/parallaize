@@ -1,11 +1,23 @@
+import { randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { connect as connectTcp, type Socket } from "node:net";
 import { pipeline } from "node:stream/promises";
 
-import { createWebSocketStream, WebSocketServer } from "ws";
+import WebSocket, { createWebSocketStream, WebSocketServer, type RawData } from "ws";
 
 import type { VmSession } from "../../../packages/shared/src/types.js";
+import { isSocketDesktopSessionKind } from "../../../packages/shared/src/desktopTransport.js";
 import type { DesktopManager } from "./manager.js";
+
+const selkiesProxyRetryTimeoutMs = 5_000;
+const selkiesProxyRetryDelayMs = 250;
+const defaultGuacdHost = "127.0.0.1";
+const defaultGuacdPort = 4822;
+const defaultGuacamoleWidth = 1280;
+const defaultGuacamoleHeight = 800;
+const defaultGuacamoleDpi = 96;
+const guacamoleStatusServerError = 0x0200;
+const guacamoleStatusUpstreamUnavailable = 0x0208;
 
 interface ResolvedVncTarget {
   host: string;
@@ -16,6 +28,25 @@ interface ResolvedForwardTarget extends ResolvedVncTarget {
   publicPath: string;
   publicHostname: string | null;
   routeKind: "host" | "path" | "selkies";
+}
+
+interface VmNetworkBridgeOptions {
+  guacdHost?: string | null;
+  guacdPort?: number | null;
+}
+
+interface ParsedGuacamoleInstruction {
+  opcode: string;
+  parameters: string[];
+  serialized: string;
+}
+
+interface GuacamoleHandshakeContext {
+  dpi: number;
+  height: number;
+  imageMimetypes: string[];
+  readOnly: boolean;
+  width: number;
 }
 
 class ProxyRouteError extends Error {
@@ -29,15 +60,37 @@ class ProxyRouteError extends Error {
 
 export class VmNetworkBridge {
   private readonly vncServer = new WebSocketServer({ noServer: true });
+  private readonly guacamoleServer = new WebSocketServer({
+    handleProtocols(protocols) {
+      return protocols.has("guacamole") ? "guacamole" : false;
+    },
+    noServer: true,
+  });
+  private readonly guacdHost: string;
+  private readonly guacdPort: number;
 
-  constructor(private readonly manager: DesktopManager) {}
+  constructor(
+    private readonly manager: DesktopManager,
+    options: VmNetworkBridgeOptions = {},
+  ) {
+    this.guacdHost = options.guacdHost?.trim() || defaultGuacdHost;
+    this.guacdPort =
+      typeof options.guacdPort === "number" && Number.isFinite(options.guacdPort)
+        ? Math.max(1, Math.round(options.guacdPort))
+        : defaultGuacdPort;
+  }
 
   close(): void {
     for (const client of this.vncServer.clients) {
       client.terminate();
     }
 
+    for (const client of this.guacamoleServer.clients) {
+      client.terminate();
+    }
+
     this.vncServer.close();
+    this.guacamoleServer.close();
   }
 
   async maybeHandleRequest(
@@ -112,6 +165,13 @@ export class VmNetworkBridge {
       return true;
     }
 
+    const guacamoleVmId = matchGuacamolePath(url.pathname);
+
+    if (guacamoleVmId) {
+      this.handleGuacamoleUpgrade(request, socket, head, guacamoleVmId, url);
+      return true;
+    }
+
     let route: ResolvedProxyRoute | null;
 
     try {
@@ -180,6 +240,91 @@ export class VmNetworkBridge {
     });
   }
 
+  private handleGuacamoleUpgrade(
+    request: IncomingMessage,
+    socket: Socket,
+    head: Buffer,
+    vmId: string,
+    url: URL,
+  ): void {
+    let target: ResolvedVncTarget;
+
+    try {
+      target = this.resolveGuacamoleTarget(vmId);
+    } catch (error) {
+      writeSocketError(
+        socket,
+        error instanceof ProxyRouteError ? error.statusCode : 502,
+        error instanceof Error ? error.message : "Guacamole target resolution failed.",
+      );
+      return;
+    }
+
+    this.guacamoleServer.handleUpgrade(request, socket, head, (client) => {
+      void this.bindGuacamoleTunnel(client, target, url);
+    });
+  }
+
+  private async handleRetriedSelkiesUpgrade(
+    request: IncomingMessage,
+    socket: Socket,
+    head: Buffer,
+    url: URL,
+    match: SelkiesPathMatch,
+  ): Promise<void> {
+    const deadlineAt = Date.now() + selkiesProxyRetryTimeoutMs;
+    let lastError: Error | null = null;
+
+    while (Date.now() < deadlineAt) {
+      let target: ResolvedForwardTarget;
+
+      try {
+        target = this.resolveSelkiesTarget(match.vmId);
+      } catch (error) {
+        if (!(error instanceof ProxyRouteError) || error.statusCode !== 502) {
+          writeSocketError(
+            socket,
+            error instanceof ProxyRouteError ? error.statusCode : 502,
+            error instanceof Error ? error.message : "Forward target resolution failed.",
+          );
+          return;
+        }
+
+        lastError = error;
+        await sleep(selkiesProxyRetryDelayMs);
+        continue;
+      }
+
+      const upstream = await connectUpstreamWithRetry(
+        target.host,
+        target.port,
+        deadlineAt,
+      );
+
+      if (!upstream) {
+        lastError = new Error(
+          `VM ${this.manager.getVmDetail(match.vmId).vm.name} does not have a reachable Selkies endpoint yet.`,
+        );
+        continue;
+      }
+
+      this.bindForwardUpgrade(
+        request,
+        socket,
+        head,
+        {
+          remainder: match.remainder,
+          target,
+        },
+        url,
+        upstream,
+      );
+      return;
+    }
+
+    writeSocketError(socket, 502, lastError?.message ?? "Selkies guest bridge is unavailable.");
+  }
+
   private handleForwardUpgrade(
     request: IncomingMessage,
     socket: Socket,
@@ -242,6 +387,241 @@ export class VmNetworkBridge {
     socket.on("error", () => {
       upstream.destroy();
     });
+  }
+
+  private bindForwardUpgrade(
+    request: IncomingMessage,
+    socket: Socket,
+    head: Buffer,
+    route: ResolvedProxyRoute,
+    url: URL,
+    upstream: Socket,
+  ): void {
+    const target = route.target;
+    let upstreamResponseStarted = false;
+
+    upstream.setNoDelay(true);
+    socket.setNoDelay(true);
+    upstream.once("data", () => {
+      upstreamResponseStarted = true;
+    });
+
+    const startProxying = () => {
+      const requestLine = `${request.method ?? "GET"} ${buildTargetPath(route.remainder, url.search)} HTTP/${request.httpVersion}`;
+      const headers = buildForwardHeaders(request, target, true);
+      const serializedHeaders = Object.entries(headers)
+        .flatMap(([key, value]) => {
+          if (value === undefined) {
+            return [];
+          }
+
+          if (Array.isArray(value)) {
+            return value.map((entry) => `${key}: ${entry}`);
+          }
+
+          return [`${key}: ${value}`];
+        })
+        .join("\r\n");
+
+      upstream.write(`${requestLine}\r\n${serializedHeaders}\r\n\r\n`);
+
+      if (head.length > 0) {
+        upstream.write(head);
+      }
+
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    };
+
+    if (upstream.connecting) {
+      upstream.once("connect", startProxying);
+    } else {
+      startProxying();
+    }
+
+    upstream.on("error", (error) => {
+      if (upstreamResponseStarted) {
+        socket.destroy();
+        return;
+      }
+
+      writeSocketError(socket, 502, error.message);
+    });
+
+    socket.on("error", () => {
+      upstream.destroy();
+    });
+  }
+
+  private async bindGuacamoleTunnel(
+    client: WebSocket,
+    target: ResolvedVncTarget,
+    url: URL,
+  ): Promise<void> {
+    const handshake = buildGuacamoleHandshakeContext(url);
+    let upstream: Socket | null = null;
+    let closed = false;
+
+    const closeUpstream = () => {
+      upstream?.destroy();
+      upstream = null;
+    };
+
+    const closeClient = (reason = "0") => {
+      if (
+        client.readyState === WebSocket.CLOSING ||
+        client.readyState === WebSocket.CLOSED
+      ) {
+        return;
+      }
+
+      client.close(1000, reason);
+    };
+
+    const fail = (message: string, code = guacamoleStatusServerError) => {
+      if (closed) {
+        return;
+      }
+
+      writeGuacamoleError(client, message, code);
+      closeUpstream();
+      closed = true;
+    };
+
+    client.once("close", () => {
+      closed = true;
+      closeUpstream();
+    });
+    client.once("error", () => {
+      closed = true;
+      closeUpstream();
+    });
+
+    try {
+      client.send(encodeGuacamoleInstruction("", [randomUUID()]));
+      upstream = await connectOnce(this.guacdHost, this.guacdPort);
+      upstream.setNoDelay(true);
+
+      let handshakeComplete = false;
+      let prefetched = "";
+      let handshakeBuffer = "";
+
+      upstream.write(encodeGuacamoleInstruction("select", ["vnc"]));
+
+      while (!handshakeComplete && !closed) {
+        handshakeBuffer += (await nextSocketChunk(upstream)).toString("utf8");
+        const parsed = parseGuacamoleInstructions(handshakeBuffer);
+
+        if (parsed.instructions.length === 0) {
+          handshakeBuffer = parsed.remainder;
+          continue;
+        }
+
+        const [instruction, ...remainder] = parsed.instructions;
+        handshakeBuffer = parsed.remainder;
+
+        if (instruction.opcode !== "args") {
+          throw new Error(
+            `Unexpected Guacamole handshake opcode "${instruction.opcode || "<empty>"}".`,
+          );
+        }
+
+        upstream.write(
+          encodeGuacamoleInstruction("size", [handshake.width, handshake.height]) +
+            encodeGuacamoleInstruction("audio", []) +
+            encodeGuacamoleInstruction("video", []) +
+            encodeGuacamoleInstruction("image", handshake.imageMimetypes) +
+            encodeGuacamoleInstruction("connect", buildGuacamoleConnectValues(
+              instruction.parameters,
+              target,
+              handshake,
+              url,
+            )),
+        );
+
+        prefetched = remainder.map((entry) => entry.serialized).join("");
+        handshakeComplete = true;
+      }
+
+      if (closed || !upstream) {
+        return;
+      }
+
+      if (prefetched) {
+        client.send(prefetched);
+      }
+
+      let upstreamMessageBuffer = handshakeBuffer;
+
+      upstream.on("data", (chunk) => {
+        if (closed || client.readyState !== WebSocket.OPEN) {
+          return;
+        }
+
+        upstreamMessageBuffer += chunk.toString("utf8");
+
+        const parsed = parseGuacamoleInstructions(upstreamMessageBuffer);
+        const payload = parsed.instructions.map((instruction) => instruction.serialized).join("");
+        upstreamMessageBuffer = parsed.remainder;
+
+        if (payload) {
+          client.send(payload);
+        }
+      });
+      upstream.on("close", () => {
+        if (closed) {
+          return;
+        }
+
+        closed = true;
+        closeClient();
+      });
+      upstream.on("error", () => {
+        fail("Guacamole upstream is unavailable.", guacamoleStatusUpstreamUnavailable);
+      });
+
+      client.on("message", (data) => {
+        if (!upstream || closed) {
+          return;
+        }
+
+        let forwardedPayload = "";
+        const message = rawDataToString(data);
+
+        try {
+          const parsed = parseGuacamoleInstructions(message);
+
+          if (parsed.remainder) {
+            throw new Error("Incomplete Guacamole websocket frame.");
+          }
+
+          for (const instruction of parsed.instructions) {
+            if (
+              instruction.opcode === "" &&
+              instruction.parameters[0] === "ping"
+            ) {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(instruction.serialized);
+              }
+              continue;
+            }
+
+            forwardedPayload += instruction.serialized;
+          }
+        } catch {
+          forwardedPayload = message;
+        }
+
+        if (forwardedPayload) {
+          upstream.write(forwardedPayload);
+        }
+      });
+    } catch (error) {
+      fail(
+        error instanceof Error ? error.message : "Failed to establish the Guacamole bridge.",
+        guacamoleStatusUpstreamUnavailable,
+      );
+    }
   }
 
   private resolveProxyRoute(
@@ -315,6 +695,16 @@ export class VmNetworkBridge {
       publicHostname: null,
       routeKind: "selkies",
     };
+  }
+
+  private resolveGuacamoleTarget(vmId: string): ResolvedVncTarget {
+    const vm = this.manager.getVmDetail(vmId).vm;
+
+    if (vm.status !== "running") {
+      throw new ProxyRouteError(`VM ${vm.name} is not running.`, 409);
+    }
+
+    return requireGuestSession(vm.name, vm.session, "guacamole");
   }
 
   private resolveForwardTarget(
@@ -398,6 +788,11 @@ function matchVncPath(pathname: string): string | null {
   return match?.[1] ?? null;
 }
 
+function matchGuacamolePath(pathname: string): string | null {
+  const match = pathname.match(/^\/api\/vms\/([^/]+)\/guacamole$/);
+  return match?.[1] ?? null;
+}
+
 function matchSelkiesPath(pathname: string): SelkiesPathMatch | null {
   const match = pathname.match(/^\/selkies-([^/]+)(?:\/(.*))?$/);
 
@@ -445,7 +840,7 @@ function normalizeHostHeader(
 function requireGuestSession(
   vmName: string,
   session: VmSession | null,
-  expectedKind?: "vnc" | "selkies",
+  expectedKind?: "vnc" | "selkies" | "guacamole",
 ): ResolvedVncTarget {
   if (
     !session ||
@@ -458,6 +853,8 @@ function requireGuestSession(
     const transportLabel =
       expectedKind === "selkies"
         ? "Selkies"
+        : expectedKind === "guacamole"
+          ? "Guacamole"
         : expectedKind === "vnc"
           ? "VNC"
           : "guest network";
@@ -473,6 +870,203 @@ function requireGuestSession(
   };
 }
 
+async function nextSocketChunk(socket: Socket): Promise<Buffer> {
+  return await new Promise<Buffer>((resolve, reject) => {
+    const cleanup = () => {
+      socket.removeListener("data", handleData);
+      socket.removeListener("close", handleClose);
+      socket.removeListener("end", handleClose);
+      socket.removeListener("error", handleError);
+    };
+    const handleData = (chunk: Buffer) => {
+      cleanup();
+      resolve(Buffer.from(chunk));
+    };
+    const handleClose = () => {
+      cleanup();
+      reject(new Error("Guacamole upstream closed during handshake."));
+    };
+    const handleError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+
+    socket.once("data", handleData);
+    socket.once("close", handleClose);
+    socket.once("end", handleClose);
+    socket.once("error", handleError);
+  });
+}
+
+function parseGuacamoleInstructions(payload: string): {
+  instructions: ParsedGuacamoleInstruction[];
+  remainder: string;
+} {
+  const instructions: ParsedGuacamoleInstruction[] = [];
+  let index = 0;
+
+  while (index < payload.length) {
+    const instructionStart = index;
+    const elements: string[] = [];
+
+    while (index < payload.length) {
+      const lengthEnd = payload.indexOf(".", index);
+
+      if (lengthEnd < 0) {
+        return {
+          instructions,
+          remainder: payload.slice(instructionStart),
+        };
+      }
+
+      const length = Number.parseInt(payload.slice(index, lengthEnd), 10);
+
+      if (!Number.isFinite(length) || length < 0) {
+        throw new Error("Malformed Guacamole instruction length.");
+      }
+
+      const valueStart = lengthEnd + 1;
+      const valueEnd = valueStart + length;
+
+      if (valueEnd >= payload.length) {
+        return {
+          instructions,
+          remainder: payload.slice(instructionStart),
+        };
+      }
+
+      const terminator = payload[valueEnd];
+
+      if (terminator !== "," && terminator !== ";") {
+        throw new Error("Malformed Guacamole instruction terminator.");
+      }
+
+      elements.push(payload.slice(valueStart, valueEnd));
+      index = valueEnd + 1;
+
+      if (terminator === ";") {
+        instructions.push({
+          opcode: elements[0] ?? "",
+          parameters: elements.slice(1),
+          serialized: payload.slice(instructionStart, index),
+        });
+        break;
+      }
+    }
+  }
+
+  return {
+    instructions,
+    remainder: "",
+  };
+}
+
+function encodeGuacamoleInstruction(
+  opcode: string,
+  parameters: readonly (number | string)[],
+): string {
+  const elements = [opcode, ...parameters.map(String)];
+  return `${elements.map(encodeGuacamoleElement).join(",")};`;
+}
+
+function encodeGuacamoleElement(value: string): string {
+  return `${value.length}.${value}`;
+}
+
+function buildGuacamoleHandshakeContext(url: URL): GuacamoleHandshakeContext {
+  return {
+    dpi: readPositiveInt(url.searchParams.get("dpi"), defaultGuacamoleDpi),
+    height: readPositiveInt(url.searchParams.get("height"), defaultGuacamoleHeight),
+    imageMimetypes: ["image/webp", "image/png", "image/jpeg"],
+    readOnly: url.searchParams.get("readOnly") === "1",
+    width: readPositiveInt(url.searchParams.get("width"), defaultGuacamoleWidth),
+  };
+}
+
+function buildGuacamoleConnectValues(
+  argNames: readonly string[],
+  target: ResolvedVncTarget,
+  handshake: GuacamoleHandshakeContext,
+  url: URL,
+): string[] {
+  return argNames.map((name) => {
+    switch (name) {
+      case "hostname":
+      case "host":
+        return target.host;
+      case "port":
+        return String(target.port);
+      case "width":
+        return String(handshake.width);
+      case "height":
+        return String(handshake.height);
+      case "dpi":
+        return String(handshake.dpi);
+      case "read-only":
+        return handshake.readOnly ? "true" : "false";
+      case "cursor":
+        return "true";
+      case "clipboard-encoding":
+        return "UTF-8";
+      case "disable-copy":
+      case "disable-paste":
+      case "swap-red-blue":
+      case "reverse-connect":
+      case "create-recording-path":
+      case "recording-exclude-output":
+      case "recording-exclude-mouse":
+      case "recording-include-keys":
+        return "false";
+      case "password":
+      case "encodings":
+      case "color-depth":
+      case "dest-host":
+      case "dest-port":
+      case "display":
+      case "recording-name":
+      case "recording-path":
+      case "username":
+        return "";
+      default:
+        return url.searchParams.get(name) ?? "";
+    }
+  });
+}
+
+function readPositiveInt(value: string | null, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function rawDataToString(data: RawData): string {
+  if (typeof data === "string") {
+    return data;
+  }
+
+  if (Array.isArray(data)) {
+    return Buffer.concat(data.map((entry) => Buffer.from(entry))).toString("utf8");
+  }
+
+  if (data instanceof ArrayBuffer) {
+    return Buffer.from(new Uint8Array(data)).toString("utf8");
+  }
+
+  return Buffer.from(data).toString("utf8");
+}
+
+function writeGuacamoleError(
+  client: WebSocket,
+  message: string,
+  code = guacamoleStatusServerError,
+): void {
+  if (client.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  client.send(encodeGuacamoleInstruction("error", [message, String(code)]));
+  client.close(1011, String(code));
+}
+
 function buildTargetPath(remainder: string, search: string): string {
   const path = remainder ? `/${remainder}` : "/";
   return `${path}${search}`;
@@ -484,6 +1078,61 @@ function buildSelkiesPublicPath(vmId: string): string {
 
 function trimLeadingSlash(pathname: string): string {
   return pathname.replace(/^\/+/, "");
+}
+
+async function connectUpstreamWithRetry(
+  host: string,
+  port: number,
+  deadlineAt: number,
+): Promise<Socket | null> {
+  while (Date.now() < deadlineAt) {
+    try {
+      return await connectOnce(host, port);
+    } catch (error) {
+      if (!isRetryableUpstreamError(error)) {
+        throw error;
+      }
+
+      await sleep(selkiesProxyRetryDelayMs);
+    }
+  }
+
+  return null;
+}
+
+async function connectOnce(host: string, port: number): Promise<Socket> {
+  return await new Promise((resolve, reject) => {
+    const socket = connectTcp({
+      host,
+      port,
+    });
+
+    socket.once("connect", () => {
+      resolve(socket);
+    });
+    socket.once("error", (error) => {
+      socket.destroy();
+      reject(error);
+    });
+  });
+}
+
+function isRetryableUpstreamError(error: unknown): error is NodeJS.ErrnoException {
+  const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
+
+  return (
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    code === "ETIMEDOUT"
+  );
+}
+
+async function sleep(delayMs: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
 }
 
 function buildForwardHeaders(

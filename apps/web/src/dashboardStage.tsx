@@ -31,6 +31,7 @@ interface WorkspaceBootSurfaceProps {
 interface WorkspaceLogsSurfaceProps {
   detail: VmDetail;
   logsState: VmLogsViewState;
+  onRefreshLogs: () => void;
 }
 
 interface WorkspaceFallbackSurfaceProps {
@@ -135,6 +136,7 @@ export function WorkspaceBootSurface({ state }: WorkspaceBootSurfaceProps): JSX.
 export function WorkspaceLogsSurface({
   detail,
   logsState,
+  onRefreshLogs,
 }: WorkspaceLogsSurfaceProps): JSX.Element {
   return (
     <div className="workspace-log-surface">
@@ -148,6 +150,16 @@ export function WorkspaceLogsSurface({
         <p className="workspace-log-surface__copy">
           {workspaceLogsMessage(detail)}
         </p>
+        <div className="workspace-stage__header-actions">
+          <button
+            className="button button--ghost"
+            disabled={logsState.loading || logsState.refreshing}
+            type="button"
+            onClick={onRefreshLogs}
+          >
+            {logsState.loading || logsState.refreshing ? "Refreshing logs..." : "Reload logs"}
+          </button>
+        </div>
         <div className="chip-row vm-logs__meta">
           {logsState.logs ? (
             <span className="surface-pill mono-font">{logsState.logs.providerRef}</span>

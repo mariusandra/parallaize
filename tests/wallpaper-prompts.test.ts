@@ -6,9 +6,11 @@ import {
   buildRandomWallpaperSubject,
   buildWallpaperSubjectFromParts,
 } from "../packages/shared/src/wallpaper-prompts.js";
+import { vmNameAnimals } from "../packages/shared/src/vm-name-words.js";
 
 test("buildRandomWallpaperSubject reuses the VM adjective and animal lists", () => {
-  const values = [0, 0.57];
+  const otterIndex = vmNameAnimals.indexOf("otter");
+  const values = [0, (otterIndex + 0.1) / vmNameAnimals.length];
   let index = 0;
 
   const subject = buildRandomWallpaperSubject(() => {

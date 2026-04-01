@@ -34,6 +34,14 @@ import type {
   ProviderMutation,
   ProviderTelemetrySample,
 } from "./providers.js";
+import {
+  buildGuacamoleSocketPath,
+  buildSelkiesBrowserPath,
+  buildVmBrowserPath,
+  buildVncSocketPath,
+  cloneVmSession,
+  enrichVmSession,
+} from "./desktop-session.js";
 import { buildSyntheticSession } from "./providers-synthetic.js";
 import type { StateStore } from "./store.js";
 import { FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE } from "./template-defaults.js";
@@ -291,7 +299,9 @@ export function appendCommandResult(vm: VmInstance, entry: VmCommandResult): voi
 export function hasReachableVncSession(session: VmInstance["session"]): boolean {
   return Boolean(
     session &&
-      (session.kind === "vnc" || session.kind === "selkies") &&
+      (session.kind === "vnc" ||
+        session.kind === "selkies" ||
+        session.kind === "guacamole") &&
       session.reachable !== false &&
       session.host &&
       session.port,
@@ -809,63 +819,6 @@ export function copyTemplatePortForward(
   };
 }
 
-export function enrichVmSession(
-  vmId: string,
-  session: VmInstance["session"],
-): VmInstance["session"] {
-  if (!session) {
-    return null;
-  }
-
-  if (session.kind === "synthetic") {
-    return {
-      ...session,
-      browserPath: null,
-      webSocketPath: null,
-    };
-  }
-
-  if (session.kind === "selkies") {
-    return {
-      ...session,
-      browserPath:
-        session.browserPath ??
-        (session.reachable !== false && session.host && session.port
-          ? buildSelkiesBrowserPath(vmId)
-          : null),
-      webSocketPath: null,
-    };
-  }
-
-  return {
-    ...session,
-    webSocketPath:
-      session.reachable !== false && session.host && session.port
-        ? buildVncSocketPath(vmId)
-        : null,
-    browserPath:
-      session.reachable !== false && session.host && session.port
-        ? buildVmBrowserPath(vmId)
-        : null,
-  };
-}
-
-export function cloneVmSession(session: VmInstance["session"]): VmInstance["session"] {
-  if (!session) {
-    return null;
-  }
-
-  if (session.kind === "vnc" || session.kind === "selkies") {
-    return null;
-  }
-
-  return {
-    ...session,
-    browserPath: null,
-    webSocketPath: null,
-  };
-}
-
 export function appendTelemetrySample(
   current: ResourceTelemetry,
   sample: ProviderTelemetrySample | null,
@@ -940,18 +893,6 @@ export function sameProviderState(left: ProviderState, right: ProviderState): bo
     left.nextSteps.length === right.nextSteps.length &&
     left.nextSteps.every((step, index) => step === right.nextSteps[index])
   );
-}
-
-export function buildVncSocketPath(vmId: string): string {
-  return `/api/vms/${vmId}/vnc`;
-}
-
-export function buildSelkiesBrowserPath(vmId: string): string {
-  return `/selkies-${vmId}/`;
-}
-
-export function buildVmBrowserPath(vmId: string): string {
-  return `/?vm=${vmId}`;
 }
 
 export function buildVmForwardPath(vmId: string, forwardId: string): string {

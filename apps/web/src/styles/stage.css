@@ -368,6 +368,12 @@
   grid-template-rows: minmax(0, 1fr) auto;
   height: 100%;
   padding: clamp(1.25rem, 4vw, 3rem);
+  background-image:
+    linear-gradient(180deg, rgba(5, 7, 10, 0.2) 0%, rgba(5, 7, 10, 0.56) 58%, rgba(5, 7, 10, 0.86) 100%),
+    url("https://wallpapers.parallaize.com/24.04/angry-puffin.jpg");
+  background-position: center center;
+  background-repeat: no-repeat;
+  background-size: cover;
 }
 
 .workspace-stage__empty-main {

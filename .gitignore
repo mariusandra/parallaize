@@ -6,3 +6,5 @@ tmp/
 data/*.json
 !data/.gitkeep
 data/cache
+infra/parallaize.env.local
+infra/postgres.env.local

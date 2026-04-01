@@ -132,10 +132,10 @@ PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"
 printf 'Generated Parallaize admin password: %s\n' "$PARALLAIZE_ADMIN_PASSWORD"
 sudo sed -i "s/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=$PARALLAIZE_ADMIN_PASSWORD/" \
   /etc/parallaize/parallaize.env
-sudo systemctl start parallaize.service
+sudo systemctl restart parallaize.service
 ```
 
-The post-install scripts create a dedicated `parallaize` system user, create `/var/lib/parallaize`, and add that user to `incus`, `incus-admin`, `lxd`, and `sudo` when those groups already exist on the host. Services are not auto-started because the operator should rotate the default admin password first. The packaged Caddy unit stays optional; you do not need it when you are using the app directly on `127.0.0.1:3000`.
+The post-install scripts create a dedicated `parallaize` system user, create `/var/lib/parallaize`, and add that user to `incus`, `incus-admin`, `lxd`, and `sudo` when those groups already exist on the host. Manual `.deb` installs now also offer to add the signed Parallaize APT repository for future upgrades, and they look for an existing Incus `lvm` pool before offering to create a large loop-backed thin-LVM pool named `parallaize-lvm`. The packaged `parallaize.service` is enabled and started automatically; restart it after you rotate credentials or change storage settings so it reloads `/etc/parallaize/parallaize.env`. The packaged Caddy unit stays optional; you do not need it when you are using the app directly on `127.0.0.1:3000`.
 
 ### Workflow For [Hetzner](https://hetzner.cloud/?ref=qOKe5qXBXByK)
 
@@ -185,7 +185,7 @@ sudo ufw allow OpenSSH
 sudo ufw --force enable
 sudo ufw status verbose
 
-sudo systemctl enable --now parallaize.service
+sudo systemctl restart parallaize.service
 sudo systemctl status --no-pager parallaize.service
 COOKIE_JAR="$(mktemp)"
 trap 'rm -f "$COOKIE_JAR"' EXIT
@@ -273,7 +273,7 @@ The validator intentionally accepts one expected blank-host compromise from the 
 - provider `hostStatus` is `ready`
 - persistence is `ready`
 - the only `incusd` process is the distro-managed daemon
-- packaged Caddy answers on `:8080`
+- packaged Caddy answers on `https://127.0.0.1:8080`
 - the packaged smoke path passes end to end
 
 ## Live Verification Note
@@ -314,8 +314,8 @@ sudo ss -lx | grep /var/lib/incus/unix.socket
 ```
 
 3. Install the package or use the signed archive bootstrap path from [apt-repository.md](apt-repository.md).
-4. Rotate `/etc/parallaize/parallaize.env` credentials before starting services.
-5. Start `parallaize.service`, validate the authenticated `http://127.0.0.1:3000/api/health` endpoint, then start `parallaize-caddy.service` if it is part of the target deployment.
+4. Rotate `/etc/parallaize/parallaize.env` credentials and restart `parallaize.service` so the packaged env changes take effect.
+5. Validate the authenticated `http://127.0.0.1:3000/api/health` endpoint, then start `parallaize-caddy.service` if it is part of the target deployment.
 6. Launch a VM, snapshot it, clone it, delete the clone, and confirm forwarded-service routes still work.
 7. Record which Incus daemon model the host used in the validation notes so the result is not ambiguous later.
 
@@ -328,7 +328,7 @@ Current upgrade contract:
 1. Export or back up state before the upgrade.
 2. Stop `parallaize-caddy.service` first, then `parallaize.service`.
 3. Install the new package.
-4. Start `parallaize.service`, validate the authenticated `/api/health` endpoint, then start `parallaize-caddy.service`.
+4. Confirm `parallaize.service` came back on the new package, validate the authenticated `/api/health` endpoint, then start `parallaize-caddy.service`.
 5. If the upgrade fails, reinstall the previous package and restore the exported state.
 
 Use the packaged CLI for JSON/PostgreSQL state backups:

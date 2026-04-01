@@ -39,6 +39,7 @@ interface DashboardWorkspaceRailProps {
   onOpenCreateDialog: () => void;
   onOpenHomepage: () => void;
   onOpenLogs: (vm: VmInstance) => void;
+  onPasteLocal: (vm: VmInstance) => void;
   onInspectVm: (vmId: string) => void;
   onRename: (vm: VmInstance) => Promise<void>;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
@@ -111,6 +112,7 @@ export function DashboardWorkspaceRail({
   onOpenCreateDialog,
   onOpenHomepage,
   onOpenLogs,
+  onPasteLocal,
   onInspectVm,
   onRename,
   onResizeKeyDown,
@@ -379,6 +381,7 @@ export function DashboardWorkspaceRail({
             onOpen={onSelectVm}
             onInspect={onInspectVm}
             onOpenLogs={onOpenLogs}
+            onPasteLocal={onPasteLocal}
             onRename={onRename}
             onSetActiveCpuThreshold={onSetActiveCpuThreshold}
             onSnapshot={onSnapshot}

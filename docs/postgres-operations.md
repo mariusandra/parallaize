@@ -81,7 +81,7 @@ This is the repeatable end-to-end checklist for the packaged PostgreSQL deployme
 
 ```bash
 PARALLAIZE_PERSISTENCE=postgres
-PARALLAIZE_DATABASE_URL=postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize
+PARALLAIZE_DATABASE_URL=postgresql://parallaize:REPLACE_WITH_STRONG_PASSWORD@127.0.0.1:5432/parallaize
 ```
 
 4. Restart the control plane:
@@ -117,7 +117,7 @@ parallaize-persistence import --to postgres --input /var/backups/parallaize-stat
 On March 27, 2026, this packaged PostgreSQL path was replayed in a clean Ubuntu 24.04 `amd64` container using the packaged env file plus the packaged `parallaize`, `parallaize-persistence`, and Caddy launchers instead of `systemctl`:
 
 - first boot with `PARALLAIZE_PERSISTENCE=postgres`
-- `ok` health on both `http://127.0.0.1:3000/api/health` and `http://127.0.0.1:8080/api/health`
+- `ok` health on both `http://127.0.0.1:3000/api/health` and `https://127.0.0.1:8080/api/health`
 - export from PostgreSQL, state mutation from 1 VM to 2 VMs, and a second export
 - package upgrade from `0.1.10-2` to `0.1.10-3`
 - restore of the original export, bringing the VM count back from 2 to 1

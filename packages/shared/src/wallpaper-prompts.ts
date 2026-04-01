@@ -76,6 +76,8 @@ export function buildWallpaperSubjectFromParts(
 
 function buildAnimalHabitatLine(animal: VmNameAnimal): string {
   switch (animal) {
+    case "axolotl":
+      return "Set it in a stylized freshwater canal or lakebed with aquatic plants, dark stones, and still reflective water.";
     case "badger":
       return "Set it in a stylized woodland floor with burrow forms, roots, and low earth mounds.";
     case "bear":
@@ -84,6 +86,8 @@ function buildAnimalHabitatLine(animal: VmNameAnimal): string {
       return "Set it in a stylized riverbank with calm water, reeds, dams, and cut-log geometry.";
     case "bison":
       return "Set it in a stylized open prairie with rolling grassland bands and wide weather shapes.";
+    case "capybara":
+      return "Set it in a stylized riverside wetland with broad water planes, tall grasses, and muddy banks.";
     case "cougar":
       return "Set it in a stylized canyon or mountain scrub habitat with ledges, stone planes, and sparse brush.";
     case "coyote":
@@ -98,12 +102,16 @@ function buildAnimalHabitatLine(animal: VmNameAnimal): string {
       return "Set it in a stylized forest edge with brushy undergrowth, stones, and winding paths.";
     case "gecko":
       return "Set it in a stylized warm rock garden with sunlit stone slabs, sand bands, and hardy plants.";
+    case "hedgehog":
+      return "Set it in a stylized hedgerow or woodland edge with leaf litter, ferns, and sheltered dusk shapes.";
     case "heron":
       return "Set it in a stylized marsh or lakeshore with reeds, mirror-like water planes, and misty distance.";
     case "hippo":
       return "Set it in a stylized river shallows scene with broad water shapes, mud banks, and reeds.";
     case "jaguar":
       return "Set it in a stylized rainforest with layered leaves, river shadows, and dense canopy planes.";
+    case "kingfisher":
+      return "Set it in a stylized riverbank with overhanging branches, reeds, and glassy water ribbons.";
     case "koala":
       return "Set it in a stylized eucalyptus grove with pale trunks, soft foliage masses, and quiet sky.";
     case "lemur":
@@ -112,6 +120,8 @@ function buildAnimalHabitatLine(animal: VmNameAnimal): string {
       return "Set it in a stylized snowy forest with fir shapes, rock outcrops, and cold open air.";
     case "manatee":
       return "Set it in a stylized seagrass lagoon with soft underwater light bands and drifting aquatic shapes.";
+    case "meerkat":
+      return "Set it in a stylized desert scrub or savanna with burrow mounds, warm sand bands, and long lookout lines.";
     case "moose":
       return "Set it in a stylized boreal wetland with reflective water, dark pines, and misty ground.";
     case "otter":
@@ -122,6 +132,10 @@ function buildAnimalHabitatLine(animal: VmNameAnimal): string {
       return "Set it in a stylized bamboo forest with vertical stalk rhythms, foggy depth, and soft slopes.";
     case "panther":
       return "Set it in a stylized night jungle with dark foliage planes, moonlit openings, and sleek rock forms.";
+    case "parrot":
+      return "Set it in a stylized tropical canopy with bright leaf masses, fruit forms, and shafts of warm light.";
+    case "penguin":
+      return "Set it in a stylized polar shoreline with ice planes, dark sea bands, and wind-scoured snow.";
     case "puffin":
       return "Set it in a stylized sea cliff habitat with ocean bands, windswept turf, and steep rock faces.";
     case "rabbit":
@@ -138,10 +152,14 @@ function buildAnimalHabitatLine(animal: VmNameAnimal): string {
       return "Set it in a stylized snowfield or meadow edge with tunnels, grasses, and quick directional lines.";
     case "tiger":
       return "Set it in a stylized jungle or tall-grass habitat with striped foliage rhythms and shallow water shapes.";
+    case "toucan":
+      return "Set it in a stylized rainforest canopy with oversized leaves, fruit clusters, and humid open air.";
     case "turtle":
       return "Set it in a stylized shoreline or pond habitat with smooth stones, water planes, and reeds.";
     case "weasel":
       return "Set it in a stylized field margin with grasses, low brush, and darting ground paths.";
+    case "wombat":
+      return "Set it in a stylized grassland or eucalyptus woodland with burrow entrances, earth mounds, and low scrub.";
     case "yak":
       return "Set it in a stylized high mountain plateau with wind-shaped grass, broad sky, and distant snow forms.";
   }

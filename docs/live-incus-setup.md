@@ -6,7 +6,8 @@ This is the practical setup path for running Parallaize in live mode with real I
 
 - The control plane runs with `PARALLAIZE_PROVIDER=incus`.
 - New workspaces are real Incus VMs, not mock sessions.
-- Browser desktop access goes through the built-in noVNC bridge.
+- Browser desktop access can use Selkies, direct noVNC, or Guacamole.
+- VNC and Guacamole share the same guest `x11vnc` listener; Guacamole adds a host-local `guacd` daemon in front.
 - Guest HTTP/WebSocket services can be exposed through Caddy.
 
 The checked-in `start` script already targets Incus mode and uses `data/incus-state.json`:
@@ -92,7 +93,7 @@ mv data/incus-state.json data/incus-state.json.bak
 
 When the JSON state file is missing, Parallaize will create a fresh state with a seeded template that points at `images:ubuntu/noble/desktop`.
 
-## Set explicit guest desktop ports and Selkies relay config
+## Set explicit guest desktop ports and transport relays
 
 Set `PARALLAIZE_GUEST_VNC_PORT=5900` explicitly before starting the app if you want the guest VNC port pinned in your runtime env.
 
@@ -109,7 +110,9 @@ export PARALLAIZE_ADMIN_USERNAME=admin
 export PARALLAIZE_ADMIN_PASSWORD=change-me
 export PARALLAIZE_GUEST_VNC_PORT=5900
 export PARALLAIZE_GUEST_SELKIES_PORT=6080
-export PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=localhost
+export PARALLAIZE_GUACD_HOST=127.0.0.1
+export PARALLAIZE_GUACD_PORT=4822
+export PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=parallaize.localhost
 export PARALLAIZE_GUEST_INOTIFY_MAX_USER_WATCHES=1048576
 export PARALLAIZE_GUEST_INOTIFY_MAX_USER_INSTANCES=2048
 ```
@@ -149,6 +152,49 @@ export PARALLAIZE_SELKIES_TURN_PASSWORD=change-me
 
 If your TURN service issues short-lived credentials through a REST helper instead, set the `PARALLAIZE_SELKIES_TURN_REST_*` values instead of static username/password secrets.
 
+Bundled coturn sidecar recipe:
+
+```bash
+export PARALLAIZE_TURN_PUBLIC_IP=your-public-ip-or-dns
+export PARALLAIZE_TURN_SHARED_SECRET="$(openssl rand -hex 32)"
+docker compose -f infra/docker-compose.coturn.yml up -d
+
+export PARALLAIZE_SELKIES_STUN_HOST="$PARALLAIZE_TURN_PUBLIC_IP"
+export PARALLAIZE_SELKIES_STUN_PORT=3478
+export PARALLAIZE_SELKIES_TURN_HOST="$PARALLAIZE_TURN_PUBLIC_IP"
+export PARALLAIZE_SELKIES_TURN_PORT=3478
+export PARALLAIZE_SELKIES_TURN_PROTOCOL=tcp
+export PARALLAIZE_SELKIES_TURN_TLS=false
+export PARALLAIZE_SELKIES_TURN_SHARED_SECRET="$PARALLAIZE_TURN_SHARED_SECRET"
+```
+
+Practical notes for the bundled recipe:
+
+- Open `3478/tcp`, `3478/udp`, and the relay range `49160-49200/tcp+udp` to the host.
+- `tcp` is the safer starting point for remote browsers behind SSH forwards, NAT, or locked-down Wi-Fi. If your users have clean UDP reachability, switch `PARALLAIZE_SELKIES_TURN_PROTOCOL` to `udp`.
+- The control plane only injects the TURN config into guests when the server starts or when a desktop-bridge repair/restart runs. After setting these env vars, restart Parallaize and repair or restart already-running Selkies VMs.
+- For source-run hosts, save these exports in `infra/parallaize.env.local`. `pnpm start` now sources that file automatically before applying its default Incus settings.
+- Validation should show relay-capable RTC config in the browser: open a Selkies VM, inspect `globalThis.webrtc?.rtcPeerConfig`, and confirm the returned `iceServers` list contains a `turn:` entry for your public host instead of only the default Google STUN entry.
+
+Guacamole expectation:
+
+- Guacamole only needs the browser to reach Parallaize itself. The browser never talks directly to `guacd` or to the guest VNC port.
+- The control plane does need a reachable `guacd` daemon at `PARALLAIZE_GUACD_HOST:PARALLAIZE_GUACD_PORT`.
+- Because VNC and Guacamole share the same guest `x11vnc` runtime, switching a running VM between those two transports does not need a guest reboot or guest desktop bridge replacement.
+
+Bring up the bundled `guacd` sidecar:
+
+```bash
+docker compose -f infra/docker-compose.guacd.yml up -d
+```
+
+Practical notes:
+
+- Keep `PARALLAIZE_GUACD_HOST=127.0.0.1` unless you deliberately run `guacd` elsewhere.
+- For source-run hosts, save the `PARALLAIZE_GUACD_*` values in `infra/parallaize.env.local` next to any TURN settings.
+- If `guacd` is down, Guacamole sessions will stay pending while direct VNC still works.
+- The dashboard can flip a running VM between Selkies, VNC, and Guacamole from the sidepanel. Selkies <-> VNC/Guacamole changes reconfigure the guest bridge; VNC <-> Guacamole only changes the host/browser path.
+
 Optional Incus tuning:
 
 - Set `PARALLAIZE_INCUS_STORAGE_POOL` if you want new VMs and clones to land on a faster `lvm`, `btrfs`, or `zfs` pool instead of a slow `dir` pool.
@@ -167,9 +213,9 @@ Path routes do not need DNS. Hostname routes do.
 
 Practical expectations:
 
-- `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=localhost` is the local-debug path. Browsers can resolve names like `app-ui--vm-0001.localhost` back to loopback, so opening the dashboard on `127.0.0.1:3000` or through the example Caddy front door on `:8080` is enough.
+- `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=parallaize.localhost` is the local-debug path. Browsers can resolve names like `app-ui--vm-0001.parallaize.localhost` back to loopback, so opening the dashboard on `127.0.0.1:3000` or through the example Caddy front door on `https://127.0.0.1:8080` is enough.
 - For a real hostname base such as `workspaces.example.com`, publish wildcard DNS for that base so `*.workspaces.example.com` resolves to the Parallaize front door.
-- The bundled `infra/Caddyfile` listens on `:8080` and forwards requests to `127.0.0.1:3000` without requiring per-host config, so once wildcard DNS points at that port, host-header routing works through the same front door as the rest of the app.
+- The bundled `infra/Caddyfile` listens on HTTPS on `:8080` and forwards requests to `127.0.0.1:3000` without requiring per-host config, so once wildcard DNS points at that port, host-header routing works through the same front door as the rest of the app.
 - If you do not want wildcard DNS, stay on the path routes. They are the compatibility fallback and do not depend on host-header routing.
 
 Tailscale-specific expectation:
@@ -206,16 +252,20 @@ flox activate -d . -- caddy run --config infra/Caddyfile
 Then open:
 
 ```text
-http://127.0.0.1:8080
+https://127.0.0.1:8080
 ```
+
+The bundled front door is HTTPS-only. It uses Caddy's local CA, so the first
+interactive launch may install that CA into your local trust store.
 
 Caddy fronts:
 
 - Dashboard and API traffic
 - Server-sent events
 - noVNC websocket upgrades at `/api/vms/:id/vnc`
+- Guacamole websocket upgrades at `/api/vms/:id/guacamole`
 - Forwarded guest services at `/vm/:id/forwards/:forwardId/`
-- Hostname-based forwarded guest services on `*.localhost` by default when you keep `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=localhost`
+- Hostname-based forwarded guest services on `*.parallaize.localhost` by default when you keep `PARALLAIZE_FORWARDED_SERVICE_HOST_BASE=parallaize.localhost`
 - Selkies guest HTTP/WebSocket traffic when you browse the app through this same front door
 
 If you already run a system Caddy on `:80` or a public hostname, that instance needs equivalent reverse-proxy rules for Parallaize. Leaving the stock Caddy welcome-site config in place will make paths like `/selkies-vm-0001/` return `404`, even when the control plane and guest Selkies service are healthy.
@@ -227,9 +277,11 @@ Live Incus mode does not require PostgreSQL. You can run locally with JSON persi
 If you want the deployed-style persistence backend, start PostgreSQL first:
 
 ```bash
+POSTGRES_PASSWORD='replace-with-a-long-random-password'
+printf 'POSTGRES_PASSWORD=%s\n' "$POSTGRES_PASSWORD" > infra/postgres.env.local
 docker compose -f infra/docker-compose.postgres.yml up -d
 PARALLAIZE_PERSISTENCE=postgres \
-PARALLAIZE_DATABASE_URL=postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize \
+PARALLAIZE_DATABASE_URL="postgresql://parallaize:${POSTGRES_PASSWORD}@127.0.0.1:5432/parallaize" \
 flox activate -d . -- pnpm start
 ```
 
@@ -262,7 +314,7 @@ What should happen:
 
 ## Optional smoke test
 
-Once the control plane is up in Incus mode and Caddy is running on `:8080`, you can run the live smoke path:
+Once the control plane is up in Incus mode and Caddy is serving HTTPS on `:8080`, you can run the live smoke path:
 
 ```bash
 flox activate -d . -- pnpm smoke:incus

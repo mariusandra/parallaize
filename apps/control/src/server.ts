@@ -54,7 +54,10 @@ const manager = new DesktopManager(store, provider, {
   defaultTemplateLaunchSource: config.configuredDefaultTemplateLaunchSource,
   streamHealthSecret,
 });
-const networkBridge = new VmNetworkBridge(manager);
+const networkBridge = new VmNetworkBridge(manager, {
+  guacdHost: config.guacdHost,
+  guacdPort: config.guacdPort,
+});
 const auth = createServerAuth({
   config,
   store,

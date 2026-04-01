@@ -8,7 +8,7 @@ Type=simple
 User=parallaize
 Group=parallaize
 WorkingDirectory=/opt/parallaize
-ExecStart=/usr/bin/env bash -lc 'flox activate -d /opt/parallaize -- caddy run --config /opt/parallaize/infra/Caddyfile'
+ExecStart=/usr/bin/env bash -lc 'set -a; if [[ -f /opt/parallaize/infra/parallaize.env.local ]]; then source /opt/parallaize/infra/parallaize.env.local; fi; set +a; export HOSTNAME="${HOSTNAME:-$(hostname)}"; export PARALLAIZE_CADDY_PORT="${PARALLAIZE_CADDY_PORT:-8080}"; export PARALLAIZE_FORWARDED_SERVICE_HOST_BASE="${PARALLAIZE_FORWARDED_SERVICE_HOST_BASE:-parallaize.localhost}"; flox activate -d /opt/parallaize -- caddy run --config /opt/parallaize/infra/Caddyfile'
 Restart=on-failure
 RestartSec=3
 

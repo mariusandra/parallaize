@@ -6,6 +6,10 @@ import type {
   VmInstance,
   VmNetworkMode,
 } from "./types.js";
+import {
+  normalizeTemplateDesktopTransport as normalizeTemplateDesktopTransportValue,
+  normalizeVmDesktopTransport as normalizeVmDesktopTransportValue,
+} from "./desktopTransport.js";
 
 export function formatResources(resources: ResourceSpec): string {
   return `${resources.cpu} CPU / ${formatRam(resources.ramMb)} / ${resources.diskGb} GB`;
@@ -34,13 +38,13 @@ export function describeVmNetworkMode(
 export function normalizeTemplateDesktopTransport(
   transport: VmDesktopTransport | null | undefined,
 ): VmDesktopTransport {
-  return transport === "vnc" ? "vnc" : "selkies";
+  return normalizeTemplateDesktopTransportValue(transport);
 }
 
 export function normalizeVmDesktopTransport(
   transport: VmDesktopTransport | null | undefined,
 ): VmDesktopTransport {
-  return transport === "selkies" ? "selkies" : "vnc";
+  return normalizeVmDesktopTransportValue(transport);
 }
 
 export function minimumCreateDiskGb(

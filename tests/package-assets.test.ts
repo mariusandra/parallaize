@@ -12,7 +12,10 @@ test("packaged Caddyfile is derived from the development front-door config", asy
   const source = await readFile(resolve(process.cwd(), "infra/Caddyfile"), "utf8");
   const rendered = packageAssetsModule.renderPackagedCaddyfile(source);
 
-  assert.match(rendered, /^:\{\$PARALLAIZE_CADDY_PORT:8080\} \{$/m);
+  assert.match(
+    rendered,
+    /^https:\/\/127\.0\.0\.1:\{\$PARALLAIZE_CADDY_PORT:8080\}, https:\/\/localhost:\{\$PARALLAIZE_CADDY_PORT:8080\}, https:\/\/\{\$HOSTNAME:localhost\}:\{\$PARALLAIZE_CADDY_PORT:8080\}, https:\/\/\{\$PARALLAIZE_FORWARDED_SERVICE_HOST_BASE:parallaize\.localhost\}:\{\$PARALLAIZE_CADDY_PORT:8080\}, https:\/\/\*\.\{\$PARALLAIZE_FORWARDED_SERVICE_HOST_BASE:parallaize\.localhost\}:\{\$PARALLAIZE_CADDY_PORT:8080\} \{$/m,
+  );
   assert.equal(rendered.includes("127.0.0.1:3000"), false);
   assert.equal(
     rendered.match(/127\.0\.0\.1:\{\$PORT:3000\}/g)?.length ?? 0,

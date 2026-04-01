@@ -25,6 +25,7 @@ const KEEP_VMS = process.env.PARALLAIZE_E2E_KEEP_VMS === "1";
 const TEMPLATE_ID = normalizeOptionalString(process.env.PARALLAIZE_E2E_TEMPLATE_ID);
 const TEMPLATE_NAME = normalizeOptionalString(process.env.PARALLAIZE_E2E_TEMPLATE_NAME);
 const VM_PREFIX = process.env.PARALLAIZE_E2E_VM_PREFIX ?? "playwright-live";
+const ENABLE_GUACAMOLE = process.env.PARALLAIZE_E2E_ENABLE_GUACAMOLE === "1";
 const VM_TIMEOUT_MS = parseInteger(
   process.env.PARALLAIZE_E2E_VM_TIMEOUT_MS,
   12 * 60 * 1000,
@@ -42,7 +43,7 @@ const SUITE_TIMEOUT_MS = parseInteger(
   30 * 60 * 1000,
 );
 
-type LiveDesktopTransport = "selkies" | "vnc";
+type LiveDesktopTransport = "selkies" | "vnc" | "guacamole";
 
 interface ApiEnvelope<T> {
   data: T;
@@ -103,6 +104,7 @@ test(
       const firstVmName = `${VM_PREFIX}-${runId}-a`;
       const secondVmName = `${VM_PREFIX}-${runId}-b`;
       const vncVmName = `${VM_PREFIX}-${runId}-vnc`;
+      const guacamoleVmName = `${VM_PREFIX}-${runId}-guac`;
 
       await context.test(
         "creating a VM yields a live Selkies stage session",
@@ -162,22 +164,22 @@ test(
       );
 
       await context.test(
-        "creating a VM with VNC yields a live noVNC session that survives stage switches",
+        "creating a VM with VNC yields a live socket desktop session that survives stage switches",
         { timeout: VM_TIMEOUT_MS },
         async () => {
           const firstVm = requireVm(createdVms, firstVmName);
           const vncVm = await createLiveVm(page, template, vncVmName, "vnc");
           createdVms.push(vncVm);
 
-          await waitForStageVncCanvas(page, vncVm.name, VM_TIMEOUT_MS);
+          await waitForStageSocketDesktopCanvas(page, vncVm.name, VM_TIMEOUT_MS);
           await waitForLivePreview(page, vncVm.name, RESUME_TIMEOUT_MS);
 
           await openVm(page, firstVm.name, RESUME_TIMEOUT_MS);
           await waitForStageSelkiesVideo(page, firstVm.name, RESUME_TIMEOUT_MS);
           await waitForLivePreview(page, vncVm.name, RESUME_TIMEOUT_MS);
 
-          await openVncVm(page, vncVm.name);
-          await waitForStageVncCanvas(page, vncVm.name, RESUME_TIMEOUT_MS);
+          await openSocketDesktopVm(page, vncVm.name);
+          await waitForStageSocketDesktopCanvas(page, vncVm.name, RESUME_TIMEOUT_MS);
           assert.equal(await page.locator(`iframe[title="${firstVm.name} desktop"]`).count(), 1);
           await waitForLivePreview(page, firstVm.name, RESUME_TIMEOUT_MS);
 
@@ -185,6 +187,29 @@ test(
           await waitForStageSelkiesVideo(page, firstVm.name, RESUME_TIMEOUT_MS);
         },
       );
+
+      if (ENABLE_GUACAMOLE) {
+        await context.test(
+          "creating a VM with Guacamole yields a live canvas session that survives stage switches",
+          { timeout: VM_TIMEOUT_MS },
+          async () => {
+            const firstVm = requireVm(createdVms, firstVmName);
+            const guacamoleVm = await createLiveVm(page, template, guacamoleVmName, "guacamole");
+            createdVms.push(guacamoleVm);
+
+            await waitForStageSocketDesktopCanvas(page, guacamoleVm.name, VM_TIMEOUT_MS);
+
+            await openVm(page, firstVm.name, RESUME_TIMEOUT_MS);
+            await waitForStageSelkiesVideo(page, firstVm.name, RESUME_TIMEOUT_MS);
+
+            await openSocketDesktopVm(page, guacamoleVm.name);
+            await waitForStageSocketDesktopCanvas(page, guacamoleVm.name, RESUME_TIMEOUT_MS);
+
+            await openVm(page, firstVm.name, RESUME_TIMEOUT_MS);
+            await waitForStageSelkiesVideo(page, firstVm.name, RESUME_TIMEOUT_MS);
+          },
+        );
+      }
 
       await context.test(
         "opening the same VM in another tab hands off the live session cleanly",
@@ -338,8 +363,8 @@ async function waitForVmDesktopSession(
       }
 
       if (
-        desktopTransport === "vnc" &&
-        session?.kind === "vnc" &&
+        (desktopTransport === "vnc" || desktopTransport === "guacamole") &&
+        session?.kind === desktopTransport &&
         Boolean(session.webSocketPath)
       ) {
         return detail;
@@ -363,7 +388,7 @@ async function openVm(
   });
 }
 
-async function openVncVm(page: Page, vmName: string): Promise<void> {
+async function openSocketDesktopVm(page: Page, vmName: string): Promise<void> {
   await selectVm(page, vmName);
 }
 
@@ -389,7 +414,7 @@ async function waitForStageSelkiesVideo(
   );
 }
 
-async function waitForStageVncCanvas(
+async function waitForStageSocketDesktopCanvas(
   page: Page,
   vmName: string,
   timeoutMs: number,

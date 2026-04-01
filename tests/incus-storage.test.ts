@@ -287,6 +287,8 @@ function buildConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     templateCompression: "none",
     guestVncPort: 5900,
     guestSelkiesPort: 6080,
+    guacdHost: "127.0.0.1",
+    guacdPort: 4822,
     guestSelkiesRtcConfig: null,
     guestInotifyMaxUserWatches: 1_048_576,
     guestInotifyMaxUserInstances: 2_048,

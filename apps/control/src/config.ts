@@ -28,6 +28,8 @@ export interface AppConfig {
   templateCompression: IncusImageCompression;
   guestVncPort: number;
   guestSelkiesPort: number;
+  guacdHost: string;
+  guacdPort: number;
   guestSelkiesRtcConfig: GuestSelkiesRtcConfig | null;
   guestInotifyMaxUserWatches: number;
   guestInotifyMaxUserInstances: number;
@@ -87,7 +89,7 @@ export function loadConfig(): AppConfig {
     ),
     forwardedServiceHostBase: parseOptionalString(
       process.env.PARALLAIZE_FORWARDED_SERVICE_HOST_BASE,
-    ) ?? "localhost",
+    ) ?? "parallaize.localhost",
     persistenceKind,
     dataFile:
       process.env.PARALLAIZE_DATA_FILE ??
@@ -107,6 +109,8 @@ export function loadConfig(): AppConfig {
     templateCompression: parseTemplateCompression(process.env.PARALLAIZE_TEMPLATE_COMPRESSION),
     guestVncPort: parseInteger(process.env.PARALLAIZE_GUEST_VNC_PORT, 5900),
     guestSelkiesPort: parseInteger(process.env.PARALLAIZE_GUEST_SELKIES_PORT, 6080),
+    guacdHost: process.env.PARALLAIZE_GUACD_HOST?.trim() || "127.0.0.1",
+    guacdPort: parseInteger(process.env.PARALLAIZE_GUACD_PORT, 4822),
     guestSelkiesRtcConfig: normalizeGuestSelkiesRtcConfig({
       stunHost: parseOptionalString(process.env.PARALLAIZE_SELKIES_STUN_HOST),
       stunPort: parseOptionalPositiveInteger(process.env.PARALLAIZE_SELKIES_STUN_PORT),

@@ -323,11 +323,37 @@ export function createServerEventStreams({
   }
 
   function buildVmLogTailStateKey(vm: DashboardSummary["vms"][number]): string {
-    if (typeof provider.streamVmLogs === "function") {
+    if (typeof provider.streamVmLogs === "function" && !shouldPreferVmLogTailSnapshot(vm)) {
       return `${vm.providerRef}|${vm.status}`;
     }
 
     return `${vm.providerRef}|${vm.status}|${vm.updatedAt}`;
+  }
+
+  function shouldPreferVmLogTailSnapshot(vm: DashboardSummary["vms"][number]): boolean {
+    return (
+      vm.status === "running" &&
+      (vm.desktopTransport === "selkies" || vm.session?.kind === "selkies") &&
+      !hasVmBrowserDesktopSession(vm.session)
+    );
+  }
+
+  function hasVmBrowserDesktopSession(
+    session: DashboardSummary["vms"][number]["session"],
+  ): boolean {
+    if (!session) {
+      return false;
+    }
+
+    switch (session.kind) {
+      case "selkies":
+        return Boolean(session.browserPath);
+      case "vnc":
+      case "guacamole":
+        return Boolean(session.webSocketPath || session.browserPath);
+      default:
+        return false;
+    }
   }
 
   async function syncVmLogTailSession(session: VmLogTailSession): Promise<void> {
@@ -351,6 +377,12 @@ export function createServerEventStreams({
     }
 
     if (session.closed || session.subscribers.size === 0 || vm.status !== "running") {
+      clearVmLogTailRestartTimer(session);
+      stopVmLogTailStream(session);
+      return;
+    }
+
+    if (shouldPreferVmLogTailSnapshot(vm)) {
       clearVmLogTailRestartTimer(session);
       stopVmLogTailStream(session);
       return;

@@ -188,6 +188,7 @@ export interface DesktopProvider {
   ): VmLogsStreamHandle;
   readVmDesktopBridgeVersion?(vm: VmInstance): Promise<VmDesktopBridgeVersion | null>;
   repairVmDesktopBridge?(vm: VmInstance): Promise<ProviderMutation>;
+  restartVmDesktopService?(vm: VmInstance): Promise<ProviderMutation>;
   readVmDiskUsage?(vm: VmInstance): Promise<VmDiskUsageSnapshot>;
   browseVmFiles(vm: VmInstance, path?: string | null): Promise<VmFileBrowserSnapshot>;
   readVmFile(vm: VmInstance, path: string): Promise<VmFileContent>;

@@ -4,6 +4,7 @@ import {
   normalizeVmNetworkMode,
   slugify,
 } from "../../../packages/shared/src/helpers.js";
+import { formatDesktopTransportLabel } from "../../../packages/shared/src/desktopTransport.js";
 import type {
   ActionJob,
   AdminSessionRecord,
@@ -22,6 +23,12 @@ import type {
   VmSession,
   VmPortForward,
 } from "../../../packages/shared/src/types.js";
+import {
+  buildSelkiesBrowserPath,
+  buildVmBrowserPath,
+  buildVncSocketPath,
+  buildGuacamoleSocketPath,
+} from "./desktop-session.js";
 import {
   type DefaultTemplateLaunchSourceOptions,
   FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
@@ -546,7 +553,9 @@ function normalizeSession(
 ): VmSession | null {
   if (session) {
     const reachable =
-      session.kind === "vnc" || session.kind === "selkies"
+      session.kind === "vnc" ||
+      session.kind === "selkies" ||
+      session.kind === "guacamole"
         ? session.reachable ?? Boolean(session.host && session.port)
         : undefined;
 
@@ -558,13 +567,21 @@ function normalizeSession(
       webSocketPath:
         session.kind === "vnc" && reachable !== false && session.host && session.port
           ? buildVncSocketPath(vmId)
+          : session.kind === "guacamole" &&
+              reachable !== false &&
+              session.host &&
+              session.port
+            ? buildGuacamoleSocketPath(vmId)
           : null,
       browserPath:
         session.kind === "selkies" &&
             typeof session.browserPath === "string" &&
             session.browserPath
           ? session.browserPath
-          : session.kind === "vnc" && reachable !== false && session.host && session.port
+          : (session.kind === "vnc" || session.kind === "guacamole") &&
+              reachable !== false &&
+              session.host &&
+              session.port
           ? buildVmBrowserPath(vmId)
           : session.kind === "selkies" &&
               reachable !== false &&
@@ -579,9 +596,11 @@ function normalizeSession(
             ? `${session.host}:${session.port}`
             : session.kind === "selkies"
               ? `${session.host}:${session.port} pending Selkies`
+              : session.kind === "guacamole"
+                ? `${session.host}:${session.port} pending Guacamole`
               : `${session.host}:${session.port} pending VNC`
-          : session.kind === "selkies"
-            ? "Guest Selkies pending"
+          : session.kind === "selkies" || session.kind === "guacamole"
+            ? `Guest ${formatDesktopTransportLabel(session.kind)} pending`
           : provider === "mock"
             ? "Synthetic frame stream"
             : "Guest VNC pending"),
@@ -691,18 +710,6 @@ function normalizeVmForwardedPort(
 function buildProviderRef(vmId: string, name: string): string {
   const slug = slugify(name) || "workspace";
   return `parallaize-${vmId}-${slug}`;
-}
-
-function buildVmBrowserPath(vmId: string): string {
-  return `/?vm=${vmId}`;
-}
-
-function buildSelkiesBrowserPath(vmId: string): string {
-  return `/selkies-${vmId}/`;
-}
-
-function buildVncSocketPath(vmId: string): string {
-  return `/api/vms/${vmId}/vnc`;
 }
 
 function buildVmForwardPath(vmId: string, forwardId: string): string {

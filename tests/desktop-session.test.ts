@@ -5,12 +5,14 @@ import type { VmDetail, VmInstance } from "../packages/shared/src/types.js";
 import {
   buildSelkiesPreviewBrowserPath,
   hasBrowserDesktopSession,
+  hasBrowserGuacamoleSession,
   hasBrowserSelkiesSession,
   hasBrowserVncSession,
   mergeSelectedVmDetail,
   resolveDisplayedDesktopSession,
   resolveSelectedDesktopSession,
   shouldRefreshSelectedVmDetail,
+  shouldUseMirroredVmPreview,
   type RetainedDesktopSession,
   shouldShowLiveVmPreview,
 } from "../apps/web/src/desktopSession.js";
@@ -81,6 +83,34 @@ test("hasBrowserSelkiesSession only accepts Selkies sessions with a browser path
       webSocketPath: null,
       browserPath: "/selkies-vm-1/",
       display: "10.0.0.10:6080",
+    }),
+    true,
+  );
+});
+
+test("hasBrowserGuacamoleSession only accepts Guacamole sessions with a websocket path", () => {
+  assert.equal(hasBrowserGuacamoleSession(null), false);
+  assert.equal(
+    hasBrowserGuacamoleSession({
+      kind: "guacamole",
+      host: "10.0.0.10",
+      port: 5900,
+      reachable: true,
+      webSocketPath: null,
+      browserPath: "/?vm=vm-1",
+      display: "10.0.0.10:5900",
+    }),
+    false,
+  );
+  assert.equal(
+    hasBrowserGuacamoleSession({
+      kind: "guacamole",
+      host: "10.0.0.10",
+      port: 5900,
+      reachable: true,
+      webSocketPath: "/api/vms/vm-1/guacamole",
+      browserPath: "/?vm=vm-1",
+      display: "10.0.0.10:5900",
     }),
     true,
   );
@@ -212,6 +242,54 @@ test("shouldShowLiveVmPreview keeps Selkies previews active on selected tiles", 
 
   assert.equal(shouldShowLiveVmPreview(vm, true), true);
   assert.equal(shouldShowLiveVmPreview(vm, true, true), true);
+});
+
+test("shouldUseMirroredVmPreview ignores stale Selkies mirrors after a VM switches to VNC", () => {
+  const vm = buildVm("vm-0103", {
+    kind: "vnc",
+    host: "10.0.0.13",
+    port: 5900,
+    reachable: true,
+    webSocketPath: "/api/vms/vm-0103/vnc",
+    browserPath: "/?vm=vm-0103",
+    display: "10.0.0.13:5900",
+  });
+
+  assert.equal(
+    shouldUseMirroredVmPreview(vm, {
+      mirroredStageFrameAvailable: true,
+      showLivePreview: true,
+    }),
+    false,
+  );
+});
+
+test("shouldUseMirroredVmPreview keeps uncaptured Selkies previews mirrored", () => {
+  const vm = buildVm("vm-0104", {
+    kind: "selkies",
+    host: "10.0.0.14",
+    port: 6080,
+    reachable: true,
+    webSocketPath: null,
+    browserPath: "/selkies-vm-0104/",
+    display: "10.0.0.14:6080",
+  });
+
+  assert.equal(
+    shouldUseMirroredVmPreview(vm, {
+      mirroredStageFrameAvailable: true,
+      showLivePreview: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldUseMirroredVmPreview(vm, {
+      mirroredStageFrameAvailable: true,
+      retainCapturedSelkiesPreview: true,
+      showLivePreview: true,
+    }),
+    false,
+  );
 });
 
 test("mergeSelectedVmDetail preserves a fresher detail VNC session when summary lags behind", () => {

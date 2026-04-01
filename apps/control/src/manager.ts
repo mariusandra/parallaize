@@ -257,6 +257,10 @@ export class DesktopManager {
     return this.repairVmDesktopBridgeInternal(vmId);
   }
 
+  async restartVmDesktopService(vmId: string): Promise<VmDetail> {
+    return this.restartVmDesktopServiceInternal(vmId);
+  }
+
   getVmFrame(vmId: string, mode: "tile" | "detail"): string {
     return getVmFrame(this.runtime, vmId, mode);
   }
@@ -849,6 +853,26 @@ export class DesktopManager {
             ? mutation.lastAction
             : "Desktop bridge auto-repaired",
       });
+    });
+    this.runtime.publish();
+    this.runtime.requestVmSessionRefresh("missing");
+    return getVmDetail(this.runtime, vmId);
+  }
+
+  private async restartVmDesktopServiceInternal(vmId: string): Promise<VmDetail> {
+    const state = this.runtime.store.load();
+    const vm = requireVm(state, vmId);
+    this.runtime.ensureActiveProvider(vm);
+
+    if (!this.provider.restartVmDesktopService) {
+      throw new Error("The active provider does not support desktop service restarts.");
+    }
+
+    const mutation = await this.provider.restartVmDesktopService(vm);
+
+    this.runtime.store.update((draft) => {
+      const current = requireVm(draft, vmId);
+      applyProviderMutation(current, mutation);
     });
     this.runtime.publish();
     this.runtime.requestVmSessionRefresh("missing");

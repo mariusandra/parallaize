@@ -21,6 +21,7 @@ test("loadConfig uses PARALLAIZE_APP_HOME for packaged default paths", () => {
     assert.equal(config.dataFile, "/usr/lib/parallaize/data/state.json");
     assert.equal(config.persistenceKind, "json");
     assert.equal(config.configuredDefaultTemplateLaunchSource, null);
+    assert.equal(config.forwardedServiceHostBase, "parallaize.localhost");
     assert.equal(config.sessionMaxAgeSeconds, 60 * 60 * 24 * 7);
     assert.equal(config.sessionIdleTimeoutSeconds, 60 * 60 * 24);
     assert.equal(config.sessionRotationSeconds, 60 * 60 * 6);

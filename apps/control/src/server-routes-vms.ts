@@ -186,6 +186,17 @@ export async function handleVmRoute({
     return true;
   }
 
+  const vmDesktopServiceRestartMatch = url.pathname.match(
+    /^\/api\/vms\/([^/]+)\/desktop-service\/restart$/,
+  );
+  if (method === "POST" && vmDesktopServiceRestartMatch) {
+    writeJson<VmDetail>(response, 200, {
+      ok: true,
+      data: await manager.restartVmDesktopService(vmDesktopServiceRestartMatch[1]),
+    });
+    return true;
+  }
+
   if (method === "POST" && url.pathname === "/api/vms/reorder") {
     const payload = await readJsonBody<ReorderVmsInput>(request);
     writeJson<DashboardSummary>(response, 200, {

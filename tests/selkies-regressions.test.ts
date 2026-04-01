@@ -137,6 +137,10 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.match(script, /enable_desktop_service\(\) \{/);
   assert.match(script, /ln -sf "\$SERVICE_FILE" "\/etc\/systemd\/system\/multi-user\.target\.wants\/\$DESKTOP_SERVICE_NAME"/);
   assert.match(script, /var checkconnect = app\.status === "checkconnect";/);
+  assert.match(
+    script,
+    /signalling\.ondisconnect = \(\) => \{\n    console\.log\("signalling disconnected"\);\n    const activeVideoPlayback = parallaizeHasActiveVideoPlayback\(\);\n    const peerConnectionState =\n        webrtc\.peerConnection !== null \? webrtc\.peerConnection\.connectionState : "";\n    const iceConnectionState =\n        webrtc\.peerConnection !== null \? webrtc\.peerConnection\.iceConnectionState : "";\n    if \(\n        videoConnected === "connected" \|\|\n        activeVideoPlayback \|\|\n        peerConnectionState === "connecting" \|\|\n        peerConnectionState === "connected" \|\|\n        iceConnectionState === "checking" \|\|\n        iceConnectionState === "connected" \|\|\n        iceConnectionState === "completed"\n    \) \{\n        if \(videoConnected === "connected" \|\| activeVideoPlayback\) \{\n            app\.status = "connected";\n            app\.showStart = false;\n            app\.loadingText = "";\n        \}\n        return;\n    \}\n    var checkconnect = app\.status === "checkconnect";\n    app\.status = 'connecting';\n    videoElement\.style\.cursor = "auto";\n    webrtc\.reset\(\);\n    app\.status = 'checkconnect';\n    if \(!checkconnect\) audio_signalling\.disconnect\(\);\n\}/,
+  );
   assert.match(script, /elif str\(session_peer_id\) == str\(preview_peer_id\):/);
   assert.match(script, /clear_setup_call_retry\("preview"\)/);
   assert.match(script, /preview_app\.on_sdp = preview_signalling\.send_sdp/);
@@ -201,9 +205,14 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.match(script, /function parallaizeSyncStreamScale\(sendResolution = true\) \{/);
   assert.match(script, /parallaizeNotifyGuestClipboardListeners\(content\);/);
   assert.match(script, /export SELKIES_CURSOR_SIZE="\$\{SELKIES_CURSOR_SIZE:-24\}"/);
-  assert.match(script, /SELKIES_PATCH_LEVEL="2026-03-31-8"/);
+  assert.match(script, /SELKIES_PATCH_LEVEL="2026-04-01-1"/);
   assert.match(script, /SELKIES_PATCH_LEVEL_FILE="\$SELKIES_INSTALL_DIR\/\.parallaize-selkies-patch-level"/);
   assert.match(script, /DESKTOP_BRIDGE_VERSION_FILE="\/var\/lib\/parallaize\/desktop-bridge-version\.json"/);
+  assert.match(script, /DESKTOP_USER="ubuntu"/);
+  assert.match(script, /export HOME="\$DESKTOP_HOME"/);
+  assert.match(script, /export XDG_RUNTIME_DIR="\/run\/user\/\$DESKTOP_UID"/);
+  assert.match(script, /exec runuser --preserve-environment -u "\$DESKTOP_USER" --/);
+  assert.match(script, /env\s+DISPLAY="\$DISPLAY"\s+XAUTHORITY="\$XAUTHORITY"/);
   assert.match(script, /STREAM_HEALTH_SERVICE_NAME="parallaize-selkies-heartbeat\.service"/);
   assert.match(script, /Description=Parallaize Selkies stream health/);
   assert.match(script, /if ! python3 -c 'import websockets' >\/dev\/null 2>&1; then/);

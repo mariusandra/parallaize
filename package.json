@@ -8,8 +8,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs && node scripts/build-web.mjs",
     "build:web": "node scripts/copy-static.mjs && node scripts/build-web.mjs",
-    "start": "PARALLAIZE_PROVIDER=incus PARALLAIZE_DATA_FILE=data/incus-state.json node dist/apps/control/src/server.js",
-    "start:mock": "PARALLAIZE_PROVIDER=mock PARALLAIZE_DATA_FILE=data/state.json node dist/apps/control/src/server.js",
+    "start": "bash scripts/start-control-plane.sh incus data/incus-state.json",
+    "start:mock": "bash scripts/start-control-plane.sh mock data/state.json",
     "dev": "pnpm build && pnpm start",
     "smoke:incus": "pnpm build && node dist/scripts/smoke-incus.js",
     "wallpaper:test": "pnpm build && node dist/scripts/generate-wallpaper-tests.js",
@@ -43,6 +43,7 @@
   },
   "dependencies": {
     "@novnc/novnc": "^1.6.0",
+    "guacamole-common-js": "^1.5.0",
     "pg": "^8.16.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

@@ -1475,6 +1475,576 @@ test("renaming a running incus vm syncs the guest hostname without changing prov
   assert.doesNotMatch(hostnameSyncInput, /parallaize-vm-0105-running-rename/);
 });
 
+test("stopped incus vms can switch desktop transport without repairing immediately", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-switch-stopped-transport-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  let repairCalls = 0;
+  provider.repairVmDesktopBridge = async () => {
+    repairCalls += 1;
+    return {
+      lastAction: "Desktop bridge repaired",
+      activity: ["desktop-bridge: repaired"],
+    };
+  };
+
+  const seed = createSeedState(provider.state);
+  const now = new Date().toISOString();
+  const state: AppState = {
+    ...seed,
+    vms: [
+      {
+        id: "vm-0106",
+        name: "transport-source",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: "parallaize-vm-0106-transport-source",
+        status: "stopped",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: null,
+        lastAction: "Workspace stopped",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 106,
+        activeWindow: "logs",
+        workspacePath: "/root",
+        desktopTransport: "vnc",
+        networkMode: "default",
+        session: null,
+        forwardedPorts: [],
+        activityLog: [],
+        commandHistory: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [],
+    adminSessions: [],
+    lastUpdated: now,
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  const manager = new DesktopManager(store, provider);
+
+  const updated = await manager.updateVm("vm-0106", {
+    desktopTransport: "selkies",
+  });
+
+  assert.equal(updated.desktopTransport, "selkies");
+  assert.equal(updated.lastAction, "Desktop transport set to Selkies");
+  assert.equal(updated.frameRevision, 1);
+  assert.equal(repairCalls, 0);
+  assert.ok(updated.activityLog.includes("desktop-transport: vnc -> selkies"));
+});
+
+test("running incus vms switch desktop transport by repairing the bridge in place", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-switch-running-transport-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  const repairCalls: Array<{ name: string; transport: string | undefined }> = [];
+  provider.repairVmDesktopBridge = async (vm) => {
+    repairCalls.push({
+      name: vm.name,
+      transport: vm.desktopTransport,
+    });
+
+    return {
+      lastAction: "Desktop bridge repaired",
+      activity: ["desktop-bridge: reconciled selkies runtime"],
+      session: {
+        kind: "selkies",
+        host: "10.55.0.107",
+        port: 6080,
+        webSocketPath: null,
+        browserPath: "/?vm=vm-0107",
+        display: "10.55.0.107:6080",
+      },
+      desktopReadyAt: new Date().toISOString(),
+      desktopReadyMs: 320,
+    };
+  };
+
+  const seed = createSeedState(provider.state);
+  const now = new Date().toISOString();
+  const state: AppState = {
+    ...seed,
+    vms: [
+      {
+        id: "vm-0107",
+        name: "transport-running",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: "parallaize-vm-0107-transport-running",
+        status: "running",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: now,
+        lastAction: "Workspace resumed",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 107,
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        desktopTransport: "vnc",
+        networkMode: "default",
+        session: {
+          kind: "vnc",
+          host: "10.55.0.107",
+          port: 5900,
+          webSocketPath: "/api/vms/vm-0107/vnc",
+          browserPath: "/?vm=vm-0107",
+          display: "10.55.0.107:5900",
+        },
+        forwardedPorts: [],
+        activityLog: [],
+        commandHistory: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [],
+    adminSessions: [],
+    lastUpdated: now,
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  const manager = new DesktopManager(store, provider);
+
+  const updated = await manager.updateVm("vm-0107", {
+    desktopTransport: "selkies",
+  });
+
+  assert.deepEqual(repairCalls, [
+    {
+      name: "transport-running",
+      transport: "selkies",
+    },
+  ]);
+  assert.equal(updated.desktopTransport, "selkies");
+  assert.equal(updated.lastAction, "Desktop transport switched to Selkies");
+  assert.equal(updated.frameRevision, 2);
+  assert.equal(updated.session?.kind, "selkies");
+  assert.equal(updated.session?.browserPath, "/?vm=vm-0107");
+  assert.ok(updated.activityLog.includes("desktop-transport: vnc -> selkies"));
+  assert.ok(updated.activityLog.includes("desktop-bridge: reconciled selkies runtime"));
+});
+
+test("running incus vms switch between VNC and Guacamole without replacing the guest bridge", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-switch-running-guacamole-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  let repairCalls = 0;
+  provider.repairVmDesktopBridge = async () => {
+    repairCalls += 1;
+    return {
+      lastAction: "Desktop bridge repaired",
+      activity: ["desktop-bridge: repaired"],
+    };
+  };
+
+  const seed = createSeedState(provider.state);
+  const now = new Date().toISOString();
+  const state: AppState = {
+    ...seed,
+    vms: [
+      {
+        id: "vm-0107",
+        name: "transport-running",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: "parallaize-vm-0107-transport-running",
+        status: "running",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: now,
+        lastAction: "Workspace resumed",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 107,
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        desktopTransport: "vnc",
+        networkMode: "default",
+        session: {
+          kind: "vnc",
+          host: "10.55.0.107",
+          port: 5900,
+          webSocketPath: "/api/vms/vm-0107/vnc",
+          browserPath: "/?vm=vm-0107",
+          display: "10.55.0.107:5900",
+        },
+        forwardedPorts: [],
+        activityLog: [],
+        commandHistory: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [],
+    adminSessions: [],
+    lastUpdated: now,
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  const manager = new DesktopManager(store, provider);
+
+  const updated = await manager.updateVm("vm-0107", {
+    desktopTransport: "guacamole",
+  });
+
+  assert.equal(repairCalls, 0);
+  assert.equal(updated.desktopTransport, "guacamole");
+  assert.equal(updated.lastAction, "Desktop transport set to Guacamole");
+  assert.equal(updated.frameRevision, 1);
+  assert.equal(updated.session?.kind, "guacamole");
+  assert.equal(updated.session?.webSocketPath, "/api/vms/vm-0107/guacamole");
+  assert.equal(updated.session?.browserPath, "/?vm=vm-0107");
+  assert.ok(updated.activityLog.includes("desktop-transport: vnc -> guacamole"));
+});
+
+test("stale in-flight session refreshes do not overwrite a later VNC to Guacamole switch", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-switch-running-guacamole-refresh-race-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let signalRefreshStarted = (): void => {};
+  const refreshStarted = new Promise<void>((resolve) => {
+    signalRefreshStarted = resolve as () => void;
+  });
+  let releaseRefreshNow = (): void => {};
+  const releaseRefresh = new Promise<void>((resolve) => {
+    releaseRefreshNow = resolve as () => void;
+  });
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  provider.refreshVmSession = async (vm) => {
+    if (vm.id !== "vm-0108") {
+      return null;
+    }
+
+    signalRefreshStarted();
+    await releaseRefresh;
+    return {
+      kind: "vnc",
+      host: "10.55.0.108",
+      port: 5900,
+      webSocketPath: "/api/vms/vm-0108/vnc",
+      browserPath: "/?vm=vm-0108",
+      display: "10.55.0.108:5900",
+    };
+  };
+
+  const seed = createSeedState(provider.state);
+  const now = new Date().toISOString();
+  const state: AppState = {
+    ...seed,
+    vms: [
+      {
+        id: "vm-0108",
+        name: "transport-race",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: "parallaize-vm-0108-transport-race",
+        status: "running",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: now,
+        lastAction: "Workspace resumed",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 108,
+        activeWindow: "terminal",
+        workspacePath: "/root",
+        desktopTransport: "vnc",
+        networkMode: "default",
+        session: {
+          kind: "vnc",
+          host: "10.55.0.108",
+          port: 5900,
+          webSocketPath: "/api/vms/vm-0108/vnc",
+          browserPath: "/?vm=vm-0108",
+          display: "10.55.0.108:5900",
+        },
+        forwardedPorts: [],
+        activityLog: [],
+        commandHistory: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [],
+    adminSessions: [],
+    lastUpdated: now,
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  const manager = new DesktopManager(store, provider);
+
+  await refreshStarted;
+
+  const updated = await manager.updateVm("vm-0108", {
+    desktopTransport: "guacamole",
+  });
+
+  releaseRefreshNow();
+  await wait(20);
+
+  const detail = manager.getVmDetail("vm-0108").vm;
+  assert.equal(updated.desktopTransport, "guacamole");
+  assert.equal(updated.session?.kind, "guacamole");
+  assert.equal(updated.session?.webSocketPath, "/api/vms/vm-0108/guacamole");
+  assert.equal(detail.desktopTransport, "guacamole");
+  assert.equal(detail.session?.kind, "guacamole");
+  assert.equal(detail.session?.webSocketPath, "/api/vms/vm-0108/guacamole");
+});
+
+test("running incus transport switches clear stale desktop sessions until the replacement is ready", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-switch-running-transport-clear-session-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  provider.repairVmDesktopBridge = async () => ({
+    lastAction: "Desktop bridge repair pending",
+    activity: ["desktop-bridge: waiting for vnc listener"],
+  });
+
+  const seed = createSeedState(provider.state);
+  const now = new Date().toISOString();
+  const state: AppState = {
+    ...seed,
+    vms: [
+      {
+        id: "vm-0108",
+        name: "transport-waiting",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: "parallaize-vm-0108-transport-waiting",
+        status: "running",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: now,
+        lastAction: "Workspace resumed",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 108,
+        activeWindow: "browser",
+        workspacePath: "/root",
+        desktopTransport: "selkies",
+        networkMode: "default",
+        session: {
+          kind: "selkies",
+          host: "10.55.0.108",
+          port: 6080,
+          webSocketPath: null,
+          browserPath: "/selkies-vm-0108/",
+          display: "10.55.0.108:6080",
+        },
+        desktopReadyAt: now,
+        desktopReadyMs: 180,
+        forwardedPorts: [],
+        activityLog: [],
+        commandHistory: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [],
+    adminSessions: [],
+    lastUpdated: now,
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  const manager = new DesktopManager(store, provider);
+
+  const updated = await manager.updateVm("vm-0108", {
+    desktopTransport: "vnc",
+  });
+
+  assert.equal(updated.desktopTransport, "vnc");
+  assert.equal(updated.lastAction, "Desktop transport switched to VNC");
+  assert.equal(updated.frameRevision, 2);
+  assert.equal(updated.session, null);
+  assert.equal(updated.desktopReadyAt, null);
+  assert.equal(updated.desktopReadyMs, null);
+  assert.ok(updated.activityLog.includes("desktop-transport: selkies -> vnc"));
+  assert.ok(updated.activityLog.includes("desktop-bridge: waiting for vnc listener"));
+});
+
+test("running incus vms can restart the desktop service in place", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-restart-desktop-service-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+  const restartCalls: Array<{ name: string; transport: string | undefined }> = [];
+  provider.restartVmDesktopService = async (vm) => {
+    restartCalls.push({
+      name: vm.name,
+      transport: vm.desktopTransport,
+    });
+
+    return {
+      lastAction: "Selkies service restarted",
+      activity: ["desktop-service: restarted parallaize-selkies.service"],
+      session: {
+        kind: "selkies",
+        host: "10.55.0.109",
+        port: 6080,
+        webSocketPath: null,
+        browserPath: "/selkies-vm-0109/",
+        display: "10.55.0.109:6080",
+      },
+      desktopReadyAt: new Date().toISOString(),
+      desktopReadyMs: 240,
+    };
+  };
+
+  const seed = createSeedState(provider.state);
+  const now = new Date().toISOString();
+  const state: AppState = {
+    ...seed,
+    vms: [
+      {
+        id: "vm-0109",
+        name: "selkies-restart",
+        templateId: "tpl-0001",
+        provider: "incus",
+        providerRef: "parallaize-vm-0109-selkies-restart",
+        status: "running",
+        resources: {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        },
+        createdAt: now,
+        updatedAt: now,
+        liveSince: now,
+        lastAction: "Workspace resumed",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 109,
+        activeWindow: "browser",
+        workspacePath: "/root",
+        desktopTransport: "selkies",
+        networkMode: "default",
+        session: null,
+        forwardedPorts: [],
+        activityLog: [],
+        commandHistory: [],
+      },
+    ],
+    snapshots: [],
+    jobs: [],
+    adminSessions: [],
+    lastUpdated: now,
+  };
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  const manager = new DesktopManager(store, provider);
+
+  const updated = await manager.restartVmDesktopService("vm-0109");
+
+  assert.deepEqual(restartCalls, [
+    {
+      name: "selkies-restart",
+      transport: "selkies",
+    },
+  ]);
+  assert.equal(updated.vm.lastAction, "Selkies service restarted");
+  assert.equal(updated.vm.frameRevision, 2);
+  assert.equal(updated.vm.session?.kind, "selkies");
+  assert.equal(updated.vm.session?.browserPath, "/selkies-vm-0109/");
+  assert.ok(updated.vm.activityLog.includes("desktop-service: restarted parallaize-selkies.service"));
+});
+
 test("vms can be reordered and the new order is reflected in summary output", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-reorder-vms-"));
   context.after(() => {
@@ -2368,7 +2938,8 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetInput, /-xrandr newfbsize/);
   assert.match(configSetInput, /-noshm/);
   assert.match(configSetInput, /xset r on \|\| true/);
-  assert.match(configSetInput, /-repeat/);
+  assert.match(configSetInput, /-norepeat/);
+  assert.doesNotMatch(configSetInput, / -repeat\b/);
   assert.match(configSetInput, /fs\.inotify\.max_user_watches=2097152/);
   assert.match(configSetInput, /fs\.inotify\.max_user_instances=4096/);
   assert.match(configSetInput, /sysctl --load \/etc\/sysctl\.d\/60-parallaize-inotify\.conf/);
@@ -3365,7 +3936,8 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /-noxdamage/);
   assert.match(execCall?.[5] ?? "", /-noshm/);
   assert.match(execCall?.[5] ?? "", /xset r on \|\| true/);
-  assert.match(execCall?.[5] ?? "", /-repeat/);
+  assert.match(execCall?.[5] ?? "", /-norepeat/);
+  assert.doesNotMatch(execCall?.[5] ?? "", / -repeat\b/);
   assert.match(execCall?.[5] ?? "", /RESTART_DESKTOP=0/);
   assert.match(
     execCall?.[5] ?? "",
@@ -3471,6 +4043,13 @@ test("incus provider applies guest display resolution through the Selkies bootst
   assert.match(execCall?.[5] ?? "", /SELKIES_TURN_SHARED_SECRET="shared-secret"/);
   assert.match(execCall?.[5] ?? "", /SELKIES_TURN_REST_URI="https:\/\/turn\.example\.com\/api"/);
   assert.match(execCall?.[5] ?? "", /SELKIES_TURN_REST_USERNAME="selkies-host"/);
+  assert.match(execCall?.[5] ?? "", /DESKTOP_HOME="\/home\/ubuntu"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_STATE_DIR="\$DESKTOP_HOME\/\.cache\/parallaize-selkies"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_JSON_CONFIG="\$SELKIES_STATE_DIR\/selkies_config\.json"/);
+  assert.match(execCall?.[5] ?? "", /SELKIES_RTC_CONFIG_JSON="\$SELKIES_STATE_DIR\/rtc\.json"/);
+  assert.match(execCall?.[5] ?? "", /XDG_RUNTIME_DIR="\$DESKTOP_RUNTIME_DIR"/);
+  assert.match(execCall?.[5] ?? "", /install -d -m 700 -o "\$DESKTOP_UID" -g "\$DESKTOP_GID" "\$SELKIES_STATE_DIR"/);
+  assert.match(execCall?.[5] ?? "", /runuser -u ubuntu --preserve-environment -- "\$SELKIES_RUNNER"/);
   assert.doesNotMatch(execCall?.[5] ?? "", /parallaize-x11vnc\.service/);
 });
 
@@ -3518,6 +4097,53 @@ test("manager allows running Selkies desktops to apply display resolution change
     height: 767,
     vmId: "vm-0001",
     width: 1365,
+  });
+});
+
+test("manager allows running Guacamole desktops to apply display resolution changes", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-guacamole-resolution-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  let capturedResolution: { height: number; vmId: string; width: number } | null = null;
+  provider.setDisplayResolution = async (vm, width, height) => {
+    capturedResolution = {
+      height,
+      vmId: vm.id,
+      width,
+    };
+  };
+
+  const state = createSeedState(provider.state);
+  state.vms[0] = {
+    ...state.vms[0]!,
+    desktopTransport: "guacamole",
+    session: {
+      kind: "guacamole",
+      host: "10.55.0.43",
+      port: 5900,
+      reachable: true,
+      webSocketPath: "/api/vms/vm-0001/guacamole",
+      browserPath: "/?vm=vm-0001",
+      display: "10.55.0.43:5900",
+    },
+  };
+
+  const store = new JsonStateStore(join(tempDir, "state.json"), () => state);
+  store.save(state);
+  const manager = new DesktopManager(store, provider);
+
+  await manager.setVmResolution("vm-0001", {
+    width: 1536,
+    height: 864,
+  });
+
+  assert.deepEqual(capturedResolution, {
+    height: 864,
+    vmId: "vm-0001",
+    width: 1536,
   });
 });
 
@@ -3580,6 +4206,95 @@ test("incus provider reads VM logs from the console stream and falls back to inf
   assert.equal(fallbackLogs.source, "incus info --show-log");
   assert.match(fallbackLogs.content, /Fallback info log/);
   assert.match(fallbackLogs.content, /Agent connected/);
+});
+
+test("incus provider prefers Selkies service logs while the browser route is still missing", async () => {
+  const instanceName = "parallaize-vm-0200-selkies-service-logs";
+  let execCalls = 0;
+  let consoleCalls = 0;
+  let infoCalls = 0;
+  const provider = createProvider("incus", "incus", {
+    commandRunner: {
+      execute(args: string[]) {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        if (
+          args[0] === "exec" &&
+          args[1] === instanceName &&
+          args[2] === "--cwd" &&
+          args[3] === "/" &&
+          args[4] === "--" &&
+          args[5] === "sh" &&
+          args[6] === "-lc"
+        ) {
+          execCalls += 1;
+          assert.match(args[7] ?? "", /parallaize-selkies\.service/);
+          assert.match(args[7] ?? "", /journalctl -u "\$SERVICE_NAME" -n 200/);
+          return ok(
+            `== desktop service ==
+parallaize-selkies.service
+
+ActiveState=failed
+
+== journalctl ==
+Apr 02 00:00:00 selkies restart loop
+`,
+            args,
+          );
+        }
+
+        if (args[0] === "console" && args[1] === instanceName && args[2] === "--show-log") {
+          consoleCalls += 1;
+          return ok(`Boot complete\n`, args);
+        }
+
+        if (args[0] === "info" && args[1] === instanceName && args[2] === "--show-log") {
+          infoCalls += 1;
+          return ok(`Fallback info log\n`, args);
+        }
+
+        return ok("", args);
+      },
+    },
+  });
+
+  const vm: VmInstance = {
+    id: "vm-0200-selkies",
+    name: "selkies-log-reader",
+    templateId: "tpl-0001",
+    provider: "incus",
+    providerRef: instanceName,
+    status: "running",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    liveSince: new Date().toISOString(),
+    lastAction: "Running",
+    snapshotIds: [],
+    frameRevision: 1,
+    screenSeed: 201,
+    activeWindow: "logs",
+    workspacePath: "/root",
+    desktopTransport: "selkies",
+    session: null,
+    forwardedPorts: [],
+    activityLog: [],
+  };
+
+  const logs = await provider.readVmLogs(vm);
+
+  assert.equal(logs.source, "guest desktop service logs (parallaize-selkies.service)");
+  assert.equal(execCalls, 1);
+  assert.equal(consoleCalls, 0);
+  assert.equal(infoCalls, 0);
+  assert.match(logs.content, /ActiveState=failed/);
+  assert.match(logs.content, /selkies restart loop/);
 });
 
 test("incus provider streams live VM log chunks from the console", async () => {

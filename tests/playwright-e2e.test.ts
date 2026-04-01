@@ -59,6 +59,94 @@ test("Chromium Playwright dashboard browser integration", async (context) => {
     });
   });
 
+  await context.test("reloading a selected Selkies VM recovers even if the first post-refresh summary misses the browser session", async (subtest) => {
+    await withDashboard(subtest, async ({ page }) => {
+      const vmName = "selkies-e2e-refresh-recover";
+
+      await createVm(page, vmName);
+      const vmId = await lookupVmId(page, vmName);
+      let staleSummaryServed = false;
+      let staleDetailServed = false;
+
+      await page.route("**/events", async (route) => {
+        await route.abort();
+      });
+
+      await page.route("**/api/summary", async (route) => {
+        const response = await route.fetch();
+
+        if (staleSummaryServed) {
+          await route.fulfill({ response });
+          return;
+        }
+
+        staleSummaryServed = true;
+        const payload = await response.json();
+        const nextPayload = {
+          ...payload,
+          data: {
+            ...payload.data,
+            vms: payload.data.vms.map((vm: {
+              id: string;
+              session: unknown;
+            }) =>
+              vm.id === vmId
+                ? {
+                    ...vm,
+                    session: null,
+                  }
+                : vm
+            ),
+          },
+        };
+
+        await route.fulfill({
+          response,
+          contentType: "application/json",
+          body: JSON.stringify(nextPayload),
+        });
+      });
+
+      await page.route(`**/api/vms/${vmId}`, async (route) => {
+        const response = await route.fetch();
+
+        if (staleDetailServed) {
+          await route.fulfill({ response });
+          return;
+        }
+
+        staleDetailServed = true;
+        const payload = await response.json();
+        const nextPayload = {
+          ...payload,
+          data: {
+            ...payload.data,
+            vm: {
+              ...payload.data.vm,
+              session: null,
+            },
+          },
+        };
+
+        await route.fulfill({
+          response,
+          contentType: "application/json",
+          body: JSON.stringify(nextPayload),
+        });
+      });
+
+      await page.reload({
+        waitUntil: "domcontentloaded",
+      });
+
+      await waitFor(
+        `${vmName} reload serves stale summary and detail data before recovery`,
+        async () => staleSummaryServed && staleDetailServed,
+      );
+      await waitForStageDesktop(page, vmName);
+    });
+  });
+
   await context.test("renaming a Selkies VM keeps dialog focus while typing", async (subtest) => {
     await withDashboard(subtest, async ({ page }) => {
       const vmName = "selkies-e2e-rename-focus";
@@ -147,7 +235,47 @@ test("Chromium Playwright dashboard browser integration", async (context) => {
         async () =>
           (await mockStreamKickCount(page, vmName)) >= 1 &&
           (await mockStreamReady(page, vmName)) === true,
-        6_000,
+        4_000,
+      );
+    });
+  });
+
+  await context.test("waiting Selkies streams get kicked quickly enough for reconnect recovery", async (subtest) => {
+    await withDashboard(subtest, async ({ page }) => {
+      const vmName = "selkies-e2e-stream-waiting-kick";
+
+      await createVm(page, vmName);
+      await setMockStreamState(page, vmName, {
+        ready: false,
+        status: "Waiting for stream.",
+      });
+
+      await waitFor(
+        `${vmName} waiting auto-kick restores the Selkies stream`,
+        async () =>
+          (await mockStreamKickCount(page, vmName)) >= 1 &&
+          (await mockStreamReady(page, vmName)) === true,
+        5_000,
+      );
+    });
+  });
+
+  await context.test("reconnecting Selkies streams still recover when the waiting phase was missed", async (subtest) => {
+    await withDashboard(subtest, async ({ page }) => {
+      const vmName = "selkies-e2e-stream-reconnecting-kick";
+
+      await createVm(page, vmName);
+      await setMockStreamState(page, vmName, {
+        ready: false,
+        status: "Reconnecting stream.",
+      });
+
+      await waitFor(
+        `${vmName} reconnecting auto-kick restores the Selkies stream`,
+        async () =>
+          (await mockStreamKickCount(page, vmName)) >= 1 &&
+          (await mockStreamReady(page, vmName)) === true,
+        7_000,
       );
     });
   });
@@ -165,7 +293,7 @@ test("Chromium Playwright dashboard browser integration", async (context) => {
           (await mockStreamKickCount(page, vmName)) >= 1 &&
           (await mockStreamReloadCount(page, vmName)) >= 2 &&
           (await mockStreamReady(page, vmName)) === true,
-        12_000,
+        7_000,
       );
     });
   });
@@ -306,6 +434,28 @@ test("Chromium Playwright dashboard browser integration", async (context) => {
       await waitFor(
         `${vmName} receives pasted host text through the manual shortcut fallback`,
         async () => (await sessionNoteValue(page, vmName)) === "manual host clipboard text",
+      );
+    });
+  });
+
+  await context.test("Paste local is available from each VM menu and opens the target stage first", async (subtest) => {
+    await withDashboard(subtest, async ({ page }) => {
+      const vmName = "selkies-e2e-menu-paste";
+      const clipboardText = "menu host clipboard text";
+
+      await overrideBrowserClipboard(page, {
+        readText: clipboardText,
+      });
+      await createVm(page, vmName);
+      await openVm(page, "alpha-workbench");
+
+      await openVmTileMenu(page, vmName);
+      await page.getByRole("button", { name: "Paste local" }).click();
+
+      await waitForStageDesktop(page, vmName);
+      await waitFor(
+        `${vmName} receives pasted host text through the VM menu action`,
+        async () => (await sessionNoteValue(page, vmName)) === clipboardText,
       );
     });
   });
@@ -635,6 +785,13 @@ async function openVm(page: Page, vmName: string): Promise<void> {
   await waitForStageDesktop(page, vmName);
 }
 
+async function openVmTileMenu(page: Page, vmName: string): Promise<void> {
+  const tile = vmTile(page, vmName);
+
+  await tile.scrollIntoViewIfNeeded();
+  await tile.locator(".vm-tile__menu .menu-button").click();
+}
+
 async function setSessionNote(
   page: Page,
   vmName: string,
@@ -881,6 +1038,27 @@ async function overrideBrowserClipboard(
       nextWriteBlocked: writeBlocked,
     },
   );
+}
+
+async function lookupVmId(page: Page, vmName: string): Promise<string> {
+  return await page.evaluate(async (targetVmName) => {
+    const response = await fetch("/api/summary");
+    const payload = await response.json() as {
+      data?: {
+        vms?: Array<{
+          id?: string;
+          name?: string;
+        }>;
+      };
+    };
+    const match = payload.data?.vms?.find((vm) => vm.name === targetVmName);
+
+    if (!match?.id) {
+      throw new Error(`Unable to resolve VM id for ${targetVmName}.`);
+    }
+
+    return match.id;
+  }, vmName);
 }
 
 async function stageDesktopWidth(page: Page, vmName: string): Promise<number> {

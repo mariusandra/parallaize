@@ -10,6 +10,34 @@ import {
   updateSelkiesStreamRecoveryState,
 } from "../apps/web/src/embeddedBrowserStream.js";
 
+function withMockVideoDom(
+  videoFactory: () => object,
+  callback: (video: object) => void,
+): void {
+  const originalHtmlVideoElement = globalThis.HTMLVideoElement;
+
+  class MockHtmlVideoElement {}
+
+  Object.defineProperty(globalThis, "HTMLVideoElement", {
+    configurable: true,
+    value: MockHtmlVideoElement,
+  });
+
+  try {
+    const video = Object.assign(new MockHtmlVideoElement(), videoFactory());
+    callback(video);
+  } finally {
+    if (originalHtmlVideoElement === undefined) {
+      delete (globalThis as { HTMLVideoElement?: typeof HTMLVideoElement }).HTMLVideoElement;
+    } else {
+      Object.defineProperty(globalThis, "HTMLVideoElement", {
+        configurable: true,
+        value: originalHtmlVideoElement,
+      });
+    }
+  }
+}
+
 test("readEmbeddedBrowserStreamState reads the guest bridge payload", () => {
   const frame = {
     contentWindow: {
@@ -31,6 +59,61 @@ test("readEmbeddedBrowserStreamState reads the guest bridge payload", () => {
     ready: false,
     status: "Waiting for stream.",
   });
+});
+
+test("readEmbeddedBrowserStreamState rejects a false-connected placeholder video", () => {
+  withMockVideoDom(
+    () => ({
+      currentTime: 0,
+      ended: false,
+      paused: false,
+      readyState: 4,
+      srcObject: {},
+      videoHeight: 2,
+      videoWidth: 2,
+      getVideoPlaybackQuality: () => ({
+        totalVideoFrames: 0,
+      }),
+    }),
+    function (video) {
+      const frame = {
+        contentDocument: {
+          querySelector(selector: string) {
+            return selector === "video" ? video : null;
+          },
+        },
+        contentWindow: {
+          app: {
+            logEntries: [
+              "[signalling] [ERROR] Server closed connection.",
+              "[signalling] Connection error, retrying.",
+            ],
+            status: "connected",
+          },
+          parallaizeGetStreamState: () => ({
+            ready: true,
+            status: "connected",
+          }),
+          signalling: {
+            _ws_conn: {
+              readyState: 3,
+            },
+          },
+          webrtc: {
+            peerConnection: {
+              connectionState: "new",
+              iceConnectionState: "new",
+            },
+          },
+        },
+      } as unknown as HTMLIFrameElement;
+
+      assert.deepEqual(readEmbeddedBrowserStreamState(frame), {
+        ready: false,
+        status: "Connection failed.",
+      });
+    },
+  );
 });
 
 test("kickEmbeddedBrowserStream prefers the explicit guest kick bridge", () => {
@@ -167,27 +250,57 @@ test("Selkies recovery state survives a kicked reconnecting phase", () => {
   recovery = updateSelkiesStreamRecoveryState(
     recovery,
     reconnectingState,
-    null,
+    "reconnecting",
     13_250,
   );
   assert.deepEqual(recovery, {
     candidateSinceMs: 1_000,
     kickCount: 1,
     lastRecoveryAttemptMs: 13_000,
-    trackedCandidate: "waiting",
+    trackedCandidate: "reconnecting",
   });
 
   recovery = updateSelkiesStreamRecoveryState(
     recovery,
-    waitingState,
-    "waiting",
+    {
+      ready: false,
+      status: "",
+    },
+    null,
     14_000,
   );
   assert.deepEqual(recovery, {
     candidateSinceMs: 1_000,
     kickCount: 1,
     lastRecoveryAttemptMs: 13_000,
-    trackedCandidate: "waiting",
+    trackedCandidate: "reconnecting",
+  });
+});
+
+test("Selkies recovery state keeps a reconnecting candidate through a blank spinner phase", () => {
+  const recovery = updateSelkiesStreamRecoveryState(
+    updateSelkiesStreamRecoveryState(
+      createSelkiesStreamRecoveryState(),
+      {
+        ready: false,
+        status: "Reconnecting stream.",
+      },
+      "reconnecting",
+      1_000,
+    ),
+    {
+      ready: false,
+      status: "",
+    },
+    null,
+    4_000,
+  );
+
+  assert.deepEqual(recovery, {
+    candidateSinceMs: 1_000,
+    kickCount: 0,
+    lastRecoveryAttemptMs: 0,
+    trackedCandidate: "reconnecting",
   });
 });
 

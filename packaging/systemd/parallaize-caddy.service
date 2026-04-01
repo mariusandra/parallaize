@@ -9,8 +9,8 @@ User=parallaize
 Group=parallaize
 Environment=HOME=/var/lib/parallaize
 EnvironmentFile=/etc/parallaize/parallaize.env
-ExecStart=/usr/bin/caddy run --config /etc/parallaize/Caddyfile --adapter caddyfile
-ExecReload=/usr/bin/caddy reload --config /etc/parallaize/Caddyfile --adapter caddyfile
+ExecStart=/usr/bin/env bash -lc 'export HOSTNAME="${HOSTNAME:-$(hostname)}"; export PARALLAIZE_CADDY_PORT="${PARALLAIZE_CADDY_PORT:-8080}"; export PARALLAIZE_FORWARDED_SERVICE_HOST_BASE="${PARALLAIZE_FORWARDED_SERVICE_HOST_BASE:-parallaize.localhost}"; exec /usr/bin/caddy run --config /etc/parallaize/Caddyfile --adapter caddyfile'
+ExecReload=/usr/bin/env bash -lc 'export HOSTNAME="${HOSTNAME:-$(hostname)}"; export PARALLAIZE_CADDY_PORT="${PARALLAIZE_CADDY_PORT:-8080}"; export PARALLAIZE_FORWARDED_SERVICE_HOST_BASE="${PARALLAIZE_FORWARDED_SERVICE_HOST_BASE:-parallaize.localhost}"; exec /usr/bin/caddy reload --config /etc/parallaize/Caddyfile --adapter caddyfile'
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

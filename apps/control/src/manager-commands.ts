@@ -1,7 +1,12 @@
 import {
   normalizeTemplateDesktopTransport,
+  normalizeVmDesktopTransport,
   slugify,
 } from "../../../packages/shared/src/helpers.js";
+import {
+  formatDesktopTransportLabel,
+  resolveDesktopTransportRuntime,
+} from "../../../packages/shared/src/desktopTransport.js";
 
 import type {
   ActionJob,
@@ -21,6 +26,7 @@ import type {
   UpdateVmForwardedPortsInput,
   UpdateVmInput,
   UpdateVmNetworkInput,
+  VmDesktopTransport,
   VmInstance,
 } from "../../../packages/shared/src/types.js";
 import {
@@ -36,7 +42,6 @@ import {
   buildTemplateHistoryEntry,
   buildVmForwardedPorts,
   buildVmRecord,
-  cloneVmSession,
   collectTemplateUpdateFieldLabels,
   copyForwardAsTemplatePort,
   copyTemplatePortForward,
@@ -61,6 +66,12 @@ import {
   type DesktopManagerRuntime,
   type JobProgressReporter,
 } from "./manager-core.js";
+import {
+  cloneVmSession,
+  copyVmSession,
+  rebindVmSessionTransport,
+} from "./desktop-session.js";
+import type { ProviderMutation } from "./providers.js";
 
 export function createVm(
   runtime: DesktopManagerRuntime,
@@ -994,27 +1005,49 @@ export async function updateVm(
   vmId: string,
   input: UpdateVmInput,
 ): Promise<VmInstance> {
-  const nextName = input.name.trim();
+  const hasRequestedName = input.name !== undefined;
+  const hasRequestedDesktopTransport = input.desktopTransport !== undefined;
 
-  if (!nextName) {
-    throw new Error("VM name is required.");
+  if (!hasRequestedName && !hasRequestedDesktopTransport) {
+    throw new Error("At least one VM setting is required.");
   }
 
   const currentVm = runtime.getVmDetail(vmId).vm;
+  const nextName = hasRequestedName ? input.name?.trim() ?? "" : currentVm.name;
 
-  if (currentVm.name === nextName) {
+  if (hasRequestedName && !nextName) {
+    throw new Error("VM name is required.");
+  }
+
+  const currentDesktopTransport = normalizeVmDesktopTransport(currentVm.desktopTransport);
+  const nextDesktopTransport = hasRequestedDesktopTransport
+    ? normalizeVmDesktopTransport(input.desktopTransport)
+    : currentDesktopTransport;
+  const nameChanged = currentVm.name !== nextName;
+  const desktopTransportChanged = currentDesktopTransport !== nextDesktopTransport;
+  const desktopRuntimeChanged =
+    resolveDesktopTransportRuntime(currentDesktopTransport) !==
+    resolveDesktopTransportRuntime(nextDesktopTransport);
+
+  if (!nameChanged && !desktopTransportChanged) {
     return currentVm;
   }
 
+  if (desktopTransportChanged && currentVm.provider !== "incus") {
+    throw new Error("Desktop transport switching is only available for Incus VMs.");
+  }
+
   let guestHostname: string | null = null;
+  let desktopBridgeRepair: ProviderMutation | null = null;
 
   if (currentVm.status === "running") {
     runtime.ensureActiveProvider(currentVm);
-    guestHostname = await runtime.provider.syncVmHostname({
+    const providerVm = {
       ...currentVm,
       name: nextName,
+      desktopTransport: nextDesktopTransport,
       resources: { ...currentVm.resources },
-      session: cloneVmSession(currentVm.session),
+      session: copyVmSession(currentVm.session),
       forwardedPorts: currentVm.forwardedPorts.map((forward) => ({ ...forward })),
       activityLog: [...currentVm.activityLog],
       snapshotIds: [...currentVm.snapshotIds],
@@ -1027,38 +1060,115 @@ export async function updateVm(
             ramPercent: currentVm.telemetry.ramPercent,
           }
         : undefined,
-    });
+    };
+
+    if (nameChanged) {
+      guestHostname = await runtime.provider.syncVmHostname(providerVm);
+    }
+
+    if (desktopTransportChanged && desktopRuntimeChanged) {
+      if (!runtime.provider.repairVmDesktopBridge) {
+        throw new Error("The active provider does not support desktop bridge repair.");
+      }
+
+      desktopBridgeRepair = await runtime.provider.repairVmDesktopBridge(providerVm);
+    }
   }
 
   let updatedVm: VmInstance | null = null;
 
   runtime.store.update((draft) => {
     const vm = requireVm(draft, vmId);
+    const previousName = vm.name;
+    const previousDesktopTransport = normalizeVmDesktopTransport(vm.desktopTransport);
+    const draftNameChanged = vm.name !== nextName;
+    const draftDesktopTransportChanged = previousDesktopTransport !== nextDesktopTransport;
 
-    if (vm.name === nextName) {
+    if (!draftNameChanged && !draftDesktopTransportChanged) {
       updatedVm = vm;
       return false;
     }
 
-    const previousName = vm.name;
-    vm.name = nextName;
-    vm.lastAction = `Renamed workspace to ${nextName}`;
-    vm.updatedAt = nowIso();
-    appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+    if (draftNameChanged) {
+      vm.name = nextName;
+    }
+
+    if (draftDesktopTransportChanged) {
+      vm.desktopTransport = nextDesktopTransport;
+    }
+
+    if (desktopBridgeRepair && draftDesktopTransportChanged) {
+      const nextDesktopTransportLabel = formatDesktopTransportActionLabel(nextDesktopTransport);
+      applyProviderMutation(vm, {
+        ...desktopBridgeRepair,
+        session: "session" in desktopBridgeRepair ? desktopBridgeRepair.session : null,
+        desktopReadyAt:
+          "desktopReadyAt" in desktopBridgeRepair ? desktopBridgeRepair.desktopReadyAt : null,
+        desktopReadyMs:
+          "desktopReadyMs" in desktopBridgeRepair ? desktopBridgeRepair.desktopReadyMs : null,
+        activity: [
+          `desktop-transport: ${previousDesktopTransport} -> ${nextDesktopTransport}`,
+          ...desktopBridgeRepair.activity,
+        ],
+        lastAction: draftNameChanged
+          ? `Renamed workspace to ${nextName} and switched desktop to ${nextDesktopTransportLabel}`
+          : `Desktop transport switched to ${nextDesktopTransportLabel}`,
+      });
+
+      if (draftNameChanged) {
+        appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+      }
+    } else {
+      vm.updatedAt = nowIso();
+
+      if (draftDesktopTransportChanged && !desktopRuntimeChanged) {
+        vm.session = rebindVmSessionTransport(vm.id, vm.session, nextDesktopTransport);
+      }
+
+      if (draftNameChanged && draftDesktopTransportChanged) {
+        vm.lastAction =
+          `Renamed workspace to ${nextName} and set desktop to ` +
+          formatDesktopTransportActionLabel(nextDesktopTransport);
+        appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+        appendActivity(
+          vm,
+          `desktop-transport: ${previousDesktopTransport} -> ${nextDesktopTransport}`,
+        );
+      } else if (draftNameChanged) {
+        vm.lastAction = `Renamed workspace to ${nextName}`;
+        appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+      } else if (draftDesktopTransportChanged) {
+        vm.lastAction = `Desktop transport set to ${formatDesktopTransportActionLabel(nextDesktopTransport)}`;
+        appendActivity(
+          vm,
+          `desktop-transport: ${previousDesktopTransport} -> ${nextDesktopTransport}`,
+        );
+      }
+    }
+
     if (guestHostname) {
       appendActivity(vm, `guest-hostname: ${guestHostname}`);
     }
+
     updatedVm = vm;
     return true;
   });
 
   runtime.publish();
 
+  if (desktopBridgeRepair) {
+    runtime.requestVmSessionRefresh("missing");
+  }
+
   if (!updatedVm) {
     throw new Error(`VM ${vmId} was not found.`);
   }
 
-  return updatedVm;
+  return runtime.getVmDetail(vmId).vm;
+}
+
+function formatDesktopTransportActionLabel(transport: VmDesktopTransport): string {
+  return formatDesktopTransportLabel(transport);
 }
 
 export function deleteTemplate(
@@ -1140,7 +1250,11 @@ export async function setVmResolution(
     throw new Error("VM must be running before the display resolution can be changed.");
   }
 
-  if (vm.session?.kind !== "vnc" && vm.session?.kind !== "selkies") {
+  if (
+    vm.session?.kind !== "vnc" &&
+    vm.session?.kind !== "selkies" &&
+    vm.session?.kind !== "guacamole"
+  ) {
     throw new Error("Display resolution changes require a live browser-backed desktop.");
   }
 

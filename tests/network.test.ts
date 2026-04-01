@@ -9,7 +9,7 @@ import {
 } from "node:net";
 import test from "node:test";
 
-import WebSocket, { type RawData } from "ws";
+import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 import type { DesktopManager } from "../apps/control/src/manager.js";
 import { VmNetworkBridge } from "../apps/control/src/network.js";
@@ -368,6 +368,214 @@ test("Selkies bridge proxies the VM-scoped browser path to the guest web app", a
   }
 });
 
+test("Selkies websocket upgrades wait through a transient upstream restart", async () => {
+  const vmId = "vm-4699";
+  const upstreamPort = await reservePort();
+  const upstreamServer = createHttpServer();
+  const upstreamWebSocketServer = new WebSocketServer({ noServer: true });
+  const controlServer = createHttpServer();
+  let client: WebSocket | undefined;
+
+  try {
+    upstreamServer.on("upgrade", (request, socket, head) => {
+      upstreamWebSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocket.send("ready");
+        webSocket.on("message", (payload) => {
+          webSocket.send(payload);
+        });
+      });
+    });
+
+    const bridge = new VmNetworkBridge({
+      getSummary() {
+        return {
+          vms: [],
+        };
+      },
+      getVmDetail(requestedVmId: string) {
+        assert.equal(requestedVmId, vmId);
+        return {
+          vm: {
+            id: vmId,
+            name: "selkies-upgrade-retry-test",
+            status: "running",
+            session: {
+              kind: "selkies",
+              host: "127.0.0.1",
+              port: upstreamPort,
+              webSocketPath: null,
+              browserPath: `/selkies-${vmId}/`,
+              display: `127.0.0.1:${upstreamPort}`,
+            },
+            forwardedPorts: [],
+          },
+        };
+      },
+    } as unknown as DesktopManager);
+
+    controlServer.on("upgrade", (request, socket, head) => {
+      if (!bridge.maybeHandleUpgrade(request, socket as Socket, head)) {
+        socket.destroy();
+      }
+    });
+    controlServer.listen(0, "127.0.0.1");
+    await once(controlServer, "listening");
+
+    setTimeout(() => {
+      upstreamServer.listen(upstreamPort, "127.0.0.1");
+    }, 200);
+
+    const readyPayloadPromise = new Promise<Buffer>((resolve, reject) => {
+      client = new WebSocket(`ws://127.0.0.1:${portOf(controlServer)}/selkies-${vmId}/signalling/`);
+      client.once("message", (data) => {
+        resolve(bufferFromRawData(data));
+      });
+      client.once("error", reject);
+    });
+
+    if (!client) {
+      throw new Error("WebSocket client was not created.");
+    }
+
+    await waitForSocketOpen(client);
+    const readyPayload = await readyPayloadPromise;
+    assert.equal(readyPayload.toString("utf8"), "ready");
+
+    const echoPayloadPromise = new Promise<Buffer>((resolve, reject) => {
+      client?.once("message", (data) => {
+        resolve(bufferFromRawData(data));
+      });
+      client?.once("error", reject);
+    });
+    client.send("ping");
+    const echoPayload = await echoPayloadPromise;
+    assert.equal(echoPayload.toString("utf8"), "ping");
+  } finally {
+    client?.terminate();
+    upstreamWebSocketServer.close();
+    await closeServer(controlServer);
+    await closeServer(upstreamServer);
+  }
+});
+
+test("Selkies websocket upgrades do not inject HTTP errors after the handshake starts", async () => {
+  const vmId = "vm-4700";
+  const upstreamServer = createHttpServer();
+  const upstreamWebSocketServer = new WebSocketServer({ noServer: true });
+  const controlServer = createHttpServer();
+  let client: WebSocket | undefined;
+
+  try {
+    upstreamServer.on("upgrade", (request, socket, head) => {
+      upstreamWebSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocket.send("ready");
+        setTimeout(() => {
+          const rawSocket = (webSocket as WebSocket & {
+            _socket?: Socket;
+          })._socket;
+          rawSocket?.destroy(new Error("forced upstream websocket failure"));
+        }, 50);
+      });
+    });
+
+    upstreamServer.listen(0, "127.0.0.1");
+    await once(upstreamServer, "listening");
+    const upstreamPort = portOf(upstreamServer);
+
+    const bridge = new VmNetworkBridge({
+      getSummary() {
+        return {
+          vms: [],
+        };
+      },
+      getVmDetail(requestedVmId: string) {
+        assert.equal(requestedVmId, vmId);
+        return {
+          vm: {
+            id: vmId,
+            name: "selkies-upgrade-failure-test",
+            status: "running",
+            session: {
+              kind: "selkies",
+              host: "127.0.0.1",
+              port: upstreamPort,
+              webSocketPath: null,
+              browserPath: `/selkies-${vmId}/`,
+              display: `127.0.0.1:${upstreamPort}`,
+            },
+            forwardedPorts: [],
+          },
+        };
+      },
+    } as unknown as DesktopManager);
+
+    controlServer.on("upgrade", (request, socket, head) => {
+      if (!bridge.maybeHandleUpgrade(request, socket as Socket, head)) {
+        socket.destroy();
+      }
+    });
+    controlServer.listen(0, "127.0.0.1");
+    await once(controlServer, "listening");
+
+    const readyPayloadPromise = new Promise<Buffer>((resolve, reject) => {
+      client = new WebSocket(`ws://127.0.0.1:${portOf(controlServer)}/selkies-${vmId}/signalling/`);
+      client.once("message", (data) => {
+        resolve(bufferFromRawData(data));
+      });
+      client.once("error", reject);
+    });
+
+    if (!client) {
+      throw new Error("WebSocket client was not created.");
+    }
+
+    await waitForSocketOpen(client);
+    const readyPayload = await readyPayloadPromise;
+    assert.equal(readyPayload.toString("utf8"), "ready");
+
+    const failureOutcome = await Promise.race([
+      new Promise<{ type: "close"; code: number }>((resolve) => {
+        client?.once("close", (code) => {
+          resolve({
+            type: "close",
+            code,
+          });
+        });
+      }),
+      new Promise<{ type: "error"; message: string }>((resolve) => {
+        client?.once("error", (error) => {
+          resolve({
+            type: "error",
+            message: error.message,
+          });
+        });
+      }),
+      new Promise<{ type: "timeout" }>((resolve) => {
+        setTimeout(() => {
+          resolve({
+            type: "timeout",
+          });
+        }, 2_000);
+      }),
+    ]);
+
+    assert.notEqual(failureOutcome.type, "timeout");
+    assert.equal(
+      failureOutcome.type,
+      "close",
+      failureOutcome.type === "error"
+        ? `unexpected websocket parser error: ${failureOutcome.message}`
+        : "websocket did not close cleanly after the upstream failure",
+    );
+    assert.ok(failureOutcome.code === 1006 || failureOutcome.code >= 1000);
+  } finally {
+    client?.terminate();
+    upstreamWebSocketServer.close();
+    await closeServer(controlServer);
+    await closeServer(upstreamServer);
+  }
+});
+
 test("forward bridge still works for Selkies-backed VMs", async () => {
   const vmId = "vm-4747";
   const upstreamServer = createHttpServer((request, response) => {
@@ -448,6 +656,132 @@ test("forward bridge still works for Selkies-backed VMs", async () => {
   } finally {
     await closeServer(controlServer);
     await closeServer(upstreamServer);
+  }
+});
+
+test("Guacamole bridge negotiates guacd and forwards protocol traffic", async () => {
+  const vmId = "vm-4747";
+  const guestHost = "10.77.0.47";
+  const guestPort = 5900;
+  const guacdServer = createTcpServer();
+  const controlServer = createHttpServer();
+  let webSocket: WebSocket | undefined;
+
+  try {
+    const handshakePayloadPromise = new Promise<string>((resolve, reject) => {
+      guacdServer.once("connection", (socket) => {
+        let buffer = "";
+        let argsSent = false;
+
+        socket.on("data", (chunk) => {
+          buffer += chunk.toString("utf8");
+
+          if (!argsSent && buffer.includes("6.select,3.vnc;")) {
+            argsSent = true;
+            buffer = "";
+            socket.write("4.args,8.hostname,4.port;");
+            return;
+          }
+
+          if (argsSent && buffer.includes("7.connect")) {
+            resolve(buffer);
+            socket.write("4.sync,1.0;");
+          }
+        });
+        socket.once("error", reject);
+      });
+      guacdServer.once("error", reject);
+    });
+
+    guacdServer.listen(0, "127.0.0.1");
+    await once(guacdServer, "listening");
+
+    const bridge = new VmNetworkBridge(
+      {
+        getVmDetail(requestedVmId: string) {
+          assert.equal(requestedVmId, vmId);
+          return {
+            vm: {
+              id: vmId,
+              name: "guacamole-route-test",
+              status: "running",
+              session: {
+                kind: "guacamole",
+                host: guestHost,
+                port: guestPort,
+                webSocketPath: `/api/vms/${vmId}/guacamole`,
+                browserPath: `/?vm=${vmId}`,
+                display: `${guestHost}:${guestPort}`,
+              },
+              forwardedPorts: [],
+            },
+          };
+        },
+      } as unknown as DesktopManager,
+      {
+        guacdHost: "127.0.0.1",
+        guacdPort: portOf(guacdServer),
+      },
+    );
+
+    controlServer.on("upgrade", (request, socket, head) => {
+      if (!bridge.maybeHandleUpgrade(request, socket as Socket, head)) {
+        socket.destroy();
+      }
+    });
+    controlServer.listen(0, "127.0.0.1");
+    await once(controlServer, "listening");
+
+    const protocolMessagesPromise = new Promise<string[]>((resolve, reject) => {
+      const messages: string[] = [];
+      const client = new WebSocket(
+        `ws://127.0.0.1:${portOf(controlServer)}/api/vms/${vmId}/guacamole?width=1024&height=768&dpi=192`,
+        "guacamole",
+      );
+      webSocket = client;
+      client.on("message", (data) => {
+        messages.push(bufferFromRawData(data).toString("utf8"));
+
+        if (messages.length === 2) {
+          resolve(messages);
+        }
+      });
+      client.once("error", reject);
+    });
+
+    if (!webSocket) {
+      throw new Error("WebSocket was not created.");
+    }
+
+    await waitForSocketOpen(webSocket);
+    const [protocolMessages, handshakePayload] = await Promise.all([
+      protocolMessagesPromise,
+      handshakePayloadPromise,
+    ]);
+
+    assert.match(protocolMessages[0] ?? "", /^0\.,/);
+    assert.equal(protocolMessages[1], "4.sync,1.0;");
+    assert.match(handshakePayload, /4\.size,4\.1024,3\.768;/);
+    assert.match(handshakePayload, /7\.connect,10\.10\.77\.0\.47,4\.5900;/);
+
+    const pingEchoPromise = new Promise<string>((resolve, reject) => {
+      if (!webSocket) {
+        reject(new Error("WebSocket was not created."));
+        return;
+      }
+
+      webSocket.once("message", (data) => {
+        resolve(bufferFromRawData(data).toString("utf8"));
+      });
+      webSocket.once("error", reject);
+    });
+
+    webSocket.send("0.,4.ping,5.12345;");
+    assert.equal(await pingEchoPromise, "0.,4.ping,5.12345;");
+  } finally {
+    webSocket?.terminate();
+    await closeServer(controlServer);
+    await closeServer(guacdServer);
   }
 });
 
@@ -537,4 +871,16 @@ async function closeServer(server: TcpServer | ReturnType<typeof createHttpServe
       resolve();
     });
   });
+}
+
+async function reservePort(): Promise<number> {
+  const server = createTcpServer();
+
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    return portOf(server);
+  } finally {
+    await closeServer(server);
+  }
 }

@@ -1,0 +1,402 @@
+#!/bin/sh
+set -eu
+
+PACKAGE_ACTION="${1:-configure}"
+PREVIOUS_VERSION="${2:-}"
+
+if [ "$PACKAGE_ACTION" != "configure" ]; then
+  exit 0
+fi
+
+if [ -n "$PREVIOUS_VERSION" ]; then
+  IS_UPGRADE=1
+else
+  IS_UPGRADE=0
+fi
+
+APP_ENV_FILE="${PARALLAIZE_APP_ENV_FILE:-/etc/parallaize/parallaize.env}"
+APT_SEARCH_ROOT="${PARALLAIZE_APT_SEARCH_ROOT:-/etc/apt}"
+APT_KEYRING_FILE="${PARALLAIZE_APT_KEYRING_FILE:-/etc/apt/keyrings/parallaize-archive-keyring.gpg}"
+APT_SOURCES_FILE="${PARALLAIZE_APT_SOURCES_FILE:-/etc/apt/sources.list.d/parallaize.sources}"
+APT_KEYRING_URL="${PARALLAIZE_APT_KEYRING_URL:-https://archive.parallaize.com/apt/parallaize-archive-keyring.gpg}"
+APT_SOURCES_URL="${PARALLAIZE_APT_SOURCES_URL:-https://archive.parallaize.com/apt/parallaize.sources}"
+APT_HELPER_BIN="${PARALLAIZE_APT_HELPER_BIN:-/usr/lib/apt/apt-helper}"
+LVM_POOL_NAME="${PARALLAIZE_LVM_POOL_NAME:-parallaize-lvm}"
+LVM_POOL_SIZE="${PARALLAIZE_LVM_POOL_SIZE:-}"
+LVM_POOL_MIN_SIZE_GIB="${PARALLAIZE_LVM_POOL_MIN_SIZE_GIB:-64}"
+LVM_POOL_SIZE_CAP_GIB="${PARALLAIZE_LVM_POOL_SIZE_CAP_GIB:-200}"
+LVM_SIZE_PATH="${PARALLAIZE_LVM_SIZE_PATH:-/var/lib/incus}"
+INSTALL_APT_REPO_RESPONSE="${PARALLAIZE_INSTALL_APT_REPO_RESPONSE:-ask}"
+CREATE_LVM_POOL_RESPONSE="${PARALLAIZE_CREATE_LVM_POOL_RESPONSE:-ask}"
+SKIP_BLANK_INCUS_BOOTSTRAP="${PARALLAIZE_SKIP_BLANK_INCUS_BOOTSTRAP:-0}"
+
+log() {
+  printf 'parallaize: %s\n' "$1" >&2
+}
+
+warn() {
+  printf 'parallaize: warning: %s\n' "$1" >&2
+}
+
+read_env_value() {
+  key="$1"
+
+  if [ ! -f "$APP_ENV_FILE" ]; then
+    return 0
+  fi
+
+  sed -n "s/^${key}=//p" "$APP_ENV_FILE" | head -n 1
+}
+
+set_env_value() {
+  key="$1"
+  value="$2"
+
+  if [ ! -f "$APP_ENV_FILE" ]; then
+    return 0
+  fi
+
+  escaped_value="$(printf '%s' "$value" | sed 's/[\/&]/\\&/g')"
+
+  if grep -q "^${key}=" "$APP_ENV_FILE"; then
+    sed -i "s/^${key}=.*/${key}=${escaped_value}/" "$APP_ENV_FILE"
+    return 0
+  fi
+
+  printf '\n%s=%s\n' "$key" "$value" >> "$APP_ENV_FILE"
+}
+
+is_interactive_prompting_allowed() {
+  if [ "${DEBIAN_FRONTEND:-}" = "noninteractive" ]; then
+    return 1
+  fi
+
+  if [ ! -c /dev/tty ]; then
+    return 1
+  fi
+
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    return 1
+  fi
+
+  return 0
+}
+
+prompt_yes_no() {
+  prompt="$1"
+  response_override="$2"
+
+  case "$response_override" in
+    yes|true|1)
+      return 0
+      ;;
+    no|false|0)
+      return 1
+      ;;
+  esac
+
+  if ! is_interactive_prompting_allowed; then
+    return 1
+  fi
+
+  while true; do
+    printf '%s [Y/n] ' "$prompt" > /dev/tty
+
+    if ! IFS= read -r answer < /dev/tty; then
+      return 1
+    fi
+
+    normalized_answer="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+
+    case "$normalized_answer" in
+      ""|y|yes)
+        return 0
+        ;;
+      n|no)
+        return 1
+        ;;
+    esac
+  done
+}
+
+download_file() {
+  url="$1"
+  target="$2"
+
+  if [ -x "$APT_HELPER_BIN" ]; then
+    "$APT_HELPER_BIN" download-file "$url" "$target" >/dev/null
+    return $?
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$target"
+    return $?
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO "$target" "$url"
+    return $?
+  fi
+
+  return 1
+}
+
+apt_repo_already_installed() {
+  if [ -f "$APT_SOURCES_FILE" ] || [ -f "$APT_KEYRING_FILE" ]; then
+    return 0
+  fi
+
+  for candidate in \
+    "$APT_SEARCH_ROOT/sources.list" \
+    "$APT_SEARCH_ROOT/sources.list.d"/*.list \
+    "$APT_SEARCH_ROOT/sources.list.d"/*.sources
+  do
+    if [ ! -e "$candidate" ]; then
+      continue
+    fi
+
+    if grep -q 'archive\.parallaize\.com/apt' "$candidate"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+offer_apt_repository_install() {
+  if [ "$IS_UPGRADE" -ne 0 ]; then
+    return 0
+  fi
+
+  if apt_repo_already_installed; then
+    return 0
+  fi
+
+  if ! prompt_yes_no \
+    "Install the Parallaize APT repository as well so future upgrades can come from apt?" \
+    "$INSTALL_APT_REPO_RESPONSE"
+  then
+    return 0
+  fi
+
+  temp_dir="$(mktemp -d)"
+  cleanup_temp_dir() {
+    rm -rf "$temp_dir"
+  }
+  trap cleanup_temp_dir EXIT HUP INT TERM
+
+  install -d -m 0755 "$(dirname "$APT_KEYRING_FILE")" "$(dirname "$APT_SOURCES_FILE")"
+
+  if ! download_file "$APT_KEYRING_URL" "$temp_dir/parallaize-archive-keyring.gpg"; then
+    warn "failed to download the Parallaize archive keyring from $APT_KEYRING_URL"
+    return 0
+  fi
+
+  if ! download_file "$APT_SOURCES_URL" "$temp_dir/parallaize.sources"; then
+    warn "failed to download the Parallaize APT source definition from $APT_SOURCES_URL"
+    return 0
+  fi
+
+  install -m 0644 "$temp_dir/parallaize-archive-keyring.gpg" "$APT_KEYRING_FILE"
+  install -m 0644 "$temp_dir/parallaize.sources" "$APT_SOURCES_FILE"
+  log "installed the Parallaize APT repository source at $APT_SOURCES_FILE"
+}
+
+bootstrap_blank_incus_host() {
+  preseed_blank_incus_host() {
+    storage_driver="$1"
+
+    cat <<EOF | incus admin init --preseed >/dev/null 2>&1
+config: {}
+networks:
+- name: incusbr0
+  type: bridge
+  config:
+    ipv4.address: auto
+    ipv6.address: auto
+storage_pools:
+- name: default
+  driver: $storage_driver
+profiles:
+- name: default
+  description: Default Incus profile
+  config: {}
+  devices:
+    eth0:
+      name: eth0
+      network: incusbr0
+      type: nic
+    root:
+      path: /
+      pool: default
+      type: disk
+EOF
+  }
+
+  if [ "$SKIP_BLANK_INCUS_BOOTSTRAP" = "1" ]; then
+    return 0
+  fi
+
+  if ! command -v incus >/dev/null 2>&1; then
+    return 0
+  fi
+
+  storage_csv="$(incus storage list --format csv -c n 2>/dev/null || printf '')"
+  profile_yaml="$(incus profile show default 2>/dev/null || printf '')"
+
+  if incus network show incusbr0 >/dev/null 2>&1; then
+    has_bridge=1
+  else
+    has_bridge=0
+  fi
+
+  if [ -n "$storage_csv" ]; then
+    has_storage=1
+  else
+    has_storage=0
+  fi
+
+  case "$profile_yaml" in
+    *"devices: {}"*)
+      default_profile_empty=1
+      ;;
+    *)
+      default_profile_empty=0
+      ;;
+  esac
+
+  if [ "$has_storage" -ne 0 ] || [ "$has_bridge" -ne 0 ] || [ "$default_profile_empty" -eq 0 ]; then
+    return 0
+  fi
+
+  if command -v mkfs.btrfs >/dev/null 2>&1; then
+    preseed_blank_incus_host btrfs || preseed_blank_incus_host dir || return 0
+  else
+    preseed_blank_incus_host dir || return 0
+  fi
+
+  current_pool="$(read_env_value PARALLAIZE_INCUS_STORAGE_POOL)"
+  if [ -z "$current_pool" ] || [ "$current_pool" = "default" ]; then
+    set_env_value PARALLAIZE_INCUS_STORAGE_POOL default
+  fi
+}
+
+find_existing_lvm_pool() {
+  if ! command -v incus >/dev/null 2>&1; then
+    return 0
+  fi
+
+  pools_csv="$(incus storage list --format csv -c nd 2>/dev/null || printf '')"
+  if [ -z "$pools_csv" ]; then
+    return 0
+  fi
+
+  first_lvm_pool=""
+  old_ifs="$IFS"
+  IFS='
+'
+
+  for line in $pools_csv; do
+    name="$(printf '%s' "$line" | cut -d ',' -f 1)"
+    driver="$(printf '%s' "$line" | cut -d ',' -f 2)"
+
+    if [ "$driver" != "lvm" ]; then
+      continue
+    fi
+
+    if [ "$name" = "$LVM_POOL_NAME" ]; then
+      printf '%s\n' "$name"
+      IFS="$old_ifs"
+      return 0
+    fi
+
+    if [ -z "$first_lvm_pool" ]; then
+      first_lvm_pool="$name"
+    fi
+  done
+
+  IFS="$old_ifs"
+  printf '%s\n' "$first_lvm_pool"
+}
+
+resolve_recommended_lvm_pool_size() {
+  if [ -n "$LVM_POOL_SIZE" ]; then
+    printf '%s\n' "$LVM_POOL_SIZE"
+    return 0
+  fi
+
+  size_probe_path="$LVM_SIZE_PATH"
+  if [ ! -d "$size_probe_path" ]; then
+    size_probe_path="/var/lib"
+  fi
+
+  available_gib="$(
+    df -BG --output=avail "$size_probe_path" 2>/dev/null \
+      | awk 'NR == 2 { gsub(/[^0-9]/, "", $1); print $1 }'
+  )"
+
+  if [ -z "$available_gib" ]; then
+    return 1
+  fi
+
+  recommended_gib=$((available_gib * 80 / 100))
+
+  if [ "$recommended_gib" -gt "$LVM_POOL_SIZE_CAP_GIB" ]; then
+    recommended_gib="$LVM_POOL_SIZE_CAP_GIB"
+  fi
+
+  if [ "$recommended_gib" -lt "$LVM_POOL_MIN_SIZE_GIB" ]; then
+    return 1
+  fi
+
+  printf '%sGiB\n' "$recommended_gib"
+}
+
+configure_preferred_lvm_pool() {
+  current_pool="$(read_env_value PARALLAIZE_INCUS_STORAGE_POOL)"
+
+  if [ -n "$current_pool" ] && [ "$current_pool" != "default" ]; then
+    return 0
+  fi
+
+  existing_lvm_pool="$(find_existing_lvm_pool)"
+  if [ -n "$existing_lvm_pool" ]; then
+    if [ "$current_pool" != "$existing_lvm_pool" ]; then
+      set_env_value PARALLAIZE_INCUS_STORAGE_POOL "$existing_lvm_pool"
+      log "set PARALLAIZE_INCUS_STORAGE_POOL=$existing_lvm_pool in $APP_ENV_FILE"
+    fi
+    return 0
+  fi
+
+  if [ "$IS_UPGRADE" -ne 0 ]; then
+    return 0
+  fi
+
+  if ! command -v incus >/dev/null 2>&1; then
+    return 0
+  fi
+
+  suggested_size="$(resolve_recommended_lvm_pool_size || printf '')"
+  if [ -z "$suggested_size" ]; then
+    return 0
+  fi
+
+  if ! prompt_yes_no \
+    "No large Incus LVM pool is configured yet. Create \"$LVM_POOL_NAME\" as a thin loop-backed pool (${suggested_size}) and point Parallaize at it?" \
+    "$CREATE_LVM_POOL_RESPONSE"
+  then
+    return 0
+  fi
+
+  if ! incus storage create "$LVM_POOL_NAME" lvm size="$suggested_size" lvm.use_thinpool=true >/dev/null 2>&1; then
+    warn "failed to create the Incus LVM pool \"$LVM_POOL_NAME\""
+    return 0
+  fi
+
+  set_env_value PARALLAIZE_INCUS_STORAGE_POOL "$LVM_POOL_NAME"
+  log "created the Incus LVM pool \"$LVM_POOL_NAME\" (${suggested_size}) and updated $APP_ENV_FILE"
+}
+
+bootstrap_blank_incus_host
+configure_preferred_lvm_pool
+offer_apt_repository_install

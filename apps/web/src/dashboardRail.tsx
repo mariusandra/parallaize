@@ -13,7 +13,9 @@ import type { VmInstance, VmPowerAction } from "../../../packages/shared/src/typ
 
 import {
   hasBrowserDesktopSession,
+  hasBrowserSelkiesSession,
   shouldShowLiveVmPreview,
+  shouldUseMirroredVmPreview,
 } from "./desktopSession.js";
 import { formatThresholdPercent, vmTilePreviewLabel } from "./dashboardHelpers.js";
 import {
@@ -52,6 +54,7 @@ interface VmTileProps {
   onInspect: (vmId: string) => void;
   onOpenLogs: (vm: VmInstance) => void;
   onOpen: (vmId: string) => void;
+  onPasteLocal: (vm: VmInstance) => void;
   onRename: (vm: VmInstance) => Promise<void>;
   onSetActiveCpuThreshold: (vm: VmInstance) => void;
   onSnapshot: (vm: VmInstance) => Promise<void>;
@@ -138,6 +141,7 @@ export function VmTile({
   onInspect,
   onOpenLogs,
   onOpen,
+  onPasteLocal,
   onRename,
   onSetActiveCpuThreshold,
   onSnapshot,
@@ -145,8 +149,7 @@ export function VmTile({
   onToggleMenu,
 }: VmTileProps): JSX.Element {
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
-  const selkiesPreviewCandidate =
-    vm.session?.kind === "selkies" || vm.desktopTransport === "selkies";
+  const selkiesPreviewCandidate = hasBrowserSelkiesSession(vm.session);
   const [retainCapturedSelkiesPreview, setRetainCapturedSelkiesPreview] = useState(
     selkiesPreviewCandidate && selected && showLivePreview && vm.status === "running",
   );
@@ -165,20 +168,20 @@ export function VmTile({
   const streamReady = useEmbeddedBrowserStreamReady(mirroredStageFrameRef);
   const canShowLivePreview = shouldShowLiveVmPreview(vm, showLivePreview, selected);
   const previewLabel = vmTilePreviewLabel(vm, showLivePreview, selected);
-  const preferCapturedSelkiesPreview =
-    canShowLivePreview &&
-    selkiesPreviewCandidate &&
-    (selected || retainCapturedSelkiesPreview);
-  const canShowMirroredBrowserPreview =
-    showLivePreview &&
-    vm.status === "running" &&
-    mirroredStageFrameRef !== null &&
-    !preferCapturedSelkiesPreview;
+  const canShowMirroredBrowserPreview = shouldUseMirroredVmPreview(vm, {
+    mirroredStageFrameAvailable: mirroredStageFrameRef !== null,
+    retainCapturedSelkiesPreview,
+    selected,
+    showLivePreview,
+  });
   const canShowCapturedBrowserPreview =
     canShowLivePreview &&
     hasBrowserDesktopSession(vm.session) &&
     !canShowMirroredBrowserPreview;
-  const showStreamingBadge = vm.status === "running" && streamReady;
+  const showStreamingBadge =
+    vm.status === "running" &&
+    selkiesPreviewCandidate &&
+    streamReady;
   const previewImagePath = canShowCapturedBrowserPreview
     ? `/api/vms/${encodeURIComponent(vm.id)}/preview?frameRevision=${vm.frameRevision}`
     : null;
@@ -248,6 +251,17 @@ export function VmTile({
               {inspectorVisible ? "Hide inspector" : "Inspector"}
             </button>
           ) : null}
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              onPasteLocal(vm);
+            }}
+            disabled={vm.status !== "running"}
+          >
+            Paste local
+          </button>
           <button
             className="menu-action"
             type="button"

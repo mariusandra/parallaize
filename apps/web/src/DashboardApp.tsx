@@ -39,11 +39,13 @@ import type {
   UpdateVmInput,
   UpdateVmNetworkInput,
   VmDetail,
+  VmDesktopTransport,
   VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmInstance,
   LatestReleaseMetadata,
   VmNetworkMode,
+  VmLogsSnapshot,
   VmPowerAction,
   VmResolutionControlSnapshot,
   VmTouchedFilesSnapshot,
@@ -75,18 +77,19 @@ import {
   readEmbeddedBrowserStreamState,
   setEmbeddedBrowserStreamScale,
   type EmbeddedBrowserStreamState,
+  type SelkiesStreamRecoveryCandidate,
   updateSelkiesStreamRecoveryState,
 } from "./embeddedBrowserStream.js";
 import {
   hasBrowserDesktopSession,
-  hasBrowserVncSession,
   mergeSelectedVmDetail,
   resolveDisplayedDesktopSession,
   resolveSelectedDesktopSession,
   shouldRefreshSelectedVmDetail,
   type RetainedDesktopSession,
 } from "./desktopSession.js";
-import { NoVncViewport } from "./NoVncViewport.js";
+import { formatDesktopTransportLabel, isSocketDesktopSessionKind, providerSupportsBrowserDesktopSessions } from "../../../packages/shared/src/desktopTransport.js";
+import { RemoteDesktopViewport } from "./RemoteDesktopViewport.js";
 import { SelkiesClipboardOverlay } from "./SelkiesClipboardOverlay.js";
 import {
   appPackageReleaseLabel,
@@ -288,6 +291,17 @@ interface CachedStageBrowserSession {
   viewportBounds: ViewportBounds;
 }
 
+interface CachedStageSocketSession {
+  name: string;
+  session: NonNullable<VmInstance["session"]>;
+  viewportBounds: ViewportBounds;
+}
+
+interface PendingLocalPasteRequest {
+  token: number;
+  vmId: string;
+}
+
 interface SelkiesStageScaleDescriptor {
   fallbackFrameStyle?: CSSProperties;
   pixelated: boolean;
@@ -309,6 +323,27 @@ function sameOptionalSelkiesStageScale(
   }
 
   return sameSelkiesStageScale(left, right);
+}
+
+function sameStageSocketSession(
+  left: NonNullable<VmInstance["session"]> | null | undefined,
+  right: NonNullable<VmInstance["session"]> | null | undefined,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  if (!left || !right) {
+    return false;
+  }
+
+  return (
+    left.kind === right.kind &&
+    left.webSocketPath === right.webSocketPath &&
+    left.browserPath === right.browserPath &&
+    left.host === right.host &&
+    left.port === right.port
+  );
 }
 
 function appendQueryParam(path: string, key: string, value: string): string {
@@ -457,7 +492,7 @@ function blurEmbeddedFrameTarget(
 
 function resolveSelkiesStreamKickCandidate(
   state: EmbeddedBrowserStreamState | null,
-): "failed" | "waiting" | null {
+): SelkiesStreamRecoveryCandidate | null {
   if (!state || state.ready) {
     return null;
   }
@@ -466,10 +501,6 @@ function resolveSelkiesStreamKickCandidate(
 
   if (normalizedStatus.length === 0) {
     return null;
-  }
-
-  if (normalizedStatus.includes("waiting for stream")) {
-    return "waiting";
   }
 
   if (
@@ -486,6 +517,8 @@ function resolveSelkiesStreamKickCandidate(
 
   return null;
 }
+
+const selectedStageSessionRecoveryPollMs = 1_500;
 
 export function DashboardApp(): JSX.Element {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -626,6 +659,7 @@ export function DashboardApp(): JSX.Element {
   const resolutionRequestQueueRef = useRef(emptyResolutionRequestQueue);
   const currentResolutionTargetRef = useRef<DesktopResolutionTarget | null>(null);
   const currentRemoteResolutionKeyRef = useRef<string | null>(null);
+  const localPasteRequestSequenceRef = useRef(0);
   const resolutionControlStatusRef = useRef<ResolutionControlStatus>({
     controllerClientId: null,
     owner: "none",
@@ -645,6 +679,10 @@ export function DashboardApp(): JSX.Element {
     useState<RetainedDesktopSession | null>(null);
   const [cachedStageBrowserSessions, setCachedStageBrowserSessions] =
     useState<Record<string, CachedStageBrowserSession>>({});
+  const [cachedStageSocketSessions, setCachedStageSocketSessions] =
+    useState<Record<string, CachedStageSocketSession>>({});
+  const [pendingLocalPasteRequest, setPendingLocalPasteRequest] =
+    useState<PendingLocalPasteRequest | null>(null);
 
   function resolveStageBrowserFrameRef(vmId: string): RefObject<HTMLIFrameElement | null> {
     const existing = cachedStageBrowserFrameRefsRef.current.get(vmId);
@@ -691,6 +729,12 @@ export function DashboardApp(): JSX.Element {
   const currentDetail = mergeSelectedVmDetail(selectedVm, detail);
   const currentStageSession = resolveSelectedDesktopSession(selectedVm, currentDetail);
   const currentStageVm = currentDetail?.vm ?? selectedVm ?? null;
+  const requestedStageLocalPasteToken =
+    pendingLocalPasteRequest !== null &&
+    currentStageVm !== null &&
+    pendingLocalPasteRequest.vmId === currentStageVm.id
+      ? pendingLocalPasteRequest.token
+      : null;
   const displayedStageSession = resolveDisplayedDesktopSession(
     currentStageVm,
     currentStageSession,
@@ -724,6 +768,21 @@ export function DashboardApp(): JSX.Element {
     activeStageBrowserSession && currentStageVm
       ? currentStageVm.id
       : null;
+  const activeStageSocketSession =
+    currentStageVm &&
+    displayedStageSession &&
+    isSocketDesktopSessionKind(displayedStageSession.kind) &&
+    displayedStageSession.webSocketPath &&
+    !stageSessionRelinquished
+      ? {
+          name: currentStageVm.name,
+          session: displayedStageSession,
+        }
+      : null;
+  const activeStageSocketVmId =
+    activeStageSocketSession && currentStageVm
+      ? currentStageVm.id
+      : null;
   const selectedSelkiesRecoveryTarget =
     selectedVm &&
     currentStageVm?.id === selectedVm.id &&
@@ -741,6 +800,11 @@ export function DashboardApp(): JSX.Element {
     selectedVm.status === "running" &&
     selectedVm.provider === "incus" &&
     summary?.provider.kind === "incus";
+  const canSwitchSelectedDesktopTransport =
+    selectedVm !== null &&
+    selectedVm.provider === "incus" &&
+    summary?.provider.kind === "incus" &&
+    providerSupportsBrowserDesktopSessions(summary.provider.desktopTransport);
   const stageBrowserSessionsByVm =
     activeStageBrowserSession && currentStageVm
       ? {
@@ -754,11 +818,30 @@ export function DashboardApp(): JSX.Element {
           },
         }
       : cachedStageBrowserSessions;
+  const stageSocketSessionsByVm =
+    activeStageSocketSession && currentStageVm
+      ? {
+          ...cachedStageSocketSessions,
+          [currentStageVm.id]: {
+            name: activeStageSocketSession.name,
+            session: activeStageSocketSession.session,
+            viewportBounds:
+              cachedStageSocketSessions[currentStageVm.id]?.session &&
+              sameStageSocketSession(
+                cachedStageSocketSessions[currentStageVm.id]?.session,
+                activeStageSocketSession.session,
+              )
+                ? cachedStageSocketSessions[currentStageVm.id]?.viewportBounds ?? emptyViewportBounds
+                : emptyViewportBounds,
+          },
+        }
+      : cachedStageSocketSessions;
   const desktopSessionLeaseVmIds = Array.from(
     new Set(
-      (activeStageBrowserVmId !== null ? [activeStageBrowserVmId] : []).concat(
-        Object.keys(cachedStageBrowserSessions),
-      ),
+      (activeStageBrowserVmId !== null ? [activeStageBrowserVmId] : [])
+        .concat(activeStageSocketVmId !== null ? [activeStageSocketVmId] : [])
+        .concat(Object.keys(cachedStageBrowserSessions))
+        .concat(Object.keys(cachedStageSocketSessions)),
     ),
   );
   const desktopSessionLeaseVmIdsKey = desktopSessionLeaseVmIds.join("\u0000");
@@ -766,7 +849,8 @@ export function DashboardApp(): JSX.Element {
     currentDetail !== null && shouldShowWorkspaceLogsSurface(currentDetail);
   const liveResolutionVmId =
     currentStageVm?.status === "running" &&
-    hasBrowserDesktopSession(displayedStageSession)
+    hasBrowserDesktopSession(displayedStageSession) &&
+    !stageSessionRelinquished
       ? currentStageVm.id
       : null;
   const ownsLiveResolutionControl =
@@ -791,7 +875,9 @@ export function DashboardApp(): JSX.Element {
     resolutionControlStatus.source === "remote"
       ? "Take over control"
       : "Take over here";
-  const supportsLiveDesktop = summary?.provider.desktopTransport === "novnc";
+  const supportsLiveDesktop = providerSupportsBrowserDesktopSessions(
+    summary?.provider.desktopTransport,
+  );
   const newerReleaseAvailable = hasNewerReleaseAvailable(
     appVersionLabel,
     appPackageReleaseLabel,
@@ -1021,6 +1107,37 @@ export function DashboardApp(): JSX.Element {
     });
   }
 
+  function handleStageLocalPasteRequestHandled(token: number): void {
+    setPendingLocalPasteRequest((current) =>
+      current?.token === token ? null : current,
+    );
+  }
+
+  function requestVmLocalPaste(vm: VmInstance): void {
+    if (vm.status !== "running") {
+      setNotice({
+        tone: "error",
+        message: `Start ${vm.name} before sending local clipboard text.`,
+      });
+      return;
+    }
+
+    if (selectedVm?.id === vm.id && stageSessionRelinquished) {
+      setNotice({
+        tone: "error",
+        message: `Reconnect ${vm.name} on this tab before pasting local text.`,
+      });
+      return;
+    }
+
+    localPasteRequestSequenceRef.current += 1;
+    setPendingLocalPasteRequest({
+      vmId: vm.id,
+      token: localPasteRequestSequenceRef.current,
+    });
+    selectVm(vm.id);
+  }
+
   function kickBrowserStream(vm: VmInstance): void {
     if (!selectedSelkiesRecoveryTarget || selectedVm?.id !== vm.id) {
       setNotice({
@@ -1059,6 +1176,117 @@ export function DashboardApp(): JSX.Element {
       tone: "info",
       message: `Reloading the Selkies frame for ${vm.name}.`,
     });
+  }
+
+  async function restartDesktopService(vm: VmInstance): Promise<void> {
+    if (sessionRecoveryBusyVmId === vm.id) {
+      return;
+    }
+
+    if (
+      vm.status !== "running" ||
+      vm.provider !== "incus" ||
+      summary?.provider.kind !== "incus"
+    ) {
+      setNotice({
+        tone: "error",
+        message: `Desktop service restart is only available for running Incus VMs.`,
+      });
+      return;
+    }
+
+    setSessionRecoveryBusyVmId(vm.id);
+
+    try {
+      const restartedDetail = await postJson<VmDetail>(
+        `/api/vms/${vm.id}/desktop-service/restart`,
+        {},
+      );
+
+      if (selectedVmIdRef.current === vm.id) {
+        startTransition(() => {
+          setDetail(restartedDetail);
+        });
+      }
+
+      await refreshSummary();
+      if (selectedVmIdRef.current === vm.id) {
+        await refreshDetail(vm.id);
+      }
+
+      const activeRecoveryTarget =
+        currentStageVm?.id === vm.id &&
+        displayedStageSession?.kind === "selkies" &&
+        displayedStageSession.browserPath &&
+        !stageSessionRelinquished
+          ? {
+              browserPath: displayedStageSession.browserPath,
+              vmName: currentStageVm?.name ?? vm.name,
+            }
+          : null;
+
+      if (activeRecoveryTarget) {
+        requestStageBrowserReload(vm.id, activeRecoveryTarget.browserPath, activeRecoveryTarget.vmName);
+      }
+
+      setNotice({
+        tone: "success",
+        message: `Restarted the Selkies service for ${vm.name}.`,
+      });
+    } catch (error: unknown) {
+      setNotice({
+        tone: "error",
+        message: errorMessage(error),
+      });
+    } finally {
+      setSessionRecoveryBusyVmId((current) => (current === vm.id ? null : current));
+    }
+  }
+
+  async function refreshWorkspaceLogs(): Promise<void> {
+    if (authState !== "ready" || !currentDetail || !showWorkspaceLogs) {
+      return;
+    }
+
+    const vmId = currentDetail.vm.id;
+
+    setWorkspaceLogs((current) => ({
+      ...current,
+      error: null,
+      loading: current.logs === null,
+      refreshing: current.logs !== null,
+    }));
+
+    try {
+      const logs = await fetchJson<VmLogsSnapshot>(`/api/vms/${vmId}/logs`);
+
+      if (selectedVmIdRef.current !== vmId) {
+        return;
+      }
+
+      setWorkspaceLogs({
+        error: null,
+        loading: false,
+        logs,
+        refreshing: false,
+      });
+    } catch (error: unknown) {
+      if (error instanceof AuthRequiredError) {
+        requireLogin();
+        return;
+      }
+
+      if (selectedVmIdRef.current !== vmId) {
+        return;
+      }
+
+      setWorkspaceLogs((current) => ({
+        ...current,
+        error: errorMessage(error),
+        loading: false,
+        refreshing: false,
+      }));
+    }
   }
 
   async function repairDesktopBridge(
@@ -1142,6 +1370,124 @@ export function DashboardApp(): JSX.Element {
     } finally {
       setSessionRecoveryBusyVmId((current) => (current === vm.id ? null : current));
     }
+  }
+
+  function updateVmLocally(
+    vmId: string,
+    updater: (current: VmInstance) => VmInstance,
+  ): void {
+    startTransition(() => {
+      setSummary((current) => {
+        if (!current) {
+          return current;
+        }
+
+        let changed = false;
+        const nextVms = current.vms.map((entry) => {
+          if (entry.id !== vmId) {
+            return entry;
+          }
+
+          changed = true;
+          return updater(entry);
+        });
+
+        return changed ? { ...current, vms: nextVms } : current;
+      });
+
+      setDetail((current) => {
+        if (!current || current.vm.id !== vmId) {
+          return current;
+        }
+
+        return {
+          ...current,
+          vm: updater(current.vm),
+        };
+      });
+    });
+  }
+
+  function clearVmDesktopSessionLocally(
+    vmId: string,
+    desktopTransport: VmDesktopTransport,
+  ): void {
+    updateVmLocally(vmId, (current) => ({
+      ...current,
+      desktopTransport,
+      session: null,
+      desktopReadyAt: null,
+      desktopReadyMs: null,
+    }));
+  }
+
+  function replaceVmLocally(nextVm: VmInstance): void {
+    updateVmLocally(nextVm.id, () => nextVm);
+  }
+
+  async function setDesktopTransport(
+    vm: VmInstance,
+    desktopTransport: VmDesktopTransport,
+  ): Promise<void> {
+    if (vm.provider !== "incus" || summary?.provider.kind !== "incus") {
+      setNotice({
+        tone: "error",
+        message: "Desktop transport switching is only available for Incus VMs.",
+      });
+      return;
+    }
+
+    const currentDesktopTransport =
+      (detail?.vm.id === vm.id ? detail.vm.desktopTransport : vm.desktopTransport) ?? "vnc";
+
+    if (currentDesktopTransport === desktopTransport) {
+      return;
+    }
+
+    const desktopTransportLabel = formatDesktopTransportLabel(desktopTransport);
+
+    await runMutation(
+      vm.status === "running"
+        ? `Switching ${vm.name} to ${desktopTransportLabel}`
+        : `Setting ${vm.name} to ${desktopTransportLabel}`,
+      async () => {
+        if (currentStageVm?.id === vm.id) {
+          reconnectStageHere();
+        }
+
+        disconnectCachedStageBrowserSession(vm.id);
+        disconnectCachedStageSocketSession(vm.id);
+        clearVmDesktopSessionLocally(vm.id, desktopTransport);
+
+        try {
+          const updatedVm = await postJson<VmInstance>(
+            `/api/vms/${vm.id}/update`,
+            {
+              desktopTransport,
+            } satisfies UpdateVmInput,
+          );
+
+          replaceVmLocally(updatedVm);
+        } catch (error) {
+          await refreshSummary();
+
+          if (selectedVmIdRef.current === vm.id) {
+            await refreshDetail(vm.id);
+          }
+
+          throw error;
+        }
+
+        await refreshSummary();
+
+        if (selectedVmIdRef.current === vm.id) {
+          await refreshDetail(vm.id);
+        }
+      },
+      vm.status === "running"
+        ? `Switched ${vm.name} to ${desktopTransportLabel} and replaced the desktop bridge.`
+        : `${vm.name} will use ${desktopTransportLabel} on the next start.`,
+    );
   }
 
   function syncSelkiesStageNativeScale(frame: HTMLIFrameElement | null): boolean {
@@ -1234,6 +1580,19 @@ export function DashboardApp(): JSX.Element {
     });
   }
 
+  function disconnectCachedStageSocketSession(vmId: string): void {
+    stageSessionLeaseVmIdsRef.current.delete(vmId);
+    setCachedStageSocketSessions((current) => {
+      if (!(vmId in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[vmId];
+      return next;
+    });
+  }
+
   function relinquishDesktopSessionVm(vmId: string): void {
     stageSessionLeaseVmIdsRef.current.delete(vmId);
 
@@ -1247,6 +1606,7 @@ export function DashboardApp(): JSX.Element {
     }
 
     disconnectCachedStageBrowserSession(vmId);
+    disconnectCachedStageSocketSession(vmId);
   }
 
   const {
@@ -1451,6 +1811,18 @@ export function DashboardApp(): JSX.Element {
   useEffect(() => {
     selectedVmIdRef.current = selectedVmId;
   }, [selectedVmId]);
+
+  useEffect(() => {
+    if (!pendingLocalPasteRequest) {
+      return;
+    }
+
+    if (selectedVmId === pendingLocalPasteRequest.vmId) {
+      return;
+    }
+
+    setPendingLocalPasteRequest(null);
+  }, [pendingLocalPasteRequest, selectedVmId]);
 
   useEffect(() => {
     if (
@@ -1716,15 +2088,12 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
-    let trackedCandidate: "failed" | "waiting" | null = null;
+    let trackedCandidate: SelkiesStreamRecoveryCandidate | null = null;
     let candidateSinceMs = 0;
 
     const pollAutomaticRepair = (): void => {
       const state = readEmbeddedBrowserStreamState(stageBrowserFrameRef.current);
       const candidate = resolveSelkiesStreamKickCandidate(state);
-      const normalizedStatus = state?.status?.trim().toLowerCase() ?? "";
-      const reconnecting =
-        normalizedStatus.includes("reconnecting stream") && state?.ready !== true;
       const now = Date.now();
 
       if (candidate !== null) {
@@ -1732,7 +2101,7 @@ export function DashboardApp(): JSX.Element {
           trackedCandidate = candidate;
           candidateSinceMs = now;
         }
-      } else if (!(reconnecting && trackedCandidate !== null)) {
+      } else if (!(trackedCandidate !== null && state?.ready !== true)) {
         trackedCandidate = null;
         candidateSinceMs = 0;
         return;
@@ -1945,12 +2314,112 @@ export function DashboardApp(): JSX.Element {
                 {active ? (
                   <SelkiesClipboardOverlay
                     frameRef={frameRef}
+                    onPasteRequestHandled={handleStageLocalPasteRequestHandled}
+                    pasteRequestToken={requestedStageLocalPasteToken}
                     sessionKey={buildSelkiesStageSessionKey(
                       session.browserPath,
                       session.reloadToken,
                     )}
                   />
                 ) : null}
+                {active &&
+                currentStageVm &&
+                blocksLiveResolutionControl &&
+                resolutionControlHeading &&
+                resolutionControlMessage ? (
+                  <WorkspaceControlLockOverlay
+                    disabled={isBusy || resolutionControlTakeoverBusy}
+                    message={resolutionControlMessage}
+                    takeOverLabel={resolutionControlTakeoverLabel}
+                    takeoverBusy={resolutionControlTakeoverBusy}
+                    title={resolutionControlHeading}
+                    onTakeOver={() => void handleTakeOverResolutionControl(currentStageVm)}
+                  />
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </>
+    );
+  }
+
+  function renderStageSocketHost(): JSX.Element | null {
+    const stageSocketSessions = Object.entries(stageSocketSessionsByVm);
+
+    if (stageSocketSessions.length === 0) {
+      return null;
+    }
+
+    return (
+      <>
+        {stageSocketSessions.map(([vmId, cachedSession]) => {
+          const { session } = cachedSession;
+
+          if (!isSocketDesktopSessionKind(session.kind) || !session.webSocketPath) {
+            return null;
+          }
+
+          const active = activeStageSocketVmId === vmId;
+          const sessionResolutionPreference =
+            desktopResolutionByVm[vmId] ?? defaultDesktopResolutionPreference;
+          const sessionViewportMode =
+            sessionResolutionPreference.mode === "viewport" ? "scale" : "fit";
+          const cachedViewportStyle =
+            !active &&
+            cachedSession.viewportBounds.width !== null &&
+            cachedSession.viewportBounds.height !== null
+              ? ({
+                  width: `${cachedSession.viewportBounds.width}px`,
+                  height: `${cachedSession.viewportBounds.height}px`,
+                } satisfies CSSProperties)
+              : undefined;
+
+          return (
+            <div
+              key={`${vmId}:${session.kind}:${session.webSocketPath}`}
+              ref={active ? stageViewportShellRef : undefined}
+              className={joinClassNames(
+                "workspace-stage__browser-host",
+                "workspace-stage__viewport-shell",
+                active
+                  ? desktopResolutionMode === "fixed"
+                    ? "workspace-stage__viewport-shell--fixed"
+                    : "workspace-stage__viewport-shell--viewport"
+                  : "workspace-stage__viewport-shell--viewport",
+                active
+                  ? "workspace-stage__browser-host--active"
+                  : "workspace-stage__browser-host--cached",
+              )}
+              aria-hidden={active ? undefined : true}
+            >
+              <div
+                ref={active ? stageViewportFrameRef : undefined}
+                className={joinClassNames(
+                  "workspace-stage__viewport-frame",
+                  active && desktopResolutionMode === "fixed"
+                    ? "workspace-stage__viewport-frame--fixed"
+                    : "",
+                )}
+                style={active ? stageViewportFrameStyle : cachedViewportStyle}
+              >
+                <RemoteDesktopViewport
+                  key={`${vmId}:${session.kind}:${session.webSocketPath}`}
+                  session={session}
+                  className="workspace-stage__viewport"
+                  hideConnectedOverlayStatus
+                  onPasteRequestHandled={
+                    active ? handleStageLocalPasteRequestHandled : undefined
+                  }
+                  onResolutionChange={active ? setDesktopResolution : undefined}
+                  pasteRequestToken={active ? requestedStageLocalPasteToken : null}
+                  reconnectDelayMs={500}
+                  showHeader={false}
+                  statusMode={active ? "overlay" : "hidden"}
+                  surfaceClassName="workspace-stage__canvas"
+                  viewOnly={active ? blocksLiveResolutionControl : false}
+                  viewportMode={sessionViewportMode}
+                />
                 {active &&
                 currentStageVm &&
                 blocksLiveResolutionControl &&
@@ -2422,6 +2891,69 @@ export function DashboardApp(): JSX.Element {
   }, [selectedVmId, summary?.generatedAt, detail?.vm.id, detail?.generatedAt]);
 
   useEffect(() => {
+    if (
+      authState !== "ready" ||
+      !currentStageVm ||
+      currentStageVm.status !== "running" ||
+      hasBrowserDesktopSession(displayedStageSession)
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let refreshTimer: number | null = null;
+    const vmId = currentStageVm.id;
+
+    const refreshSelectedStageSession = async (): Promise<void> => {
+      try {
+        await refreshSummary();
+
+        if (cancelled || selectedVmIdRef.current !== vmId) {
+          return;
+        }
+
+        await refreshDetail(vmId);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+      }
+
+      if (cancelled || selectedVmIdRef.current !== vmId) {
+        return;
+      }
+
+      refreshTimer = window.setTimeout(() => {
+        void refreshSelectedStageSession();
+      }, selectedStageSessionRecoveryPollMs);
+    };
+
+    refreshTimer = window.setTimeout(() => {
+      void refreshSelectedStageSession();
+    }, selectedStageSessionRecoveryPollMs);
+
+    return () => {
+      cancelled = true;
+
+      if (refreshTimer !== null) {
+        window.clearTimeout(refreshTimer);
+      }
+    };
+  }, [
+    authState,
+    currentStageVm?.id,
+    currentStageVm?.status,
+    displayedStageSession?.kind,
+    displayedStageSession?.webSocketPath,
+    displayedStageSession?.browserPath,
+  ]);
+
+  useEffect(() => {
     if (authState !== "ready" || !detail) {
       setVmFileBrowser(null);
       setVmFileBrowserError(null);
@@ -2869,6 +3401,57 @@ export function DashboardApp(): JSX.Element {
   ]);
 
   useEffect(() => {
+    if (
+      !currentStageVm ||
+      currentStageVm.status !== "running" ||
+      !displayedStageSession ||
+      !isSocketDesktopSessionKind(displayedStageSession.kind) ||
+      !displayedStageSession.webSocketPath ||
+      stageSessionRelinquished
+    ) {
+      return;
+    }
+
+    setCachedStageSocketSessions((current) => {
+      const existing = current[currentStageVm.id];
+      const nextViewportBounds =
+        activeStageViewportBounds.width !== null && activeStageViewportBounds.height !== null
+          ? activeStageViewportBounds
+          : existing?.viewportBounds ?? emptyViewportBounds;
+
+      if (
+        existing !== undefined &&
+        existing.name === currentStageVm.name &&
+        sameStageSocketSession(existing.session, displayedStageSession) &&
+        sameViewportBounds(existing.viewportBounds, nextViewportBounds)
+      ) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [currentStageVm.id]: {
+          name: currentStageVm.name,
+          session: displayedStageSession,
+          viewportBounds: nextViewportBounds,
+        },
+      };
+    });
+  }, [
+    currentStageVm?.id,
+    currentStageVm?.name,
+    currentStageVm?.status,
+    displayedStageSession?.kind,
+    displayedStageSession?.webSocketPath,
+    displayedStageSession?.browserPath,
+    displayedStageSession?.host,
+    displayedStageSession?.port,
+    activeStageViewportBounds.width,
+    activeStageViewportBounds.height,
+    stageSessionRelinquished,
+  ]);
+
+  useEffect(() => {
     const runningVmIds = new Set(
       (summary?.vms ?? [])
         .filter((vm) => vm.status === "running")
@@ -2884,6 +3467,21 @@ export function DashboardApp(): JSX.Element {
           shutdownStageBrowserFrame(resolveStageBrowserFrameRef(vmId).current);
           resolveStageBrowserFrameRef(vmId).current = null;
           cachedStageBrowserFrameRefsRef.current.delete(vmId);
+          changed = true;
+          continue;
+        }
+
+        next[vmId] = session;
+      }
+
+      return changed ? next : current;
+    });
+    setCachedStageSocketSessions((current) => {
+      let changed = false;
+      const next: Record<string, CachedStageSocketSession> = {};
+
+      for (const [vmId, session] of Object.entries(current)) {
+        if (!runningVmIds.has(vmId)) {
           changed = true;
           continue;
         }
@@ -2909,7 +3507,7 @@ export function DashboardApp(): JSX.Element {
       return;
     }
 
-    if (activeStageSession.kind !== "vnc") {
+    if (activeStageSession.kind !== "vnc" && activeStageSession.kind !== "guacamole") {
       setDesktopResolution((current) =>
         current.clientWidth === null &&
         current.clientHeight === null &&
@@ -4092,6 +4690,7 @@ export function DashboardApp(): JSX.Element {
             onOpenCreateDialog={openCreateDialog}
             onOpenHomepage={openHomepage}
             onOpenLogs={openVmLogsDialog}
+            onPasteLocal={requestVmLocalPaste}
             onInspectVm={inspectVm}
             onRename={handleRenameVm}
             onResizeKeyDown={handleRailResizeKeyDown}
@@ -4141,63 +4740,14 @@ export function DashboardApp(): JSX.Element {
               )}
             >
               {renderStageBrowserHost()}
+              {renderStageSocketHost()}
               {selectedVm ? (
-                hasBrowserVncSession(displayedStageSession) ? (
-                  <div
-                    ref={stageViewportShellRef}
-                    className={joinClassNames(
-                      "workspace-stage__viewport-shell",
-                      desktopResolutionMode === "fixed"
-                        ? "workspace-stage__viewport-shell--fixed"
-                        : "workspace-stage__viewport-shell--viewport",
-                    )}
-                  >
-                    <div
-                      ref={stageViewportFrameRef}
-                      className={joinClassNames(
-                        "workspace-stage__viewport-frame",
-                        desktopResolutionMode === "fixed"
-                          ? "workspace-stage__viewport-frame--fixed"
-                          : "",
-                      )}
-                      style={stageViewportFrameStyle}
-                    >
-                      <NoVncViewport
-                        key={currentStageVm?.id ?? displayedStageSession!.webSocketPath!}
-                        className="workspace-stage__viewport"
-                        hideConnectedOverlayStatus
-                        onResolutionChange={setDesktopResolution}
-                        reconnectDelayMs={500}
-                        surfaceClassName="workspace-stage__canvas"
-                        viewOnly={blocksLiveResolutionControl}
-                        viewportMode={
-                          desktopResolutionMode === "viewport" ? "scale" : "fit"
-                        }
-                        webSocketPath={displayedStageSession!.webSocketPath!}
-                        showHeader={false}
-                        statusMode="overlay"
-                      />
-                      {currentStageVm &&
-                      blocksLiveResolutionControl &&
-                      resolutionControlHeading &&
-                      resolutionControlMessage ? (
-                        <WorkspaceControlLockOverlay
-                          disabled={isBusy || resolutionControlTakeoverBusy}
-                          message={resolutionControlMessage}
-                          takeOverLabel={resolutionControlTakeoverLabel}
-                          takeoverBusy={resolutionControlTakeoverBusy}
-                          title={resolutionControlHeading}
-                          onTakeOver={() => void handleTakeOverResolutionControl(currentStageVm)}
-                        />
-                      ) : null}
-                    </div>
-                  </div>
-                ) : stageSessionRelinquished && currentDetail ? (
+                stageSessionRelinquished && currentDetail ? (
                   <WorkspaceSessionRelinquishedSurface
                     detail={currentDetail}
                     onReconnect={reconnectStageHere}
                   />
-                ) : activeStageBrowserVmId ? null : !currentDetail ? (
+                ) : activeStageBrowserVmId !== null || activeStageSocketVmId !== null ? null : !currentDetail ? (
                   <div className="workspace-stage__placeholder">
                     <div className="workspace-stage__placeholder-block skeleton-shell" />
                   </div>
@@ -4207,6 +4757,9 @@ export function DashboardApp(): JSX.Element {
                   <WorkspaceLogsSurface
                     detail={currentDetail}
                     logsState={workspaceLogs}
+                    onRefreshLogs={() => {
+                      void refreshWorkspaceLogs();
+                    }}
                   />
                 ) : (
                   <WorkspaceFallbackSurface detail={currentDetail} />
@@ -4257,7 +4810,9 @@ export function DashboardApp(): JSX.Element {
                 onForwardDraftChange={setForwardDraft}
                 onKickBrowserStream={kickBrowserStream}
                 onReloadBrowserStream={reloadBrowserStream}
+                onRestartDesktopService={restartDesktopService}
                 onRepairDesktopBridge={repairDesktopBridge}
+                onSetDesktopTransport={setDesktopTransport}
                 onResolutionModeChange={(mode) => applyResolutionMode(selectedVm.id, mode)}
                 onResolutionDraftChange={setResolutionDraft}
                 onTakeOverResolutionControl={handleTakeOverResolutionControl}
@@ -4289,6 +4844,7 @@ export function DashboardApp(): JSX.Element {
                 canKickBrowserStream={selectedSelkiesRecoveryTarget !== null}
                 canReloadBrowserStream={selectedSelkiesRecoveryTarget !== null}
                 canRepairDesktopBridge={canRepairSelectedDesktopBridge}
+                canSwitchDesktopTransport={canSwitchSelectedDesktopTransport}
                 onResizeKeyDown={handleSidepanelResizeKeyDown}
                 onResizePointerDown={handleSidepanelResizeStart}
               />

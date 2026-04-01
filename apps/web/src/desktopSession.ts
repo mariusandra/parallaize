@@ -1,4 +1,8 @@
 import { normalizeVmNetworkMode } from "../../../packages/shared/src/helpers.js";
+import {
+  isPageDesktopSessionKind,
+  isSocketDesktopSessionKind,
+} from "../../../packages/shared/src/desktopTransport.js";
 import type {
   ActionJob,
   VmDetail,
@@ -18,11 +22,11 @@ export function hasBrowserDesktopSession(
     return false;
   }
 
-  if (session.kind === "vnc") {
+  if (isSocketDesktopSessionKind(session.kind)) {
     return Boolean(session.webSocketPath);
   }
 
-  if (session.kind === "selkies") {
+  if (isPageDesktopSessionKind(session.kind)) {
     return Boolean(session.browserPath);
   }
 
@@ -33,6 +37,12 @@ export function hasBrowserVncSession(
   session: VmInstance["session"] | null | undefined,
 ): boolean {
   return session?.kind === "vnc" && hasBrowserDesktopSession(session);
+}
+
+export function hasBrowserGuacamoleSession(
+  session: VmInstance["session"] | null | undefined,
+): boolean {
+  return session?.kind === "guacamole" && hasBrowserDesktopSession(session);
 }
 
 export function hasBrowserSelkiesSession(
@@ -66,7 +76,37 @@ export function shouldShowLiveVmPreview(
     return true;
   }
 
+  if (hasBrowserGuacamoleSession(vm.session)) {
+    return true;
+  }
+
   return hasBrowserSelkiesSession(vm.session);
+}
+
+export function shouldUseMirroredVmPreview(
+  vm: Pick<VmInstance, "status" | "session">,
+  {
+    mirroredStageFrameAvailable,
+    retainCapturedSelkiesPreview = false,
+    selected = false,
+    showLivePreview,
+  }: {
+    mirroredStageFrameAvailable: boolean;
+    retainCapturedSelkiesPreview?: boolean;
+    selected?: boolean;
+    showLivePreview: boolean;
+  },
+): boolean {
+  if (
+    !showLivePreview ||
+    vm.status !== "running" ||
+    !mirroredStageFrameAvailable ||
+    !hasBrowserSelkiesSession(vm.session)
+  ) {
+    return false;
+  }
+
+  return !selected && !retainCapturedSelkiesPreview;
 }
 
 export function mergeSelectedVmDetail(
@@ -192,7 +232,11 @@ function sessionRank(session: VmInstance["session"] | null | undefined): number 
     return 3;
   }
 
-  if (session.kind === "vnc" || session.kind === "selkies") {
+  if (
+    session.kind === "vnc" ||
+    session.kind === "selkies" ||
+    session.kind === "guacamole"
+  ) {
     return 2;
   }
 

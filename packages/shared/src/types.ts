@@ -20,8 +20,8 @@ export type VmStatus =
 
 export type VmWindow = "editor" | "terminal" | "browser" | "logs";
 
-export type VmDesktopTransport = "vnc" | "selkies";
-export type VmSessionKind = "synthetic" | "vnc" | "selkies";
+export type VmDesktopTransport = "vnc" | "selkies" | "guacamole";
+export type VmSessionKind = "synthetic" | "vnc" | "selkies" | "guacamole";
 export type VmForwardProtocol = "http";
 export type VmPowerAction = "start" | "stop" | "restart";
 export type VmNetworkMode = "default" | "dmz";
@@ -441,7 +441,8 @@ export interface UpdateTemplateInput {
 }
 
 export interface UpdateVmInput {
-  name: string;
+  name?: string;
+  desktopTransport?: VmDesktopTransport;
 }
 
 export interface ReorderVmsInput {

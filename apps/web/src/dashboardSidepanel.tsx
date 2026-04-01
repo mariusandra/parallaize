@@ -18,6 +18,7 @@ import type {
   HealthStatus,
   Snapshot,
   VmDetail,
+  VmDesktopTransport,
   VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmInstance,
@@ -27,6 +28,7 @@ import type {
 } from "../../../packages/shared/src/types.js";
 
 import { TemplateInitCommandsPreview } from "./dashboardDialogs.js";
+import { desktopTransportChoiceLabel, desktopTransportChoices } from "./desktopTransportChoices.js";
 import {
   buildCaptureDraft,
   buildForwardBrowserHref,
@@ -128,8 +130,10 @@ export interface WorkspaceSidepanelProps {
   onRename: (vm: VmInstance) => Promise<void>;
   onResolutionModeChange: (mode: DesktopResolutionMode) => void;
   onResolutionDraftChange: (draft: ResolutionDraft) => void;
+  onSetDesktopTransport: (vm: VmInstance, desktopTransport: VmDesktopTransport) => Promise<void>;
   onKickBrowserStream: (vm: VmInstance) => void;
   onReloadBrowserStream: (vm: VmInstance) => void;
+  onRestartDesktopService: (vm: VmInstance) => Promise<void>;
   onRepairDesktopBridge: (vm: VmInstance) => Promise<void>;
   onTakeOverResolutionControl: (vm: VmInstance) => Promise<void>;
   onViewportScaleChange: (scale: number) => void;
@@ -159,6 +163,7 @@ export interface WorkspaceSidepanelProps {
   canKickBrowserStream: boolean;
   canReloadBrowserStream: boolean;
   canRepairDesktopBridge: boolean;
+  canSwitchDesktopTransport: boolean;
 }
 
 interface SidepanelResizeHandleProps {
@@ -409,10 +414,12 @@ export function WorkspaceSidepanel({
   onForwardDraftChange,
   onKickBrowserStream,
   onReloadBrowserStream,
+  onRestartDesktopService,
   onRepairDesktopBridge,
   onRename,
   onResolutionModeChange,
   onResolutionDraftChange,
+  onSetDesktopTransport,
   onTakeOverResolutionControl,
   onViewportScaleChange,
   onRefreshTouchedFiles,
@@ -439,6 +446,7 @@ export function WorkspaceSidepanel({
   canKickBrowserStream,
   canReloadBrowserStream,
   canRepairDesktopBridge,
+  canSwitchDesktopTransport,
   onResizeKeyDown,
   onResizePointerDown,
 }: WorkspaceSidepanelProps): JSX.Element {
@@ -451,6 +459,8 @@ export function WorkspaceSidepanel({
     vm.session?.kind ??
     (vm.desktopTransport === "selkies"
       ? "selkies"
+      : vm.desktopTransport === "guacamole"
+        ? "guacamole"
       : vm.desktopTransport === "vnc"
         ? "vnc"
         : null);
@@ -478,6 +488,8 @@ export function WorkspaceSidepanel({
     (touchedFilesSectionOpen && currentTouchedFiles === null && touchedFilesError === null);
   const showSelkiesRecoveryControls =
     detail?.vm.session?.kind === "selkies" || vm.desktopTransport === "selkies";
+  const currentDesktopTransport =
+    detail?.vm.desktopTransport ?? vm.desktopTransport ?? "vnc";
 
   useEffect(() => {
     if (!detail || !filesSectionOpen || currentFileBrowser) {
@@ -635,8 +647,9 @@ export function WorkspaceSidepanel({
                   <SidepanelSection title="Recovery" defaultOpen>
                     <p className="empty-copy">
                       If a Selkies desktop sticks on waiting for stream, try these in
-                      order: kick the browser stream, reload the frame, repair the guest
-                      desktop bridge, then restart the VM if the guest runtime is still wedged.
+                      order: kick the browser stream, reload the frame, restart the
+                      Selkies service, repair the guest desktop bridge, then restart the
+                      VM if the guest runtime is still wedged.
                     </p>
                     <div className="action-grid">
                       <button
@@ -658,10 +671,18 @@ export function WorkspaceSidepanel({
                       <button
                         className="button button--ghost"
                         type="button"
+                        onClick={() => void onRestartDesktopService(vm)}
+                        disabled={busy || sessionRecoveryBusy || !canRepairDesktopBridge}
+                      >
+                        Restart Selkies service
+                      </button>
+                      <button
+                        className="button button--ghost"
+                        type="button"
                         onClick={() => void onRepairDesktopBridge(vm)}
                         disabled={busy || sessionRecoveryBusy || !canRepairDesktopBridge}
                       >
-                        {sessionRecoveryBusy ? "Repairing..." : "Repair desktop bridge"}
+                        Repair desktop bridge
                       </button>
                     </div>
                   </SidepanelSection>
@@ -688,6 +709,8 @@ export function WorkspaceSidepanel({
                       value={
                         detail.vm.session?.kind === "vnc"
                           ? (detail.vm.session.webSocketPath ?? "Waiting for VNC bridge")
+                          : detail.vm.session?.kind === "guacamole"
+                            ? (detail.vm.session.webSocketPath ?? "Waiting for Guacamole bridge")
                           : detail.vm.session?.kind === "selkies"
                             ? "Handled inside the Selkies page"
                             : "Not applicable"
@@ -715,6 +738,41 @@ export function WorkspaceSidepanel({
                       }
                     />
                   </div>
+
+                  {canSwitchDesktopTransport ? (
+                    <>
+                      <div className="field-shell" style={{ marginTop: "0.9rem" }}>
+                        <span>Desktop Layer</span>
+                      </div>
+                      <p className="empty-copy">
+                        {vm.status === "running"
+                          ? "Switching replaces the running desktop bridge immediately."
+                          : "The selected desktop bridge will be used on the next boot."}
+                      </p>
+                      <div className="transport-choice-grid">
+                        {desktopTransportChoices.map((choice) => (
+                          <label
+                            key={choice.value}
+                            className={`transport-choice ${currentDesktopTransport === choice.value ? "transport-choice--selected" : ""}`}
+                          >
+                            <input
+                              checked={currentDesktopTransport === choice.value}
+                              className="transport-choice__input"
+                              disabled={busy || sessionRecoveryBusy}
+                              name={`desktopTransport-${vm.id}`}
+                              onChange={() => void onSetDesktopTransport(vm, choice.value)}
+                              type="radio"
+                              value={choice.value}
+                            />
+                            <div className="transport-choice__body">
+                              <strong>{desktopTransportChoiceLabel(choice.value)}</strong>
+                              <p className="transport-choice__copy">{choice.copy}</p>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
                 </SidepanelSection>
 
                 <SidepanelSection title="Viewport" defaultOpen>

@@ -201,6 +201,13 @@ test("shouldDriveGuestResolution leaves Selkies viewport resize to the native br
   );
   assert.equal(
     shouldDriveGuestResolution({
+      mode: "viewport",
+      sessionKind: "guacamole",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDriveGuestResolution({
       mode: "fixed",
       sessionKind: "selkies",
     }),

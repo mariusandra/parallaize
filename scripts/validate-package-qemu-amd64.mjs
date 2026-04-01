@@ -129,9 +129,17 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ${shellQuote(remotePackagePath)}
 sudo grep -q '^PARALLAIZE_INCUS_STORAGE_POOL=default$' /etc/parallaize/parallaize.env
+sudo test "$(systemctl is-enabled parallaize.service)" = enabled
+for _ in $(seq 1 30); do
+  if [ "$(systemctl is-active parallaize.service || true)" = active ]; then
+    break
+  fi
+  sleep 1
+done
+sudo test "$(systemctl is-active parallaize.service)" = active
 sudo sed -i 's/^PARALLAIZE_ADMIN_USERNAME=.*/PARALLAIZE_ADMIN_USERNAME=${adminUsername}/' /etc/parallaize/parallaize.env
 sudo sed -i 's/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=${adminPassword}/' /etc/parallaize/parallaize.env
-sudo systemctl enable --now parallaize.service
+sudo systemctl restart parallaize.service
 `,
   );
 
@@ -206,7 +214,7 @@ sudo systemctl enable --now parallaize.service
 set -euo pipefail
 sudo systemctl enable --now parallaize-caddy.service
 for _ in $(seq 1 30); do
-  if sudo systemctl is-active --quiet parallaize-caddy.service && curl -fsS http://127.0.0.1:8080/ >/dev/null; then
+  if sudo systemctl is-active --quiet parallaize-caddy.service && curl -kfsS https://127.0.0.1:8080/ >/dev/null; then
     exit 0
   fi
 

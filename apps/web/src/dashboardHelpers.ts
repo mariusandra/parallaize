@@ -5,6 +5,10 @@ import {
   normalizeVmDesktopTransport,
   normalizeVmNetworkMode,
 } from "../../../packages/shared/src/helpers.js";
+import {
+  formatDesktopTransportLabel as formatSharedDesktopTransportLabel,
+  providerSupportsBrowserDesktopSessions,
+} from "../../../packages/shared/src/desktopTransport.js";
 import type {
   DashboardSummary,
   EnvironmentTemplate,
@@ -23,7 +27,6 @@ import type {
 } from "../../../packages/shared/src/types.js";
 import {
   hasBrowserDesktopSession,
-  hasBrowserVncSession,
 } from "./desktopSession.js";
 import { buildRandomVmName } from "./vmNames.js";
 
@@ -797,7 +800,7 @@ export function desktopFallbackBadge(detail: VmDetail): string {
 }
 
 export function shouldShowWorkspaceLogsSurface(detail: VmDetail): boolean {
-  return detail.provider.desktopTransport === "novnc" &&
+  return providerSupportsBrowserDesktopSessions(detail.provider.desktopTransport) &&
     detail.vm.status === "running" &&
     !hasBrowserDesktopSession(detail.vm.session);
 }
@@ -818,10 +821,10 @@ export function workspaceLogsMessage(detail: VmDetail): string {
   );
 
   if (failedBootJob) {
-    return `${failedBootJob.message} Showing the latest guest logs while the running VM stays attached to the host.`;
+    return `${failedBootJob.message} Showing the latest runtime logs while the running VM stays attached to the host.`;
   }
 
-  return `This VM is running, but the browser ${resolveDesktopTransportLabel(detail.vm)} session is not ready yet. Showing the latest guest logs until the desktop attaches.`;
+  return `This VM is running, but the browser ${resolveDesktopTransportLabel(detail.vm)} session is not ready yet. Showing the latest runtime logs until the desktop attaches.`;
 }
 
 export function desktopFallbackMessage(detail: VmDetail): string {
@@ -883,11 +886,11 @@ export function vmTilePreviewLabel(
   }
 
   if (showLivePreview) {
-    return "Waiting for VNC";
+    return `Waiting for ${resolveDesktopTransportLabel(vm)}`;
   }
 
-  if (vm.desktopTransport === "selkies" || vm.session?.kind === "selkies") {
-    return "Selkies desktop";
+  if (vm.desktopTransport || vm.session?.kind) {
+    return `${resolveDesktopTransportLabel(vm)} desktop`;
   }
 
   return "Static preview";
@@ -1247,11 +1250,9 @@ function formatDurationShort(durationMs: number): string {
 function resolveDesktopTransportLabel(
   vm: Pick<VmInstance, "desktopTransport" | "session">,
 ): string {
-  if (vm.session?.kind === "selkies" || vm.desktopTransport === "selkies") {
-    return "Selkies";
-  }
-
-  return "VNC";
+  return formatSharedDesktopTransportLabel(
+    vm.session?.kind ?? vm.desktopTransport ?? "vnc",
+  );
 }
 
 function capitalizeWord(value: string): string {

@@ -326,8 +326,8 @@ function buildHelpText(): string {
     "  --help                       Show this help text.",
     "",
     "Examples:",
-    "  node dist/apps/control/src/persistence-cli.js copy --from json --data-file data/incus-state.json --to postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize",
-    "  node dist/apps/control/src/persistence-cli.js export --from postgres --database-url postgresql://parallaize:parallaize@127.0.0.1:5432/parallaize --output backups/parallaize-state.json",
+    "  node dist/apps/control/src/persistence-cli.js copy --from json --data-file data/incus-state.json --to postgres --database-url postgresql://parallaize:REPLACE_WITH_STRONG_PASSWORD@127.0.0.1:5432/parallaize",
+    "  node dist/apps/control/src/persistence-cli.js export --from postgres --database-url postgresql://parallaize:REPLACE_WITH_STRONG_PASSWORD@127.0.0.1:5432/parallaize --output backups/parallaize-state.json",
     "  node dist/apps/control/src/persistence-cli.js import --to json --to-data-file data/restore.json --input backups/parallaize-state.json",
   ].join("\n");
 }

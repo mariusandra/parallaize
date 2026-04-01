@@ -22,6 +22,7 @@ export class JsonStateStore implements StateStore {
   private lastPersistAttemptAt: string | null = null;
   private lastPersistedAt: string | null = null;
   private readonly defaultTemplateLaunchSource: string;
+  private currentState: AppState | null = null;
 
   constructor(
     private readonly filePath: string,
@@ -34,10 +35,14 @@ export class JsonStateStore implements StateStore {
   }
 
   load(): AppState {
+    if (this.currentState) {
+      return cloneState(this.currentState);
+    }
+
     if (!existsSync(this.filePath)) {
       const state = this.createSeed();
       this.save(state);
-      return cloneState(state);
+      return cloneState(this.currentState ?? state);
     }
 
     const raw = readFileSync(this.filePath, "utf8");
@@ -51,15 +56,21 @@ export class JsonStateStore implements StateStore {
 
     if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
       this.save(normalized);
+      return cloneState(this.currentState ?? normalized);
     }
 
+    this.currentState = cloneState(normalized);
     return cloneState(normalized);
   }
 
   save(state: AppState): void {
     const attemptedAt = nowIso();
+    const normalized = normalizePersistedState(state, {
+      defaultTemplateLaunchSource: this.defaultTemplateLaunchSource,
+    });
     mkdirSync(dirname(this.filePath), { recursive: true });
-    writeFileSync(this.filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    writeFileSync(this.filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+    this.currentState = cloneState(normalized);
     this.lastPersistAttemptAt = attemptedAt;
     this.lastPersistedAt = attemptedAt;
   }

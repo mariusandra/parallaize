@@ -24,6 +24,11 @@ import type {
   VmSession,
 } from "../../../packages/shared/src/types.js";
 import {
+  formatDesktopTransportLabel,
+  normalizeVmDesktopTransport,
+  resolveDesktopTransportRuntime,
+} from "../../../packages/shared/src/desktopTransport.js";
+import {
   buildExpectedGuestDesktopBridgeVersionRecord,
   buildEnsureGuestDesktopBootstrapScript,
   buildEnsureGuestHostnameScript,
@@ -139,8 +144,7 @@ import {
 import {
   buildDmzAclPayload,
   buildGuestDnsProfileScript,
-  buildSelkiesSession,
-  buildVncSession,
+  buildIncusDesktopSession,
   collectHostAclAddresses,
   describeGuestDnsProfileActivity,
   describePendingGuestDnsProfileActivity,
@@ -513,6 +517,42 @@ export class IncusProvider implements DesktopProvider {
       activity: [
         `desktop-bridge: reconciled ${transport} guest runtime to ${expected.label}`,
       ],
+      ...(session
+        ? {
+            desktopReadyAt: new Date().toISOString(),
+            session,
+          }
+        : {}),
+    };
+  }
+
+  async restartVmDesktopService(vm: VmInstance): Promise<ProviderMutation> {
+    if (vm.status !== "running") {
+      throw new Error(`VM ${vm.name} must be running to restart the desktop service.`);
+    }
+
+    const transport = this.resolveVmDesktopTransport(vm);
+    const serviceName = resolveGuestDesktopServiceName(transport);
+    await this.runGuestExecWithRetryAsync([
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      "/",
+      "--",
+      "sh",
+      "-lc",
+      buildRestartGuestDesktopServiceScript(serviceName),
+    ]);
+
+    const info = await this.inspectInstanceAsync(vm.providerRef);
+    const session =
+      normalizeStatus(info.status ?? info.state?.status) === "running"
+        ? await this.probeReachableSession(info, transport)
+        : null;
+
+    return {
+      lastAction: `${formatDesktopTransportLabel(transport)} service restarted`,
+      activity: [`desktop-service: restarted ${serviceName}`],
       ...(session
         ? {
             desktopReadyAt: new Date().toISOString(),
@@ -1314,6 +1354,12 @@ export class IncusProvider implements DesktopProvider {
 
   async readVmLogs(vm: VmInstance): Promise<VmLogsSnapshot> {
     this.assertAvailable();
+    const desktopServiceLogs = await this.readGuestDesktopServiceLogs(vm);
+
+    if (desktopServiceLogs) {
+      return desktopServiceLogs;
+    }
+
     const consoleArgs = ["console", vm.providerRef, "--show-log"];
     const consoleResult = await this.executeAsync(consoleArgs);
     const consoleContent = normalizeVmLogContent(consoleResult.stdout);
@@ -1368,6 +1414,46 @@ export class IncusProvider implements DesktopProvider {
         formatCommandFailure(infoArgs, infoResult),
       ].filter(Boolean).join("\n"),
     );
+  }
+
+  private async readGuestDesktopServiceLogs(
+    vm: VmInstance,
+  ): Promise<VmLogsSnapshot | null> {
+    if (!shouldPreferGuestDesktopServiceLogs(vm)) {
+      return null;
+    }
+
+    const transport = this.resolveVmDesktopTransport(vm);
+    const serviceName = resolveGuestDesktopServiceName(transport);
+    const args = [
+      "exec",
+      vm.providerRef,
+      "--cwd",
+      "/",
+      "--",
+      "sh",
+      "-lc",
+      buildReadGuestDesktopServiceLogsScript(serviceName),
+    ];
+    const result = await this.executeGuestExecWithRetryAsync(args);
+
+    if (result.status !== 0) {
+      return null;
+    }
+
+    const content = normalizeVmLogContent(result.stdout);
+
+    if (content.trim().length === 0) {
+      return null;
+    }
+
+    return {
+      provider: "incus",
+      providerRef: vm.providerRef,
+      source: `guest desktop service logs (${serviceName})`,
+      content,
+      fetchedAt: new Date().toISOString(),
+    };
   }
 
   streamVmLogs(
@@ -2121,7 +2207,7 @@ export class IncusProvider implements DesktopProvider {
   ): Promise<GuestBootstrapAttempt> {
     const activity: string[] = [];
 
-    if (desktopTransport === "selkies") {
+    if (resolveDesktopTransportRuntime(desktopTransport) === "selkies") {
       mergeUniqueActivity(
         activity,
         await this.ensureGuestSelkiesArchiveAsync(instanceName),
@@ -2381,7 +2467,11 @@ export class IncusProvider implements DesktopProvider {
     if (desktopTransport === "selkies") {
       for (const address of addresses) {
         if (await this.probeSelkiesHealth(address, this.guestSelkiesPort)) {
-          return buildSelkiesSession(address, this.guestSelkiesPort);
+          return buildIncusDesktopSession(
+            address,
+            this.guestSelkiesPort,
+            desktopTransport,
+          );
         }
       }
 
@@ -2390,7 +2480,11 @@ export class IncusProvider implements DesktopProvider {
 
     for (const address of addresses) {
       if (await this.guestPortProbe.probe(address, this.guestVncPort)) {
-        return buildVncSession(address, this.guestVncPort);
+        return buildIncusDesktopSession(
+          address,
+          this.guestVncPort,
+          desktopTransport,
+        );
       }
     }
 
@@ -2401,9 +2495,12 @@ export class IncusProvider implements DesktopProvider {
     address: string | null,
     desktopTransport: VmDesktopTransport,
   ): VmSession {
-    return desktopTransport === "selkies"
-      ? buildSelkiesSession(address, this.guestSelkiesPort, false)
-      : buildVncSession(address, this.guestVncPort, false);
+    return buildIncusDesktopSession(
+      address,
+      desktopTransport === "selkies" ? this.guestSelkiesPort : this.guestVncPort,
+      desktopTransport,
+      false,
+    );
   }
 
   private describeSessionActivity(
@@ -2411,9 +2508,7 @@ export class IncusProvider implements DesktopProvider {
     desktopTransport: VmDesktopTransport,
   ): string {
     if (!session) {
-      return desktopTransport === "selkies"
-        ? "selkies: guest network pending"
-        : "vnc: guest network pending";
+      return `${desktopTransport}: guest network pending`;
     }
 
     return `${desktopTransport}: ${session.display}`;
@@ -2422,7 +2517,7 @@ export class IncusProvider implements DesktopProvider {
   private resolveVmDesktopTransport(
     vm: Pick<VmInstance, "desktopTransport">,
   ): VmDesktopTransport {
-    return vm.desktopTransport === "selkies" ? "selkies" : "vnc";
+    return normalizeVmDesktopTransport(vm.desktopTransport);
   }
 
   private buildStreamHealthToken(vmId: string): string | null {
@@ -2805,6 +2900,66 @@ payload = {
 }
 print(json.dumps(payload))
 PY`;
+}
+
+function shouldPreferGuestDesktopServiceLogs(
+  vm: Pick<VmInstance, "status" | "desktopTransport" | "session">,
+): boolean {
+  return (
+    vm.status === "running" &&
+    (normalizeVmDesktopTransport(vm.desktopTransport) === "selkies" ||
+      vm.session?.kind === "selkies") &&
+    !hasGuestBrowserDesktopSession(vm.session)
+  );
+}
+
+function hasGuestBrowserDesktopSession(
+  session: VmInstance["session"] | null | undefined,
+): boolean {
+  if (!session) {
+    return false;
+  }
+
+  switch (session.kind) {
+    case "selkies":
+      return Boolean(session.browserPath);
+    case "vnc":
+    case "guacamole":
+      return Boolean(session.webSocketPath || session.browserPath);
+    default:
+      return false;
+  }
+}
+
+function resolveGuestDesktopServiceName(transport: VmDesktopTransport): string {
+  return resolveDesktopTransportRuntime(transport) === "selkies"
+    ? "parallaize-selkies.service"
+    : "parallaize-x11vnc.service";
+}
+
+function buildReadGuestDesktopServiceLogsScript(serviceName: string): string {
+  return `SERVICE_NAME=${JSON.stringify(serviceName)}
+
+printf '== desktop service ==\n%s\n\n' "$SERVICE_NAME"
+systemctl show "$SERVICE_NAME" \
+  --property=LoadState \
+  --property=ActiveState \
+  --property=SubState \
+  --property=MainPID \
+  --property=ExecMainCode \
+  --property=ExecMainStatus 2>&1 || true
+printf '\n== systemctl status ==\n'
+systemctl status "$SERVICE_NAME" --no-pager --lines=20 2>&1 || true
+printf '\n== journalctl ==\n'
+journalctl -u "$SERVICE_NAME" -n 200 --no-pager 2>&1 || true
+`;
+}
+
+function buildRestartGuestDesktopServiceScript(serviceName: string): string {
+  return `SERVICE_NAME=${JSON.stringify(serviceName)}
+systemctl restart "$SERVICE_NAME"
+systemctl is-active --quiet "$SERVICE_NAME"
+`;
 }
 
 function formatReadyMs(value: number): string {

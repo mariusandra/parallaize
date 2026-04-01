@@ -31,6 +31,8 @@ interface NoVncViewportProps {
   className?: string;
   hideConnectedOverlayStatus?: boolean;
   onResolutionChange?: (resolution: NoVncViewportResolution) => void;
+  onPasteRequestHandled?: (token: number) => void;
+  pasteRequestToken?: number | null;
   reconnectDelayMs?: number;
   showHeader?: boolean;
   statusMode?: "header" | "overlay" | "hidden";
@@ -54,6 +56,8 @@ export const NoVncViewport = memo(function NoVncViewport({
   className,
   hideConnectedOverlayStatus = false,
   onResolutionChange,
+  onPasteRequestHandled,
+  pasteRequestToken = null,
   reconnectDelayMs = defaultReconnectDelayMs,
   showHeader = true,
   statusMode = showHeader ? "header" : "overlay",
@@ -64,6 +68,7 @@ export const NoVncViewport = memo(function NoVncViewport({
   webSocketPath,
 }: NoVncViewportProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const handledPasteRequestTokenRef = useRef<number | null>(null);
   const hiddenPasteCaptureRef = useRef<HTMLTextAreaElement | null>(null);
   const lastGuestClipboardTextRef = useRef<string | null>(null);
   const rfbRef = useRef<RfbLike | null>(null);
@@ -171,6 +176,11 @@ export const NoVncViewport = memo(function NoVncViewport({
     }
   }
 
+  async function beginPasteFromBrowserClipboard(): Promise<void> {
+    setClipboardControlsDismissed(false);
+    await handlePasteFromBrowserClipboard();
+  }
+
   async function handleCopyGuestClipboard(): Promise<void> {
     if (!pendingGuestClipboardText) {
       return;
@@ -221,6 +231,24 @@ export const NoVncViewport = memo(function NoVncViewport({
     setPendingGuestClipboardText(null);
     lastGuestClipboardTextRef.current = null;
   }, [viewOnly, webSocketPath]);
+
+  useEffect(() => {
+    if (!clipboardEnabled || pasteRequestToken === null) {
+      return;
+    }
+
+    if (handledPasteRequestTokenRef.current === pasteRequestToken) {
+      return;
+    }
+
+    if (connectionState !== "connected") {
+      return;
+    }
+
+    handledPasteRequestTokenRef.current = pasteRequestToken;
+    onPasteRequestHandled?.(pasteRequestToken);
+    void beginPasteFromBrowserClipboard();
+  }, [clipboardEnabled, connectionState, onPasteRequestHandled, pasteRequestToken]);
 
   useEffect(() => {
     const rfb = rfbRef.current;
@@ -669,7 +697,7 @@ export const NoVncViewport = memo(function NoVncViewport({
             <button
               className="button button--ghost novnc-shell__clipboard-button"
               type="button"
-              onClick={() => void handlePasteFromBrowserClipboard()}
+              onClick={() => void beginPasteFromBrowserClipboard()}
               disabled={connectionState !== "connected"}
             >
               {awaitingPasteShortcut ? `Press ${pasteShortcut}` : "Paste local"}

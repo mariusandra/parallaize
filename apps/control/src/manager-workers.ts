@@ -1,3 +1,4 @@
+import { normalizeVmDesktopTransport } from "../../../packages/shared/src/helpers.js";
 import type {
   ProviderState,
   VmInstance,
@@ -7,7 +8,6 @@ import {
   appendTelemetrySample,
   buildTemplateHistoryEntry,
   emptyResourceTelemetry,
-  enrichVmSession,
   hasReachableVncSession,
   isInterruptedBootJobFailure,
   markVmRunningOutsideControlPlane,
@@ -20,6 +20,7 @@ import {
   type DesktopManagerRuntime,
   type VmSessionRefreshMode,
 } from "./manager-core.js";
+import { enrichVmSession } from "./desktop-session.js";
 import {
   buildSeedTemplateSummary,
   DEFAULT_TEMPLATE_ID,
@@ -428,6 +429,8 @@ async function refreshRunningVmSessions(
       continue;
     }
 
+    const expectedDesktopTransport = normalizeVmDesktopTransport(current.desktopTransport);
+
     try {
       const nextSession = enrichVmSession(
         vmId,
@@ -438,6 +441,10 @@ async function refreshRunningVmSessions(
         const vm = draft.vms.find((entry) => entry.id === vmId);
 
         if (!vm || !shouldRefreshVmSession(vm, draft.provider.kind, mode)) {
+          return false;
+        }
+
+        if (normalizeVmDesktopTransport(vm.desktopTransport) !== expectedDesktopTransport) {
           return false;
         }
 

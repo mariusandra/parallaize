@@ -1,0 +1,21 @@
+services:
+  coturn:
+    image: coturn/coturn:4.6.3
+    container_name: parallaize-coturn
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - "-n"
+      - "--fingerprint"
+      - "--use-auth-secret"
+      - "--static-auth-secret=${PARALLAIZE_TURN_SHARED_SECRET:?Set PARALLAIZE_TURN_SHARED_SECRET before starting coturn.}"
+      - "--realm=${PARALLAIZE_TURN_REALM:-parallaize}"
+      - "--server-name=${PARALLAIZE_TURN_SERVER_NAME:-parallaize}"
+      - "--listening-port=${PARALLAIZE_TURN_LISTEN_PORT:-3478}"
+      - "--min-port=${PARALLAIZE_TURN_MIN_PORT:-49160}"
+      - "--max-port=${PARALLAIZE_TURN_MAX_PORT:-49200}"
+      - "--external-ip=${PARALLAIZE_TURN_PUBLIC_IP:?Set PARALLAIZE_TURN_PUBLIC_IP to the public IPv4 or DNS name your browsers can reach.}"
+      - "--listening-ip=0.0.0.0"
+      - "--listening-ip=::"
+      - "--log-file=stdout"
+      - "--simple-log"

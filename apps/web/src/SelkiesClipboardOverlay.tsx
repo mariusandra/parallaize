@@ -13,6 +13,8 @@ import {
 
 interface SelkiesClipboardOverlayProps {
   frameRef: RefObject<HTMLIFrameElement | null>;
+  onPasteRequestHandled?: (token: number) => void;
+  pasteRequestToken?: number | null;
   sessionKey: string;
 }
 
@@ -52,8 +54,11 @@ function isEditablePasteTarget(
 
 export function SelkiesClipboardOverlay({
   frameRef,
+  onPasteRequestHandled,
+  pasteRequestToken = null,
   sessionKey,
 }: SelkiesClipboardOverlayProps): JSX.Element | null {
+  const handledPasteRequestTokenRef = useRef<number | null>(null);
   const hiddenPasteCaptureRef = useRef<HTMLTextAreaElement | null>(null);
   const manualPasteFieldRef = useRef<HTMLTextAreaElement | null>(null);
   const lastGuestClipboardTextRef = useRef<string | null>(null);
@@ -182,6 +187,11 @@ export function SelkiesClipboardOverlay({
     }
   }
 
+  async function beginPasteFromBrowserClipboard(): Promise<void> {
+    setClipboardControlsDismissed(false);
+    await handlePasteFromBrowserClipboard();
+  }
+
   async function handleCopyGuestClipboard(): Promise<void> {
     if (!pendingGuestClipboardText) {
       return;
@@ -257,6 +267,73 @@ export function SelkiesClipboardOverlay({
     setPendingGuestClipboardText(null);
     lastGuestClipboardTextRef.current = null;
   }, [sessionKey]);
+
+  useEffect(() => {
+    if (pasteRequestToken === null) {
+      return;
+    }
+
+    const requestToken: number = pasteRequestToken;
+
+    if (handledPasteRequestTokenRef.current === requestToken) {
+      return;
+    }
+
+    let cancelled = false;
+    let pollTimer: number | null = null;
+    const frame = frameRef.current;
+
+    function clearPollTimer(): void {
+      if (pollTimer !== null) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    function tryHandlePasteRequest(): boolean {
+      if (cancelled) {
+        return true;
+      }
+
+      if (handledPasteRequestTokenRef.current === requestToken) {
+        return true;
+      }
+
+      const bridgeWindow = resolveBridgeWindow();
+
+      if (!bridgeWindow?.parallaizeWriteGuestClipboard) {
+        return false;
+      }
+
+      handledPasteRequestTokenRef.current = requestToken;
+      onPasteRequestHandled?.(requestToken);
+      void beginPasteFromBrowserClipboard();
+      return true;
+    }
+
+    if (tryHandlePasteRequest()) {
+      return;
+    }
+
+    const handleFrameLoad = () => {
+      if (tryHandlePasteRequest()) {
+        clearPollTimer();
+      }
+    };
+
+    frame?.addEventListener("load", handleFrameLoad);
+    pollTimer = window.setInterval(() => {
+      if (tryHandlePasteRequest()) {
+        clearPollTimer();
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      frame?.removeEventListener("load", handleFrameLoad);
+      clearPollTimer();
+    };
+  }, [frameRef, onPasteRequestHandled, pasteRequestToken, sessionKey]);
 
   useEffect(() => {
     if (!awaitingPasteShortcut) {
@@ -455,7 +532,7 @@ export function SelkiesClipboardOverlay({
           <button
             className="button button--ghost novnc-shell__clipboard-button"
             type="button"
-            onClick={() => void handlePasteFromBrowserClipboard()}
+            onClick={() => void beginPasteFromBrowserClipboard()}
           >
             {awaitingPasteShortcut ? `Press ${pasteShortcut}` : "Paste local"}
           </button>

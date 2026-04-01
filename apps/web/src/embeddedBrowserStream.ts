@@ -3,11 +3,13 @@ export interface EmbeddedBrowserStreamState {
   status: string | null;
 }
 
+export type SelkiesStreamRecoveryCandidate = "failed" | "reconnecting" | "waiting";
+
 export interface SelkiesStreamRecoveryState {
   candidateSinceMs: number;
   kickCount: number;
   lastRecoveryAttemptMs: number;
-  trackedCandidate: "failed" | "waiting" | null;
+  trackedCandidate: SelkiesStreamRecoveryCandidate | null;
 }
 
 interface EmbeddedBrowserStreamBridgeWindow extends Window {
@@ -27,14 +29,180 @@ interface EmbeddedBrowserStreamBridgeWindow extends Window {
   parallaizeKickStream?: ((reason?: string) => boolean) | undefined;
   parallaizeSetStreamScale?: ((scale: number) => boolean) | undefined;
   signalling?: {
-    _ws_conn?: unknown;
+    _ws_conn?: {
+      readyState?: unknown;
+    } | null;
     disconnect?: (() => void) | undefined;
   } | null;
   webrtc?: {
     connect?: (() => void) | undefined;
-    peerConnection?: unknown;
+    peerConnection?: {
+      connectionState?: unknown;
+      iceConnectionState?: unknown;
+    } | null;
     reset?: (() => void) | undefined;
   } | null;
+}
+
+const embeddedBrowserRecentLogWindow = 12;
+const embeddedBrowserPlaceholderVideoDimensionPx = 4;
+
+function normalizeEmbeddedBrowserStatus(status: unknown): string | null {
+  if (typeof status !== "string") {
+    return null;
+  }
+
+  const trimmed = status.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readEmbeddedBrowserRecentLogs(
+  target: EmbeddedBrowserStreamBridgeWindow | null,
+): string[] {
+  if (!target?.app || !Array.isArray(target.app.logEntries)) {
+    return [];
+  }
+
+  return target.app.logEntries
+    .filter((entry): entry is string => typeof entry === "string")
+    .slice(-embeddedBrowserRecentLogWindow);
+}
+
+function resolveEmbeddedBrowserDerivedStatus(
+  target: EmbeddedBrowserStreamBridgeWindow | null,
+): string | null {
+  const recentLogs = readEmbeddedBrowserRecentLogs(target);
+
+  for (let index = recentLogs.length - 1; index >= 0; index -= 1) {
+    const entry = recentLogs[index]?.toLowerCase() ?? "";
+    if (
+      entry.includes("connection failed") ||
+      entry.includes("peer connection failed") ||
+      entry.includes("server closed connection") ||
+      entry.includes("error from server")
+    ) {
+      return "Connection failed.";
+    }
+  }
+
+  for (let index = recentLogs.length - 1; index >= 0; index -= 1) {
+    const entry = recentLogs[index]?.toLowerCase() ?? "";
+    if (
+      entry.includes("reconnecting stream") ||
+      entry.includes("connection error, retrying")
+    ) {
+      return "Reconnecting stream.";
+    }
+  }
+
+  for (let index = recentLogs.length - 1; index >= 0; index -= 1) {
+    const entry = recentLogs[index]?.toLowerCase() ?? "";
+    if (entry.includes("waiting for stream")) {
+      return "Waiting for stream.";
+    }
+  }
+
+  return normalizeEmbeddedBrowserStatus(target?.app?.status);
+}
+
+function resolveEmbeddedBrowserStatus(
+  bridgedStatus: unknown,
+  target: EmbeddedBrowserStreamBridgeWindow | null,
+): string | null {
+  const normalizedBridgedStatus = normalizeEmbeddedBrowserStatus(bridgedStatus);
+
+  if (
+    normalizedBridgedStatus !== null &&
+    normalizedBridgedStatus.trim().toLowerCase() !== "connected"
+  ) {
+    return normalizedBridgedStatus;
+  }
+
+  return resolveEmbeddedBrowserDerivedStatus(target) ?? normalizedBridgedStatus;
+}
+
+function hasRenderableEmbeddedBrowserVideo(video: HTMLVideoElement): boolean {
+  return video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0;
+}
+
+function resolveEmbeddedBrowserVideoFrameCount(
+  video: HTMLVideoElement,
+): number | null {
+  const playbackQuality =
+    typeof video.getVideoPlaybackQuality === "function"
+      ? video.getVideoPlaybackQuality()
+      : null;
+
+  return typeof playbackQuality?.totalVideoFrames === "number"
+    ? playbackQuality.totalVideoFrames
+    : null;
+}
+
+function hasSuspiciousEmbeddedBrowserVideoState(
+  target: EmbeddedBrowserStreamBridgeWindow | null,
+  video: HTMLVideoElement,
+  bridgedReady: boolean,
+  bridgedStatus: string | null,
+): boolean {
+  const normalizedStatus = bridgedStatus?.trim().toLowerCase() ?? "";
+
+  if (!bridgedReady && normalizedStatus !== "connected") {
+    return false;
+  }
+
+  if (!hasRenderableEmbeddedBrowserVideo(video) || video.paused || video.ended) {
+    return false;
+  }
+
+  const totalVideoFrames = resolveEmbeddedBrowserVideoFrameCount(video);
+  const stalledPlayback =
+    totalVideoFrames !== null ? totalVideoFrames === 0 : video.currentTime <= 0.01;
+
+  if (!stalledPlayback) {
+    return false;
+  }
+
+  const placeholderSized =
+    video.videoWidth <= embeddedBrowserPlaceholderVideoDimensionPx &&
+    video.videoHeight <= embeddedBrowserPlaceholderVideoDimensionPx;
+
+  const peerConnection = target?.webrtc?.peerConnection ?? null;
+  const connectionState =
+    typeof peerConnection?.connectionState === "string"
+      ? peerConnection.connectionState.toLowerCase()
+      : "";
+  const iceConnectionState =
+    typeof peerConnection?.iceConnectionState === "string"
+      ? peerConnection.iceConnectionState.toLowerCase()
+      : "";
+  const peerNotConnected =
+    connectionState === "new" ||
+    connectionState === "disconnected" ||
+    connectionState === "failed" ||
+    connectionState === "closed" ||
+    ((connectionState === "" || connectionState === "connecting") &&
+      (iceConnectionState === "new" ||
+        iceConnectionState === "disconnected" ||
+        iceConnectionState === "failed" ||
+        iceConnectionState === "closed"));
+
+  const socketReadyState = target?.signalling?._ws_conn?.readyState;
+  const signallingDisconnected =
+    typeof socketReadyState === "number" && socketReadyState !== 1;
+
+  return placeholderSized || peerNotConnected || signallingDisconnected;
+}
+
+function isEmbeddedBrowserVideoElement(candidate: unknown): candidate is HTMLVideoElement {
+  return typeof HTMLVideoElement !== "undefined" && candidate instanceof HTMLVideoElement;
+}
+
+function isEmbeddedBrowserImageElement(candidate: unknown): candidate is HTMLImageElement {
+  return typeof HTMLImageElement !== "undefined" && candidate instanceof HTMLImageElement;
+}
+
+function isEmbeddedBrowserCanvasElement(candidate: unknown): candidate is HTMLCanvasElement {
+  return typeof HTMLCanvasElement !== "undefined" && candidate instanceof HTMLCanvasElement;
 }
 
 export function createSelkiesStreamRecoveryState(): SelkiesStreamRecoveryState {
@@ -49,7 +217,7 @@ export function createSelkiesStreamRecoveryState(): SelkiesStreamRecoveryState {
 export function updateSelkiesStreamRecoveryState(
   current: SelkiesStreamRecoveryState,
   state: EmbeddedBrowserStreamState | null,
-  candidate: "failed" | "waiting" | null,
+  candidate: SelkiesStreamRecoveryCandidate | null,
   nowMs: number,
 ): SelkiesStreamRecoveryState {
   if (candidate === null) {
@@ -117,16 +285,16 @@ export function readEmbeddedBrowserStreamState(
     const sourceDocument = frame.contentDocument ?? target?.document ?? null;
     const video = sourceDocument?.querySelector("video");
 
-    if (video instanceof HTMLVideoElement) {
+    if (isEmbeddedBrowserVideoElement(video)) {
       return {
-        ready: video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0,
+        ready: hasRenderableEmbeddedBrowserVideo(video),
         status: null,
       };
     }
 
     const image = sourceDocument?.querySelector("img");
 
-    if (image instanceof HTMLImageElement) {
+    if (isEmbeddedBrowserImageElement(image)) {
       return {
         ready: image.complete && image.naturalWidth > 0 && image.naturalHeight > 0,
         status: null,
@@ -135,7 +303,7 @@ export function readEmbeddedBrowserStreamState(
 
     const canvas = sourceDocument?.querySelector("canvas");
 
-    if (canvas instanceof HTMLCanvasElement) {
+    if (isEmbeddedBrowserCanvasElement(canvas)) {
       return {
         ready: canvas.width > 0 && canvas.height > 0,
         status: null,

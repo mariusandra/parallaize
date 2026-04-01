@@ -83,7 +83,7 @@
               <h3>1. Create a VM</h3>
               <p>
                 Start from a base template such as Ubuntu desktop and open it in the browser
-                through the built-in VNC path.
+                through Selkies, direct VNC, or Guacamole.
               </p>
             </article>
 
@@ -156,17 +156,18 @@ sudo apt install ./parallaize_0.2.0-1_arm64.deb</code></pre>
             </article>
 
             <article class="install-card">
-              <h3>2. Review config and boot the service</h3>
+              <h3>2. Review config and restart the service</h3>
               <p>
-                The package ships the env file and systemd unit. Rotate the default admin
-                password first, then start Parallaize on <code>127.0.0.1:3000</code>.
+                The package ships the env file and systemd unit, and the service is enabled
+                and started automatically. Rotate the default admin password, then restart
+                Parallaize on <code>127.0.0.1:3000</code>.
               </p>
               <pre><code>sudo apt-get install -y pwgen
 PARALLAIZE_ADMIN_PASSWORD="$(pwgen -s 24 1)"
 printf 'Generated Parallaize admin password: %s\n' "$PARALLAIZE_ADMIN_PASSWORD"
 sudo sed -i "s/^PARALLAIZE_ADMIN_PASSWORD=.*/PARALLAIZE_ADMIN_PASSWORD=$PARALLAIZE_ADMIN_PASSWORD/" \
   /etc/parallaize/parallaize.env
-sudo systemctl start parallaize.service</code></pre>
+sudo systemctl restart parallaize.service</code></pre>
             </article>
 
             <article class="install-card install-card--wide">
@@ -222,7 +223,7 @@ sudo ufw default allow outgoing
 sudo ufw allow OpenSSH
 sudo ufw --force enable
 
-sudo systemctl enable --now parallaize.service
+sudo systemctl restart parallaize.service
 curl http://127.0.0.1:3000/api/health</code></pre>
 
               <p>

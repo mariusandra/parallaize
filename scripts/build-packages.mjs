@@ -197,6 +197,11 @@ async function stageRootFilesystem({
     join(rootfsDir, "usr", "bin", "parallaize-network-fix"),
     0o755,
   );
+  await copyFileWithMode(
+    join(root, "packaging", "install", "parallaize-postinstall-configure"),
+    join(installRoot, "install", "parallaize-postinstall-configure"),
+    0o755,
+  );
 
   await copyFileWithMode(
     join(root, "packaging", "systemd", "parallaize.service"),

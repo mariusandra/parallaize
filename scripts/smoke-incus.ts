@@ -12,7 +12,10 @@ import { DEFAULT_GUEST_DESKTOP_HEALTH_CHECK } from "../apps/control/src/ubuntu-g
 import WebSocket from "ws";
 
 const CONTROL_URL = process.env.PARALLAIZE_SMOKE_CONTROL_URL ?? "http://127.0.0.1:3000";
-const PUBLIC_URL = process.env.PARALLAIZE_SMOKE_PUBLIC_URL ?? "http://127.0.0.1:8080";
+const PUBLIC_URL = process.env.PARALLAIZE_SMOKE_PUBLIC_URL ?? "https://127.0.0.1:8080";
+const PUBLIC_URL_ALLOW_INSECURE_TLS =
+  new URL(PUBLIC_URL).protocol === "https:"
+  && process.env.PARALLAIZE_SMOKE_PUBLIC_INSECURE !== "0";
 const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
 const TEMPLATE_ID = normalizeOptionalString(process.env.PARALLAIZE_SMOKE_TEMPLATE_ID);
 const TEMPLATE_NAME = normalizeOptionalString(process.env.PARALLAIZE_SMOKE_TEMPLATE_NAME);
@@ -39,6 +42,12 @@ const VNC_IO_TIMEOUT_MS = 12_000;
 
 const HTTP_SERVICE_NAME = "smoke-http";
 const HTTP_BODY_MARKER = "Parallaize Smoke Service";
+
+// The default Caddy front door uses an internal CA, so smoke checks accept
+// that certificate unless explicitly disabled.
+if (PUBLIC_URL_ALLOW_INSECURE_TLS) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+}
 
 interface ApiEnvelope<T> {
   data: T;

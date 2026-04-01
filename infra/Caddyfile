@@ -1,10 +1,11 @@
 {
-	auto_https off
+	auto_https disable_redirects
 	admin off
 }
 
-:8080 {
+https://127.0.0.1:{$PARALLAIZE_CADDY_PORT:8080}, https://localhost:{$PARALLAIZE_CADDY_PORT:8080}, https://{$HOSTNAME:localhost}:{$PARALLAIZE_CADDY_PORT:8080}, https://{$PARALLAIZE_FORWARDED_SERVICE_HOST_BASE:parallaize.localhost}:{$PARALLAIZE_CADDY_PORT:8080}, https://*.{$PARALLAIZE_FORWARDED_SERVICE_HOST_BASE:parallaize.localhost}:{$PARALLAIZE_CADDY_PORT:8080} {
 	encode gzip zstd
+	tls internal
 
 	@vnc path_regexp vnc ^/api/vms/[^/]+/vnc$
 	handle @vnc {

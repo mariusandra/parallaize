@@ -1,5 +1,6 @@
 import type { VmDesktopTransport } from "../../../packages/shared/src/types.js";
 import { slugify } from "../../../packages/shared/src/helpers.js";
+import { resolveDesktopTransportRuntime } from "../../../packages/shared/src/desktopTransport.js";
 
 const DEFAULT_GUEST_USERNAME = "ubuntu";
 export const DEFAULT_GUEST_HOME = `/home/${DEFAULT_GUEST_USERNAME}`;
@@ -12,8 +13,8 @@ export const DEFAULT_GUEST_SELKIES_ARCHIVE_URL =
   `https://github.com/selkies-project/selkies/releases/download/v${DEFAULT_GUEST_SELKIES_VERSION}/selkies-gstreamer-portable-v${DEFAULT_GUEST_SELKIES_VERSION}_amd64.tar.gz`;
 export const DEFAULT_GUEST_SELKIES_ARCHIVE_FILE =
   `/var/cache/parallaize/selkies/v${DEFAULT_GUEST_SELKIES_VERSION}.tar.gz`;
-const DEFAULT_GUEST_SELKIES_PATCH_LEVEL = "2026-03-31-8";
-export const DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL = "2026-03-31-2";
+const DEFAULT_GUEST_SELKIES_PATCH_LEVEL = "2026-04-01-1";
+export const DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL = "2026-04-01-1";
 export const DEFAULT_GUEST_DESKTOP_BRIDGE_VERSION_FILE =
   "/var/lib/parallaize/desktop-bridge-version.json";
 const DEFAULT_GUEST_WALLPAPER = "Monument_valley_by_orbitelambda.jpg";
@@ -62,14 +63,15 @@ export interface GuestDesktopBridgeVersionRecord {
 export function buildExpectedGuestDesktopBridgeVersionRecord(
   transport: VmDesktopTransport,
 ): GuestDesktopBridgeVersionRecord {
+  const runtime = resolveDesktopTransportRuntime(transport);
   const selkiesVersion =
-    transport === "selkies" ? `v${DEFAULT_GUEST_SELKIES_VERSION}` : null;
+    runtime === "selkies" ? `v${DEFAULT_GUEST_SELKIES_VERSION}` : null;
   const selkiesPatchLevel =
-    transport === "selkies" ? DEFAULT_GUEST_SELKIES_PATCH_LEVEL : null;
+    runtime === "selkies" ? DEFAULT_GUEST_SELKIES_PATCH_LEVEL : null;
   const label =
-    transport === "selkies"
+    runtime === "selkies"
       ? `bridge:${DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL};selkies:${selkiesVersion}+${selkiesPatchLevel}`
-      : `bridge:${DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL};transport:${transport}`;
+      : `bridge:${DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL};runtime:${runtime}`;
 
   return {
     bridgePatchLevel: DEFAULT_GUEST_DESKTOP_BRIDGE_PATCH_LEVEL,
@@ -364,7 +366,7 @@ export HOME="\${HOME:-/root}"
 xset r on || true
 # GNOME Shell uses a compositor. x11vnc's X DAMAGE path can get stuck on a
 # stale black frame there, so disable it for the browser bridge.
-exec /usr/bin/x11vnc -display "$DISPLAY_NUMBER" -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noxdamage -noshm -nopw -repeat -rfbport ${port} -o /var/log/x11vnc.log`;
+exec /usr/bin/x11vnc -display "$DISPLAY_NUMBER" -auth "$AUTH_FILE" -forever -shared -xrandr newfbsize -noxdamage -noshm -nopw -norepeat -rfbport ${port} -o /var/log/x11vnc.log`;
 }
 
 function buildGuestVncServiceUnit(): string {
@@ -480,9 +482,26 @@ if [ -z "$AUTH_FILE" ] || [ ! -f "$AUTH_FILE" ]; then
   echo "Unable to locate an Xauthority file for the desktop session." >&2
   exit 1
 fi
+if ! id ${DEFAULT_GUEST_USERNAME} >/dev/null 2>&1; then
+  echo "Selkies desktop user ${DEFAULT_GUEST_USERNAME} is missing." >&2
+  exit 1
+fi
+if ! command -v runuser >/dev/null 2>&1; then
+  echo "runuser is required to launch Selkies as ${DEFAULT_GUEST_USERNAME}." >&2
+  exit 1
+fi
+DESKTOP_UID="$(id -u ${DEFAULT_GUEST_USERNAME})"
+DESKTOP_GID="$(id -g ${DEFAULT_GUEST_USERNAME})"
+DESKTOP_HOME="${DEFAULT_GUEST_HOME}"
+DESKTOP_RUNTIME_DIR="/run/user/$DESKTOP_UID"
+SELKIES_STATE_DIR="$DESKTOP_HOME/.cache/parallaize-selkies"
+install -d -m 700 -o "$DESKTOP_UID" -g "$DESKTOP_GID" "$SELKIES_STATE_DIR"
 export DISPLAY="$DISPLAY_NUMBER"
 export XAUTHORITY="$AUTH_FILE"
-export HOME="\${HOME:-/root}"
+export HOME="$DESKTOP_HOME"
+export USER="${DEFAULT_GUEST_USERNAME}"
+export LOGNAME="${DEFAULT_GUEST_USERNAME}"
+export XDG_RUNTIME_DIR="$DESKTOP_RUNTIME_DIR"
 export SELKIES_ADDR="0.0.0.0"
 export SELKIES_PORT="${port}"
 export SELKIES_ENABLE_HTTPS="false"
@@ -493,8 +512,10 @@ export SELKIES_ENABLE_WEBRTC_STATISTICS="false"
 export SELKIES_ENABLE_METRICS_HTTP="false"
 export SELKIES_ENCODER="\${SELKIES_ENCODER:-x264enc}"
 export SELKIES_WEB_ROOT="$SELKIES_DIR/share/selkies-web"
+export SELKIES_JSON_CONFIG="$SELKIES_STATE_DIR/selkies_config.json"
+export SELKIES_RTC_CONFIG_JSON="$SELKIES_STATE_DIR/rtc.json"
 ${rtcEnvironment ? `${rtcEnvironment}
-` : ""}exec "$SELKIES_RUNNER" --addr "$SELKIES_ADDR" --port "$SELKIES_PORT" --enable_basic_auth "$SELKIES_ENABLE_BASIC_AUTH" --enable_resize "$SELKIES_ENABLE_RESIZE"`;
+` : ""}exec runuser -u ${DEFAULT_GUEST_USERNAME} --preserve-environment -- "$SELKIES_RUNNER" --addr "$SELKIES_ADDR" --port "$SELKIES_PORT" --enable_basic_auth "$SELKIES_ENABLE_BASIC_AUTH" --enable_resize "$SELKIES_ENABLE_RESIZE"`;
 }
 
 function buildGuestSelkiesServiceUnit(): string {
@@ -3876,6 +3897,7 @@ function buildGuestDesktopBootstrapScript(
   streamHealthToken?: string | null,
   controlPlanePort = 3000,
 ): string {
+  const runtime = resolveDesktopTransportRuntime(transport);
   const repairTimings = resolveGuestDesktopBootstrapRepairTimings(repairProfile);
   const resetDisplayStateOnRepair = repairProfile === "aggressive";
   const desiredDesktopBridgeVersion = JSON.stringify(
@@ -3884,22 +3906,22 @@ function buildGuestDesktopBootstrapScript(
     2,
   );
   const desktopServiceName =
-    transport === "selkies" ? "parallaize-selkies.service" : "parallaize-x11vnc.service";
+    runtime === "selkies" ? "parallaize-selkies.service" : "parallaize-x11vnc.service";
   const launcherFile =
-    transport === "selkies"
+    runtime === "selkies"
       ? "/usr/local/bin/parallaize-selkies"
       : "/usr/local/bin/parallaize-x11vnc";
   const serviceFile = `/etc/systemd/system/${desktopServiceName}`;
   const desiredLauncher =
-    transport === "selkies"
+    runtime === "selkies"
       ? buildGuestSelkiesLauncherScript(selkiesPort, selkiesRtcConfig)
       : buildGuestVncLauncherScript(port);
   const desiredService =
-    transport === "selkies"
+    runtime === "selkies"
       ? buildGuestSelkiesServiceUnit()
       : buildGuestVncServiceUnit();
   const streamHealthEnabled =
-    transport === "selkies" &&
+    runtime === "selkies" &&
     typeof vmId === "string" &&
     vmId.length > 0 &&
     typeof streamHealthToken === "string" &&
@@ -3920,7 +3942,7 @@ function buildGuestDesktopBootstrapScript(
     ? buildGuestSelkiesStreamHealthServiceUnit()
     : "";
   const desktopPackageChecks =
-    transport === "selkies"
+    runtime === "selkies"
       ? `if ! command -v xrandr >/dev/null 2>&1 || ! command -v cvt >/dev/null 2>&1; then
   MISSING_PACKAGES="$MISSING_PACKAGES x11-xserver-utils"
 fi
@@ -3944,7 +3966,7 @@ if ! command -v import >/dev/null 2>&1; then
   MISSING_PACKAGES="$MISSING_PACKAGES imagemagick"
 fi`;
   const desktopInstallStep =
-    transport === "selkies" ? "ensure_selkies_bundle" : "";
+    runtime === "selkies" ? "ensure_selkies_bundle" : "";
 
   return `#!/bin/sh
 set -eu
