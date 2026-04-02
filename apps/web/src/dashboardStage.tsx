@@ -1,19 +1,24 @@
-import type { JSX } from "react";
+import { useRef, useState, type JSX } from "react";
 
 import { formatTimestamp } from "../../../packages/shared/src/helpers.js";
-import type { DashboardSummary, VmDetail } from "../../../packages/shared/src/types.js";
+import type { DashboardSummary, HealthStatus, VmDetail } from "../../../packages/shared/src/types.js";
 
 import type { DesktopBootState } from "./dashboardHelpers.js";
 import {
+  buildWallpaperNameFromParts,
+  buildWallpaperUrl,
   desktopFallbackBadge,
   desktopFallbackMessage,
+  homepageWallpaperAdjectives,
+  homepageWallpaperAnimals,
+  resolveWallpaperSelection,
   workspaceFallbackTitle,
   workspaceLogsMessage,
   workspaceLogsTitle,
 } from "./dashboardHelpers.js";
 import { StageStat, StaticPatternPreview } from "./dashboardPrimitives.js";
 import type { VmLogsViewState } from "./dashboardShell.js";
-import { VmLogOutput } from "./dashboardUi.js";
+import { PortalPopover, VmLogOutput } from "./dashboardUi.js";
 
 interface WorkspaceControlLockOverlayProps {
   disabled: boolean;
@@ -44,7 +49,10 @@ interface WorkspaceSessionRelinquishedSurfaceProps {
 }
 
 interface EmptyWorkspaceStageProps {
+  homepageWallpaperName: string;
+  incusStorage: HealthStatus["incusStorage"] | null;
   onCreate: () => void;
+  onHomepageWallpaperChange: (wallpaperName: string) => void;
   summary: DashboardSummary;
 }
 
@@ -76,14 +84,96 @@ export function WorkspaceControlLockOverlay({
 }
 
 export function EmptyWorkspaceStage({
+  homepageWallpaperName,
+  incusStorage,
   onCreate,
+  onHomepageWallpaperChange,
   summary,
 }: EmptyWorkspaceStageProps): JSX.Element {
+  const wallpaperMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [wallpaperMenuOpen, setWallpaperMenuOpen] = useState(false);
   const hasWorkspaces = summary.vms.length > 0;
   const runningJobCount = summary.jobs.filter((job) => job.status === "running").length;
+  const wallpaperSelection = resolveWallpaperSelection(homepageWallpaperName);
+  const showingDirStorageGuidance = incusStorage?.selectedPoolDriver === "dir";
 
   return (
-    <div className="workspace-stage__empty">
+    <div
+      className="workspace-stage__empty"
+      style={{
+        backgroundImage: [
+          "linear-gradient(180deg, rgba(5, 7, 10, 0.2) 0%, rgba(5, 7, 10, 0.56) 58%, rgba(5, 7, 10, 0.86) 100%)",
+          `url("${buildWallpaperUrl(wallpaperSelection.wallpaperName)}")`,
+        ].join(", "),
+      }}
+    >
+      <div className="workspace-stage__empty-toolbar">
+        <button
+          ref={wallpaperMenuButtonRef}
+          className="menu-button workspace-stage__menu-button"
+          type="button"
+          aria-expanded={wallpaperMenuOpen}
+          aria-label="Choose homepage wallpaper"
+          onClick={() => setWallpaperMenuOpen((current) => !current)}
+        >
+          ...
+        </button>
+        <PortalPopover
+          anchorPlacement="bottom-end"
+          anchorRef={wallpaperMenuButtonRef}
+          className="workspace-stage__popover"
+          open={wallpaperMenuOpen}
+          onClose={() => setWallpaperMenuOpen(false)}
+        >
+          <div className="workspace-stage__popover-copy">
+            <strong>Homepage wallpaper</strong>
+            <p>Choose any supported emotion and animal.</p>
+          </div>
+          <label className="field-shell">
+            <span>Emotion</span>
+            <select
+              className="field-input"
+              value={wallpaperSelection.adjective}
+              onChange={(event) =>
+                onHomepageWallpaperChange(
+                  buildWallpaperNameFromParts(
+                    event.target.value as (typeof homepageWallpaperAdjectives)[number],
+                    wallpaperSelection.animal,
+                  ),
+                )
+              }
+            >
+              {homepageWallpaperAdjectives.map((adjective) => (
+                <option key={adjective} value={adjective}>
+                  {adjective}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field-shell">
+            <span>Animal</span>
+            <select
+              className="field-input"
+              value={wallpaperSelection.animal}
+              onChange={(event) =>
+                onHomepageWallpaperChange(
+                  buildWallpaperNameFromParts(
+                    wallpaperSelection.adjective,
+                    event.target.value as (typeof homepageWallpaperAnimals)[number],
+                  ),
+                )
+              }
+            >
+              {homepageWallpaperAnimals.map((animal) => (
+                <option key={animal} value={animal}>
+                  {animal}
+                </option>
+              ))}
+            </select>
+          </label>
+        </PortalPopover>
+      </div>
+
       <div className="workspace-stage__empty-main">
         <p className="workspace-stage__eyebrow">Operator view</p>
         <h2 className="workspace-stage__empty-title">
@@ -101,6 +191,34 @@ export function EmptyWorkspaceStage({
             {hasWorkspaces ? "Launch another VM" : "Launch a VM"}
           </button>
         </div>
+
+        {showingDirStorageGuidance ? (
+          <div className="workspace-stage__notice">
+            <div className="workspace-stage__notice-copy">
+              <span className="surface-pill surface-pill--warning">Incus dir pool</span>
+              <h3 className="workspace-stage__notice-title">Move new VMs to thin LVM</h3>
+              <p>
+                This host is still landing new VMs on the slow <code>dir</code> storage
+                driver. Create a thin, single-file LVM pool and point Parallaize at it so
+                create, clone, and snapshot churn stop paying the dir penalty.
+              </p>
+            </div>
+            <div className="workspace-stage__notice-body">
+              <div className="workspace-stage__command-block">
+                <span>Run this on the host</span>
+                <pre className="workspace-stage__command mono-font">sudo incus storage create parallaize-lvm lvm size=200GiB lvm.use_thinpool=true</pre>
+              </div>
+              <div className="workspace-stage__command-block">
+                <span>Add this to /etc/parallaize/parallaize.env</span>
+                <pre className="workspace-stage__command mono-font">PARALLAIZE_INCUS_STORAGE_POOL=parallaize-lvm</pre>
+              </div>
+              <div className="workspace-stage__command-block">
+                <span>Then reload Parallaize</span>
+                <pre className="workspace-stage__command mono-font">sudo systemctl restart parallaize</pre>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="workspace-stage__empty-stats">
@@ -144,12 +262,8 @@ export function WorkspaceLogsSurface({
         <span className="surface-pill surface-pill--busy">
           {desktopFallbackBadge(detail)}
         </span>
-        <h2 className="workspace-log-surface__title">
-          {workspaceLogsTitle(detail)}
-        </h2>
-        <p className="workspace-log-surface__copy">
-          {workspaceLogsMessage(detail)}
-        </p>
+        <h2 className="workspace-log-surface__title">{workspaceLogsTitle(detail)}</h2>
+        <p className="workspace-log-surface__copy">{workspaceLogsMessage(detail)}</p>
         <div className="workspace-stage__header-actions">
           <button
             className="button button--ghost"
@@ -164,20 +278,14 @@ export function WorkspaceLogsSurface({
           {logsState.logs ? (
             <span className="surface-pill mono-font">{logsState.logs.providerRef}</span>
           ) : null}
-          <span className="surface-pill">
-            {logsState.logs?.source ?? "Loading guest logs..."}
-          </span>
+          <span className="surface-pill">{logsState.logs?.source ?? "Loading guest logs..."}</span>
           {logsState.logs ? (
-            <span className="surface-pill">
-              Updated {formatTimestamp(logsState.logs.fetchedAt)}
-            </span>
+            <span className="surface-pill">Updated {formatTimestamp(logsState.logs.fetchedAt)}</span>
           ) : null}
         </div>
       </div>
 
-      {logsState.error ? (
-        <p className="empty-copy">Live stream issue: {logsState.error}</p>
-      ) : null}
+      {logsState.error ? <p className="empty-copy">Live stream issue: {logsState.error}</p> : null}
 
       {logsState.loading && !logsState.logs ? (
         <p className="empty-copy">Loading guest logs...</p>
@@ -205,12 +313,8 @@ export function WorkspaceFallbackSurface({
       <StaticPatternPreview vm={detail.vm} variant="stage" />
       <div className="workspace-fallback__copy">
         <div className="workspace-fallback__panel">
-          <span className="surface-pill surface-pill--busy">
-            {desktopFallbackBadge(detail)}
-          </span>
-          <h2 className="workspace-fallback__title">
-            {workspaceFallbackTitle(detail)}
-          </h2>
+          <span className="surface-pill surface-pill--busy">{desktopFallbackBadge(detail)}</span>
+          <h2 className="workspace-fallback__title">{workspaceFallbackTitle(detail)}</h2>
           <p>{desktopFallbackMessage(detail)}</p>
         </div>
       </div>

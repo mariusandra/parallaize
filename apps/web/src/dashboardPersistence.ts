@@ -10,8 +10,20 @@ export const resolutionControlClientIdStorageKey =
   "parallaize.resolution-control-client-id";
 export const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 export const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
+export const homepageWallpaperStorageKey = "parallaize.homepage-wallpaper";
 
 export type ThemeModePreference = "light" | "dark";
+
+export function readHomepageWallpaperName(): string | null {
+  const stored = readStoredString(homepageWallpaperStorageKey);
+
+  if (!stored) {
+    return null;
+  }
+
+  const trimmed = stored.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
 
 export function readThemeMode(): ThemeModePreference {
   const stored = readStoredString(themeModeStorageKey);

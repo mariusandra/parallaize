@@ -72,9 +72,11 @@ import {
 } from "./embeddedFrameFocus.js";
 import {
   createSelkiesStreamRecoveryState,
+  hasEmbeddedBrowserRenderSurface,
   kickEmbeddedBrowserStream,
   readEmbeddedBrowserStreamScale,
   readEmbeddedBrowserStreamState,
+  resolveSelkiesStreamRecoveryCandidate,
   setEmbeddedBrowserStreamScale,
   type EmbeddedBrowserStreamState,
   type SelkiesStreamRecoveryCandidate,
@@ -113,6 +115,7 @@ import {
   buildVmFileBrowserBreadcrumbs,
   buildVmFileBrowserEntryTitle,
   buildVmFileDownloadHref,
+  defaultHomepageWallpaperName,
   desktopFallbackBadge,
   desktopFallbackMessage,
   findProminentJob,
@@ -222,6 +225,7 @@ import type {
   ResolutionDraft,
   ResolutionRetryState,
   ResourceDraft,
+  SnapshotDialogState,
   ThemeMode,
   VmLogsDialogState,
   VmLogsViewState,
@@ -234,12 +238,14 @@ import {
 import {
   activeCpuThresholdsByVmStorageKey,
   desktopResolutionByVmStorageKey,
+  homepageWallpaperStorageKey,
   livePreviewsStorageKey,
   overviewSidepanelCollapsedStorageKey,
   railWidthStorageKey,
   readActiveCpuThresholdsByVm,
   readDesktopResolutionByVm,
   readDocumentVisible,
+  readHomepageWallpaperName,
   readSidepanelCollapsedByVm,
   readStoredBoolean,
   readStoredNumber,
@@ -274,14 +280,20 @@ import { createDashboardAppMutations } from "./dashboardAppMutations.js";
 
 const appVersionLabel = __PARALLAIZE_VERSION__;
 const githubReleaseTagBaseUrl = "https://github.com/mariusandra/parallaize/releases/tag/v";
-const selkiesAutoKickWaitingThresholdMs = 12_000;
+const selkiesAutoKickWaitingThresholdMs = 8_000;
+const selkiesAutoKickRecoveredWaitingThresholdMs = 3_000;
+const selkiesAutoKickStalledThresholdMs = 4_000;
 const selkiesAutoKickFailedThresholdMs = 2_500;
 const selkiesAutoKickCooldownMs = 15_000;
-const selkiesAutoReloadCooldownMs = 5_000;
-const selkiesAutoReloadAfterWaitingKickMs = 30_000;
-const selkiesAutoReloadAfterFailedKickMs = 7_500;
+const selkiesAutoReloadCooldownMs = 3_000;
+const selkiesAutoReloadAfterWaitingKickMs = 18_000;
+const selkiesAutoReloadAfterRecoveredWaitingKickMs = 8_000;
+const selkiesAutoReloadAfterStalledKickMs = 7_000;
+const selkiesAutoReloadAfterFailedKickMs = 5_500;
 const selkiesAutoRepairThresholdMs = 45_000;
 const selkiesAutoRepairCooldownMs = 5 * 60_000;
+const logsPollingIntervalMs = 2_000;
+const selkiesRecoveryPollingIntervalMs = 500;
 
 interface CachedStageBrowserSession {
   browserPath: string;
@@ -409,6 +421,7 @@ const emptyCreateDraft: CreateDraft = {
   desktopTransport: "selkies",
   networkMode: "default",
   initCommands: "",
+  statefulClone: false,
   shutdownSourceBeforeClone: false,
 };
 
@@ -490,34 +503,6 @@ function blurEmbeddedFrameTarget(
   }
 }
 
-function resolveSelkiesStreamKickCandidate(
-  state: EmbeddedBrowserStreamState | null,
-): SelkiesStreamRecoveryCandidate | null {
-  if (!state || state.ready) {
-    return null;
-  }
-
-  const normalizedStatus = state.status?.trim().toLowerCase() ?? "";
-
-  if (normalizedStatus.length === 0) {
-    return null;
-  }
-
-  if (
-    normalizedStatus.includes("connection failed") ||
-    normalizedStatus.includes("peer connection failed") ||
-    normalizedStatus.includes("server closed connection") ||
-    normalizedStatus.includes("error from server") ||
-    normalizedStatus === "failed" ||
-    normalizedStatus === "disconnected" ||
-    normalizedStatus === "closed"
-  ) {
-    return "failed";
-  }
-
-  return null;
-}
-
 const selectedStageSessionRecoveryPollMs = 1_500;
 
 export function DashboardApp(): JSX.Element {
@@ -543,10 +528,13 @@ export function DashboardApp(): JSX.Element {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [cloneVmDialog, setCloneVmDialog] = useState<CloneVmDialogState | null>(null);
   const [cloneVmDraft, setCloneVmDraft] = useState("");
+  const [snapshotDialog, setSnapshotDialog] = useState<SnapshotDialogState | null>(null);
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [vmLogsDialog, setVmLogsDialog] = useState<VmLogsDialogState | null>(null);
   const [workspaceLogs, setWorkspaceLogs] = useState<VmLogsViewState>(emptyVmLogsViewState);
+  const [stageBrowserStreamState, setStageBrowserStreamState] =
+    useState<EmbeddedBrowserStreamState | null>(null);
   const [vmLogsRefreshTick, setVmLogsRefreshTick] = useState(0);
   const [vmFileBrowser, setVmFileBrowser] = useState<VmFileBrowserSnapshot | null>(null);
   const [vmFileBrowserLoading, setVmFileBrowserLoading] = useState(false);
@@ -580,6 +568,9 @@ export function DashboardApp(): JSX.Element {
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [fullscreenActive, setFullscreenActive] = useState(() => readFullscreenActive());
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
+  const [homepageWallpaperName, setHomepageWallpaperName] = useState(() =>
+    readHomepageWallpaperName() ?? defaultHomepageWallpaperName,
+  );
   const [activeCpuThresholdsByVm, setActiveCpuThresholdsByVm] = useState<
     Record<string, number>
   >(() => readActiveCpuThresholdsByVm(normalizeActiveCpuThreshold));
@@ -1615,15 +1606,19 @@ export function DashboardApp(): JSX.Element {
     applyViewportScalePreference,
     closeCloneVmDialog,
     closeRenameDialog,
+    closeSnapshotDialog,
     closeTemplateCloneDialog,
     closeTemplateEditDialog,
     closeVmLogsDialog,
     handleClone,
     handleCloneVmSubmit,
+    handleCloneStatefulChange,
     handleCreate,
     handleCreateField,
     handleCreateShutdownBeforeCloneChange,
+    handleCreateStatefulCloneChange,
     handleCreateSourceChange,
+    randomizeCreateName,
     handleDelete,
     handleDeleteTemplate,
     handleEditTemplateSubmit,
@@ -1638,6 +1633,9 @@ export function DashboardApp(): JSX.Element {
     handleSidepanelResizeKeyDown,
     handleSidepanelResizeStart,
     handleSnapshot,
+    handleSnapshotLabelChange,
+    handleSnapshotStatefulChange,
+    handleSnapshotSubmit,
     handleTemplateCloneField,
     handleTemplateCloneSubmit,
     handleTemplateEditField,
@@ -1674,6 +1672,7 @@ export function DashboardApp(): JSX.Element {
     createDraft,
     cloneVmDialog,
     cloneVmDraft,
+    snapshotDialog,
     renameDialog,
     renameDraft,
     templateEditDraft,
@@ -1720,6 +1719,7 @@ export function DashboardApp(): JSX.Element {
     setShowCreateDialog,
     setCloneVmDialog,
     setCloneVmDraft,
+    setSnapshotDialog,
     setRenameDialog,
     setRenameDraft,
     setVmLogsDialog,
@@ -1743,6 +1743,16 @@ export function DashboardApp(): JSX.Element {
     setSidepanelResizeActive,
     setSidepanelWidthPreference,
   });
+
+  function toggleCompactRail(): void {
+    if (!wideShellLayout) {
+      return;
+    }
+
+    setRailWidthPreference((current) =>
+      clampRailWidthPreference(current <= railCompactWidth ? railExpandedMinWidth : railCompactWidth),
+    );
+  }
 
   function flushQueuedRailWidthPreference(): void {
     if (railResizeFrameRef.current !== null) {
@@ -1890,6 +1900,45 @@ export function DashboardApp(): JSX.Element {
       !displayedStageSession.browserPath ||
       stageSessionRelinquished
     ) {
+      setStageBrowserStreamState(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollStageBrowserStreamState = (): void => {
+      const nextState = readEmbeddedBrowserStreamState(stageBrowserFrameRef.current);
+
+      if (cancelled) {
+        return;
+      }
+
+      setStageBrowserStreamState((current) =>
+        sameEmbeddedBrowserStreamState(current, nextState) ? current : nextState,
+      );
+    };
+
+    pollStageBrowserStreamState();
+    const pollId = window.setInterval(pollStageBrowserStreamState, 1_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollId);
+    };
+  }, [
+    activeStageBrowserVmId,
+    displayedStageSession?.kind,
+    displayedStageSession?.browserPath,
+    stageSessionRelinquished,
+  ]);
+
+  useEffect(() => {
+    if (
+      activeStageBrowserVmId === null ||
+      displayedStageSession?.kind !== "selkies" ||
+      !displayedStageSession.browserPath ||
+      stageSessionRelinquished
+    ) {
       return;
     }
 
@@ -1979,11 +2028,17 @@ export function DashboardApp(): JSX.Element {
     const browserPath = displayedStageSession.browserPath;
     const vmName = currentStageVm?.name ?? "Desktop";
     let recoveryState = createSelkiesStreamRecoveryState();
+    let hasSeenHealthyStream = false;
 
     const pollStreamRecovery = (): void => {
       const state = readEmbeddedBrowserStreamState(stageBrowserFrameRef.current);
-      const candidate = resolveSelkiesStreamKickCandidate(state);
+      const candidate = resolveSelkiesStreamRecoveryCandidate(state);
       const now = Date.now();
+
+      if (state?.ready || hasEmbeddedBrowserRenderSurface(stageBrowserFrameRef.current)) {
+        hasSeenHealthyStream = true;
+      }
+
       recoveryState = updateSelkiesStreamRecoveryState(
         recoveryState,
         state,
@@ -1999,6 +2054,10 @@ export function DashboardApp(): JSX.Element {
       const reloadThresholdMs =
         trackedCandidate === "failed"
           ? selkiesAutoReloadAfterFailedKickMs
+          : trackedCandidate === "stalled"
+            ? selkiesAutoReloadAfterStalledKickMs
+          : hasSeenHealthyStream
+            ? selkiesAutoReloadAfterRecoveredWaitingKickMs
           : selkiesAutoReloadAfterWaitingKickMs;
 
       if (
@@ -2027,6 +2086,10 @@ export function DashboardApp(): JSX.Element {
       const thresholdMs =
         trackedCandidate === "failed"
           ? selkiesAutoKickFailedThresholdMs
+          : trackedCandidate === "stalled"
+            ? selkiesAutoKickStalledThresholdMs
+          : hasSeenHealthyStream
+            ? selkiesAutoKickRecoveredWaitingThresholdMs
           : selkiesAutoKickWaitingThresholdMs;
 
       if (now - recoveryState.candidateSinceMs < thresholdMs) {
@@ -2062,7 +2125,7 @@ export function DashboardApp(): JSX.Element {
     };
 
     pollStreamRecovery();
-    const pollId = window.setInterval(pollStreamRecovery, 1_000);
+    const pollId = window.setInterval(pollStreamRecovery, selkiesRecoveryPollingIntervalMs);
 
     return () => {
       window.clearInterval(pollId);
@@ -2093,7 +2156,7 @@ export function DashboardApp(): JSX.Element {
 
     const pollAutomaticRepair = (): void => {
       const state = readEmbeddedBrowserStreamState(stageBrowserFrameRef.current);
-      const candidate = resolveSelkiesStreamKickCandidate(state);
+      const candidate = resolveSelkiesStreamRecoveryCandidate(state);
       const now = Date.now();
 
       if (candidate !== null) {
@@ -2321,6 +2384,22 @@ export function DashboardApp(): JSX.Element {
                       session.reloadToken,
                     )}
                   />
+                ) : null}
+                {active && currentStageVm && stageBrowserStreamState?.ready !== true ? (
+                  <div className="workspace-stage__floating-actions">
+                    {stageBrowserStreamState?.status ? (
+                      <span className="surface-pill surface-pill--busy">
+                        {stageBrowserStreamState.status}
+                      </span>
+                    ) : null}
+                    <button
+                      className="button button--ghost"
+                      type="button"
+                      onClick={() => openVmLogsDialog(currentStageVm)}
+                    >
+                      Open logs
+                    </button>
+                  </div>
                 ) : null}
                 {active &&
                 currentStageVm &&
@@ -3131,6 +3210,67 @@ export function DashboardApp(): JSX.Element {
   }, [summary?.generatedAt, vmLogsDialog?.vmId, vmLogsDialog?.vmName]);
 
   useEffect(() => {
+    if (authState !== "ready" || !vmLogsDialog) {
+      return;
+    }
+
+    let cancelled = false;
+    const vmId = vmLogsDialog.vmId;
+
+    const pollVmLogsSnapshot = async (): Promise<void> => {
+      try {
+        const logs = await fetchJson<VmLogsSnapshot>(`/api/vms/${vmId}/logs`);
+
+        if (cancelled) {
+          return;
+        }
+
+        setVmLogsDialog((current) =>
+          current && current.vmId === vmId
+            ? {
+                ...current,
+                error: null,
+                loading: false,
+                logs,
+                refreshing: false,
+              }
+            : current,
+        );
+      } catch (error: unknown) {
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setVmLogsDialog((current) =>
+          current && current.vmId === vmId
+            ? {
+                ...current,
+                error: errorMessage(error),
+                loading: false,
+                refreshing: false,
+              }
+            : current,
+        );
+      }
+    };
+
+    void pollVmLogsSnapshot();
+    const pollId = window.setInterval(() => {
+      void pollVmLogsSnapshot();
+    }, logsPollingIntervalMs);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollId);
+    };
+  }, [authState, vmLogsDialog?.vmId]);
+
+  useEffect(() => {
     if (authState !== "ready" || !currentDetail || !showWorkspaceLogs) {
       setWorkspaceLogs(emptyVmLogsViewState);
       return;
@@ -3179,6 +3319,58 @@ export function DashboardApp(): JSX.Element {
         }));
       },
     });
+  }, [authState, currentDetail?.vm.id, showWorkspaceLogs]);
+
+  useEffect(() => {
+    if (authState !== "ready" || !currentDetail || !showWorkspaceLogs) {
+      return;
+    }
+
+    let cancelled = false;
+    const vmId = currentDetail.vm.id;
+
+    const pollWorkspaceLogsSnapshot = async (): Promise<void> => {
+      try {
+        const logs = await fetchJson<VmLogsSnapshot>(`/api/vms/${vmId}/logs`);
+
+        if (cancelled || selectedVmIdRef.current !== vmId) {
+          return;
+        }
+
+        setWorkspaceLogs({
+          error: null,
+          loading: false,
+          logs,
+          refreshing: false,
+        });
+      } catch (error: unknown) {
+        if (error instanceof AuthRequiredError) {
+          requireLogin();
+          return;
+        }
+
+        if (cancelled || selectedVmIdRef.current !== vmId) {
+          return;
+        }
+
+        setWorkspaceLogs((current) => ({
+          ...current,
+          error: errorMessage(error),
+          loading: false,
+          refreshing: false,
+        }));
+      }
+    };
+
+    void pollWorkspaceLogsSnapshot();
+    const pollId = window.setInterval(() => {
+      void pollWorkspaceLogsSnapshot();
+    }, logsPollingIntervalMs);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollId);
+    };
   }, [authState, currentDetail?.vm.id, showWorkspaceLogs]);
 
   useEffect(() => {
@@ -3259,6 +3451,10 @@ export function DashboardApp(): JSX.Element {
     document.documentElement.dataset.theme = themeMode;
     writeStoredString(themeModeStorageKey, themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    writeStoredString(homepageWallpaperStorageKey, homepageWallpaperName);
+  }, [homepageWallpaperName]);
 
   useEffect(() => {
     writeStoredString(
@@ -4695,6 +4891,7 @@ export function DashboardApp(): JSX.Element {
             onRename={handleRenameVm}
             onResizeKeyDown={handleRailResizeKeyDown}
             onResizePointerDown={handleRailResizeStart}
+            onToggleCompactRail={toggleCompactRail}
             onSelectVm={selectVm}
             onSetActiveCpuThreshold={handleSetActiveCpuThreshold}
             onSnapshot={handleSnapshot}
@@ -4766,8 +4963,11 @@ export function DashboardApp(): JSX.Element {
                 )
               ) : (
                 <EmptyWorkspaceStage
+                  homepageWallpaperName={homepageWallpaperName}
+                  incusStorage={incusStorage}
                   summary={summary}
                   onCreate={openCreateDialog}
+                  onHomepageWallpaperChange={setHomepageWallpaperName}
                 />
               )}
 
@@ -4895,25 +5095,33 @@ export function DashboardApp(): JSX.Element {
         renameDialog={renameDialog}
         renameDraft={renameDraft}
         showCreateDialog={showCreateDialog}
+        snapshotDialog={snapshotDialog}
         summary={summary}
         templateCloneDraft={templateCloneDraft}
         templateEditDraft={templateEditDraft}
         vmLogsDialog={vmLogsDialog}
         onCloneDraftChange={setCloneVmDraft}
+        onCloneStatefulChange={handleCloneStatefulChange}
         onCloseCloneVmDialog={closeCloneVmDialog}
         onCloseCreateDialog={() => setShowCreateDialog(false)}
         onCloseRenameDialog={closeRenameDialog}
+        onCloseSnapshotDialog={closeSnapshotDialog}
         onCloseTemplateCloneDialog={closeTemplateCloneDialog}
         onCloseTemplateEditDialog={closeTemplateEditDialog}
         onCloseVmLogsDialog={closeVmLogsDialog}
         onCloneVmSubmit={handleCloneVmSubmit}
         onCreateFieldChange={handleCreateField}
         onCreateShutdownBeforeCloneChange={handleCreateShutdownBeforeCloneChange}
+        onCreateStatefulCloneChange={handleCreateStatefulCloneChange}
+        onCreateRandomizeName={randomizeCreateName}
         onCreateSourceChange={handleCreateSourceChange}
         onCreateSubmit={handleCreate}
         onRefreshVmLogsDialog={refreshVmLogsDialog}
         onRenameDraftChange={setRenameDraft}
         onRenameSubmit={handleRenameSubmit}
+        onSnapshotLabelChange={handleSnapshotLabelChange}
+        onSnapshotStatefulChange={handleSnapshotStatefulChange}
+        onSnapshotSubmit={handleSnapshotSubmit}
         onTemplateCloneFieldChange={handleTemplateCloneField}
         onTemplateCloneSubmit={handleTemplateCloneSubmit}
         onTemplateEditFieldChange={handleTemplateEditField}
@@ -4923,6 +5131,13 @@ export function DashboardApp(): JSX.Element {
   );
 }
 
+
+function sameEmbeddedBrowserStreamState(
+  left: EmbeddedBrowserStreamState | null,
+  right: EmbeddedBrowserStreamState | null,
+): boolean {
+  return left?.ready === right?.ready && left?.status === right?.status;
+}
 
 function buildLatestReleaseTagUrl(version: string): string {
   return `${githubReleaseTagBaseUrl}${version}`;

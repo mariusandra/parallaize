@@ -51,6 +51,7 @@ import {
   type TemplateEditDraft,
 } from "./dashboardHelpers.js";
 import {
+  buildDefaultSnapshotLabel,
   buildResolutionDraft,
   clampDesktopFixedHeight,
   clampDesktopFixedWidth,
@@ -59,7 +60,6 @@ import {
   clampRailWidthPreference,
   clampSidepanelWidthPreference,
   formatViewportScale,
-  liveCaptureWarningCopy,
   normalizeDesktopResolutionPreference,
   railCompactWidth,
   railExpandedMinWidth,
@@ -73,6 +73,7 @@ import {
   type Notice,
   type RenameDialogState,
   type ResolutionDraft,
+  type SnapshotDialogState,
   type VmLogsDialogState,
 } from "./dashboardShell.js";
 import {
@@ -90,6 +91,7 @@ interface DashboardAppMutationsContext {
   createDraft: CreateDraft;
   cloneVmDialog: CloneVmDialogState | null;
   cloneVmDraft: string;
+  snapshotDialog: SnapshotDialogState | null;
   renameDialog: RenameDialogState | null;
   renameDraft: string;
   templateEditDraft: TemplateEditDraft | null;
@@ -140,6 +142,7 @@ interface DashboardAppMutationsContext {
   setShowCreateDialog: SetState<boolean>;
   setCloneVmDialog: SetState<CloneVmDialogState | null>;
   setCloneVmDraft: SetState<string>;
+  setSnapshotDialog: SetState<SnapshotDialogState | null>;
   setRenameDialog: SetState<RenameDialogState | null>;
   setRenameDraft: SetState<string>;
   setVmLogsDialog: SetState<VmLogsDialogState | null>;
@@ -171,6 +174,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     createDraft,
     cloneVmDialog,
     cloneVmDraft,
+    snapshotDialog,
     renameDialog,
     renameDraft,
     templateEditDraft,
@@ -217,6 +221,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setShowCreateDialog,
     setCloneVmDialog,
     setCloneVmDraft,
+    setSnapshotDialog,
     setRenameDialog,
     setRenameDraft,
     setVmLogsDialog,
@@ -342,6 +347,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setVmLogsDialog(null);
+    setSnapshotDialog(null);
   }
 
   async function handleLogout(): Promise<void> {
@@ -396,7 +402,11 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
         : null;
     const createValidationError = buildCreateLaunchValidationError(
       selectedSource,
+      createDraft.ramGb,
       createDraft.diskGb,
+      {
+        statefulClone: createDraft.statefulClone,
+      },
     );
 
     if (!selectedSource) {
@@ -439,6 +449,8 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
                 resources: requestedResources,
                 networkMode: createDraft.networkMode,
                 shutdownSourceBeforeClone: createDraft.shutdownSourceBeforeClone,
+                stateful:
+                  createDraft.statefulClone && !createDraft.shutdownSourceBeforeClone,
               })
             : await postJson<VmInstance>("/api/vms", {
                 name: requestedName,
@@ -533,6 +545,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
             initCommands: value,
           };
         case "shutdownSourceBeforeClone":
+        case "statefulClone":
           return current;
       }
     });
@@ -542,7 +555,27 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setCreateDirty(true);
     setCreateDraft((current) => ({
       ...current,
+      statefulClone: checked ? false : current.statefulClone,
       shutdownSourceBeforeClone: checked,
+    }));
+  }
+
+  function handleCreateStatefulCloneChange(checked: boolean): void {
+    setCreateDirty(true);
+    setCreateDraft((current) => ({
+      ...current,
+      shutdownSourceBeforeClone: checked ? false : current.shutdownSourceBeforeClone,
+      statefulClone: checked,
+    }));
+  }
+
+  function randomizeCreateName(): void {
+    const wallpaperName = buildRandomVmName();
+    setCreateDirty(true);
+    setCreateDraft((current) => ({
+      ...current,
+      name: wallpaperName,
+      wallpaperName,
     }));
   }
 
@@ -673,6 +706,32 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   function closeCloneVmDialog(): void {
     setCloneVmDialog(null);
     setCloneVmDraft("");
+  }
+
+  function closeSnapshotDialog(): void {
+    setSnapshotDialog(null);
+  }
+
+  function handleSnapshotLabelChange(value: string): void {
+    setSnapshotDialog((current) =>
+      current
+        ? {
+            ...current,
+            label: value,
+          }
+        : current,
+    );
+  }
+
+  function handleSnapshotStatefulChange(checked: boolean): void {
+    setSnapshotDialog((current) =>
+      current
+        ? {
+            ...current,
+            stateful: current.canCaptureRam ? checked : false,
+          }
+        : current,
+    );
   }
 
   function closeRenameDialog(): void {
@@ -1158,8 +1217,8 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     commitVmRailOrder(nextOrder);
   }
 
-  function handleRailResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
-    if (!wideShellLayout || event.button !== 0) {
+  function handleRailResizeStart(): void {
+    if (!wideShellLayout) {
       return;
     }
 
@@ -1169,7 +1228,6 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
       return;
     }
 
-    event.preventDefault();
     railResizeRef.current = { panelLeft };
     setRailResizeActive(true);
   }
@@ -1208,20 +1266,15 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setRailWidthPreference(clampRailWidthPreference(nextWidth));
   }
 
-  function handleSidepanelResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
-    if (compactSidepanelLayout || event.button !== 0) {
+  function handleSidepanelResizeStart(pointerClientX: number): void {
+    if (compactSidepanelLayout) {
       return;
     }
 
-    const handleBounds = event.currentTarget.getBoundingClientRect();
-    const handleCenterX = handleBounds.left + handleBounds.width / 2;
-
-    event.preventDefault();
     sidepanelResizeRef.current = {
-      anchorClientX:
-        displayedSidepanelWidth <= sidepanelClosedWidth ? handleCenterX : event.clientX,
+      anchorClientX: pointerClientX,
       anchorWidth: displayedSidepanelWidth,
-      pendingClosedOpen: displayedSidepanelWidth <= sidepanelClosedWidth,
+      pendingClosedOpen: false,
     };
     setSidepanelResizeActive(true);
   }
@@ -1323,11 +1376,26 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setShellMenuOpen(false);
     const wallpaperName = buildRandomVmName();
     setCloneVmDialog({
+      canCaptureRam: vm.status === "running",
+      ramMb: vm.resources.ramMb,
       sourceVmId: vm.id,
       sourceVmName: vm.name,
+      sourceVmStatus: vm.status,
+      stateful: vm.status === "running",
       wallpaperName,
     });
     setCloneVmDraft(wallpaperName);
+  }
+
+  function handleCloneStatefulChange(checked: boolean): void {
+    setCloneVmDialog((current) =>
+      current
+        ? {
+            ...current,
+            stateful: current.canCaptureRam ? checked : false,
+          }
+        : current,
+    );
   }
 
   async function handleCloneVmSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1350,6 +1418,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
           sourceVmId: cloneVmDialog.sourceVmId,
           name,
           wallpaperName: cloneVmDialog.wallpaperName,
+          stateful: cloneVmDialog.canCaptureRam ? cloneVmDialog.stateful : false,
         });
         closeCloneVmDialog();
         setVmSidepanelCollapsed(clone.id, false);
@@ -1362,29 +1431,44 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   }
 
   async function handleSnapshot(vm: VmInstance): Promise<void> {
-    const label = window.prompt(
-      vm.status === "running"
-        ? `Snapshot label\n\n${liveCaptureWarningCopy}`
-        : "Snapshot label",
-      `snapshot-${new Date().toISOString().slice(0, 16)}`,
-    );
+    setOpenVmMenuId(null);
+    setOpenTemplateMenuId(null);
+    setShellMenuOpen(false);
+    setSnapshotDialog({
+      canCaptureRam: vm.status === "running",
+      label: buildDefaultSnapshotLabel(),
+      ramMb: vm.resources.ramMb,
+      stateful: vm.status === "running",
+      vmId: vm.id,
+      vmName: vm.name,
+      vmStatus: vm.status,
+    });
+  }
 
-    if (label === null) {
+  async function handleSnapshotSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (!snapshotDialog) {
       return;
     }
 
+    const dialog = snapshotDialog;
     const payload: SnapshotInput = {
-      label: label.trim() || undefined,
+      label: dialog.label.trim() || undefined,
+      stateful: dialog.canCaptureRam ? dialog.stateful : false,
     };
 
     await runMutation(
-      `Snapshotting ${vm.name}`,
+      `Snapshotting ${dialog.vmName}`,
       async () => {
-        await postJson(`/api/vms/${vm.id}/snapshot`, payload);
+        await postJson(`/api/vms/${dialog.vmId}/snapshot`, payload);
+        closeSnapshotDialog();
         await refreshSummary();
-        await refreshDetail(vm.id);
+        if (selectedVmIdRef.current === dialog.vmId) {
+          await refreshDetail(dialog.vmId);
+        }
       },
-      `Queued snapshot for ${vm.name}.`,
+      `Queued snapshot for ${dialog.vmName}.`,
     );
   }
 
@@ -1413,6 +1497,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     applyViewportScalePreference,
     closeCloneVmDialog,
     closeRenameDialog,
+    closeSnapshotDialog,
     closeTemplateCloneDialog,
     closeTemplateEditDialog,
     closeVmLogsDialog,
@@ -1420,10 +1505,13 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     currentVmRailIds,
     handleClone,
     handleCloneVmSubmit,
+    handleCloneStatefulChange,
     handleCreate,
     handleCreateField,
     handleCreateShutdownBeforeCloneChange,
+    handleCreateStatefulCloneChange,
     handleCreateSourceChange,
+    randomizeCreateName,
     handleDelete,
     handleDeleteTemplate,
     handleEditTemplateSubmit,
@@ -1438,6 +1526,9 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     handleSidepanelResizeKeyDown,
     handleSidepanelResizeStart,
     handleSnapshot,
+    handleSnapshotLabelChange,
+    handleSnapshotStatefulChange,
+    handleSnapshotSubmit,
     handleTemplateCloneField,
     handleTemplateCloneSubmit,
     handleTemplateEditField,

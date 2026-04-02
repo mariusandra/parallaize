@@ -490,8 +490,9 @@ if ! command -v runuser >/dev/null 2>&1; then
   echo "runuser is required to launch Selkies as ${DEFAULT_GUEST_USERNAME}." >&2
   exit 1
 fi
-DESKTOP_UID="$(id -u ${DEFAULT_GUEST_USERNAME})"
-DESKTOP_GID="$(id -g ${DEFAULT_GUEST_USERNAME})"
+DESKTOP_USER="${DEFAULT_GUEST_USERNAME}"
+DESKTOP_UID="$(id -u "$DESKTOP_USER")"
+DESKTOP_GID="$(id -g "$DESKTOP_USER")"
 DESKTOP_HOME="${DEFAULT_GUEST_HOME}"
 DESKTOP_RUNTIME_DIR="/run/user/$DESKTOP_UID"
 SELKIES_STATE_DIR="$DESKTOP_HOME/.cache/parallaize-selkies"
@@ -499,9 +500,9 @@ install -d -m 700 -o "$DESKTOP_UID" -g "$DESKTOP_GID" "$SELKIES_STATE_DIR"
 export DISPLAY="$DISPLAY_NUMBER"
 export XAUTHORITY="$AUTH_FILE"
 export HOME="$DESKTOP_HOME"
-export USER="${DEFAULT_GUEST_USERNAME}"
-export LOGNAME="${DEFAULT_GUEST_USERNAME}"
-export XDG_RUNTIME_DIR="$DESKTOP_RUNTIME_DIR"
+export USER="$DESKTOP_USER"
+export LOGNAME="$DESKTOP_USER"
+export XDG_RUNTIME_DIR="/run/user/$DESKTOP_UID"
 export SELKIES_ADDR="0.0.0.0"
 export SELKIES_PORT="${port}"
 export SELKIES_ENABLE_HTTPS="false"
@@ -515,7 +516,7 @@ export SELKIES_WEB_ROOT="$SELKIES_DIR/share/selkies-web"
 export SELKIES_JSON_CONFIG="$SELKIES_STATE_DIR/selkies_config.json"
 export SELKIES_RTC_CONFIG_JSON="$SELKIES_STATE_DIR/rtc.json"
 ${rtcEnvironment ? `${rtcEnvironment}
-` : ""}exec runuser -u ${DEFAULT_GUEST_USERNAME} --preserve-environment -- "$SELKIES_RUNNER" --addr "$SELKIES_ADDR" --port "$SELKIES_PORT" --enable_basic_auth "$SELKIES_ENABLE_BASIC_AUTH" --enable_resize "$SELKIES_ENABLE_RESIZE"`;
+` : ""}exec runuser --preserve-environment -u "$DESKTOP_USER" -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" "$SELKIES_RUNNER" --addr "$SELKIES_ADDR" --port "$SELKIES_PORT" --enable_basic_auth "$SELKIES_ENABLE_BASIC_AUTH" --enable_resize "$SELKIES_ENABLE_RESIZE"`;
 }
 
 function buildGuestSelkiesServiceUnit(): string {
@@ -1908,6 +1909,66 @@ contents = contents.replace(
     'var checkconnect = app.status === "checkconnect";',
 )
 
+signalling_disconnect_target = '''signalling.ondisconnect = () => {
+    console.log("signalling disconnected");
+    const activeVideoPlayback = parallaizeHasActiveVideoPlayback();
+    const peerConnectionState =
+        webrtc.peerConnection !== null ? webrtc.peerConnection.connectionState : "";
+    const iceConnectionState =
+        webrtc.peerConnection !== null ? webrtc.peerConnection.iceConnectionState : "";
+    if (
+        videoConnected === "connected" ||
+        activeVideoPlayback ||
+        peerConnectionState === "connecting" ||
+        peerConnectionState === "connected" ||
+        iceConnectionState === "checking" ||
+        iceConnectionState === "connected" ||
+        iceConnectionState === "completed"
+    ) {
+        if (videoConnected === "connected" || activeVideoPlayback) {
+            app.status = "connected";
+            app.showStart = false;
+            app.loadingText = "";
+        }
+        return;
+    }
+    var checkconnect = app.status === "checkconnect";
+    app.status = 'connecting';
+    videoElement.style.cursor = "auto";
+    webrtc.reset();
+    app.status = 'checkconnect';
+    if (!checkconnect) audio_signalling.disconnect();
+}
+'''
+for signalling_disconnect_source in (
+    '''signalling.ondisconnect = () => {
+    var checkconnect = app.status == checkconnect;
+    // if (app.status !== "connected") return;
+    console.log("signalling disconnected");
+    app.status = 'connecting';
+    videoElement.style.cursor = "auto";
+    webrtc.reset();
+    app.status = 'checkconnect';
+    if (!checkconnect) audio_signalling.disconnect();
+}
+''',
+    '''signalling.ondisconnect = () => {
+    var checkconnect = app.status === "checkconnect";
+    // if (app.status !== "connected") return;
+    console.log("signalling disconnected");
+    app.status = 'connecting';
+    videoElement.style.cursor = "auto";
+    webrtc.reset();
+    app.status = 'checkconnect';
+    if (!checkconnect) audio_signalling.disconnect();
+}
+''',
+):
+    contents = contents.replace(
+        signalling_disconnect_source,
+        signalling_disconnect_target,
+    )
+
 preview_flag = 'var parallaizePreviewMode = new URLSearchParams(window.location.search).get("parallaize_preview") === "1";\\n'
 if preview_flag not in contents:
     contents = contents.replace(
@@ -2023,6 +2084,7 @@ var parallaizeDataChannelOpen = false;
 var parallaizePendingDataChannelMessages = [];
 function parallaizeHasRenderableVideo() {
     return (
+        videoElement.isConnected &&
         videoElement.srcObject !== null &&
         videoElement.readyState >= 2 &&
         videoElement.videoWidth > 0 &&
@@ -2232,6 +2294,41 @@ function parallaizeMaybeActivateAudio() {
 }
 window.addEventListener("pointerdown", parallaizeMaybeActivateAudio, { capture: true });
 window.addEventListener("keydown", parallaizeMaybeActivateAudio, { capture: true });
+document.documentElement.style.overscrollBehaviorX = "none";
+if (document.body !== null) {
+    document.body.style.overscrollBehaviorX = "none";
+}
+var parallaizePointerDragActive = false;
+function parallaizeSetPointerDragActive(active) {
+    parallaizePointerDragActive = active;
+}
+function parallaizeShouldBlockHistorySwipe(event) {
+    if (!parallaizePointerDragActive) {
+        return false;
+    }
+    return Math.abs(event.deltaX) > Math.abs(event.deltaY);
+}
+function parallaizeHandleHistorySwipeGuard(event) {
+    if (!parallaizeShouldBlockHistorySwipe(event)) {
+        return;
+    }
+    event.preventDefault();
+}
+window.addEventListener("pointerdown", (event) => {
+    if (event.button === 0 || (event.buttons & 1) !== 0) {
+        parallaizeSetPointerDragActive(true);
+    }
+}, { capture: true });
+window.addEventListener("pointerup", () => {
+    parallaizeSetPointerDragActive(false);
+}, { capture: true });
+window.addEventListener("pointercancel", () => {
+    parallaizeSetPointerDragActive(false);
+}, { capture: true });
+window.addEventListener("blur", () => {
+    parallaizeSetPointerDragActive(false);
+});
+window.addEventListener("wheel", parallaizeHandleHistorySwipeGuard, { capture: true, passive: false });
 ''',
     )
 if "var parallaizeAudioConnectRequested = parallaizePreviewMode;" not in contents:
@@ -3626,9 +3723,13 @@ required_app_tokens = [
     "var parallaizeGuestClipboardListeners = new Set();",
     "function parallaizeApplyStreamPixelation() {",
     "function parallaizeHasActiveVideoPlayback() {",
+    "videoElement.isConnected &&",
     "function parallaizeSendDataChannelMessage(message, queueIfUnavailable = true) {",
+    "const peerConnectionState =",
     ':root[data-parallaize-stream-pixelated="true"] .video { image-rendering: crisp-edges; image-rendering: pixelated; }',
     "function parallaizeMaybeConnectAudio() {",
+    "document.documentElement.style.overscrollBehaviorX = \\"none\\";",
+    "function parallaizeHandleHistorySwipeGuard(event) {",
 ]
 required_signalling_tokens = [
     'this._setStatus("Connection error, retrying.");',

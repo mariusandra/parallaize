@@ -97,6 +97,7 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.match(script, /var parallaizeDataChannelOpen = false;/);
   assert.match(script, /var parallaizePendingDataChannelMessages = \[\];/);
   assert.match(script, /function parallaizeHasRenderableVideo\(\) \{/);
+  assert.match(script, /videoElement\.isConnected &&/);
   assert.match(script, /function parallaizeHasActiveVideoPlayback\(\) \{/);
   assert.match(script, /function parallaizeSyncPlayableStreamState\(\) \{/);
   assert.match(script, /function parallaizeSendDataChannelMessage\(message, queueIfUnavailable = true\) \{/);
@@ -107,6 +108,12 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.match(script, /function parallaizeMaybeConnectAudio\(\) \{/);
   assert.match(script, /function parallaizeMaybeActivateAudio\(\) \{/);
   assert.match(script, /window\.addEventListener\("pointerdown", parallaizeMaybeActivateAudio, \{ capture: true \}\);/);
+  assert.match(script, /document\.documentElement\.style\.overscrollBehaviorX = "none";/);
+  assert.match(script, /var parallaizePointerDragActive = false;/);
+  assert.match(script, /function parallaizeHandleHistorySwipeGuard\(event\) \{/);
+  assert.match(script, /event\.preventDefault\(\);/);
+  assert.match(script, /window\.addEventListener\("pointerup", \(\) => \{\n    parallaizeSetPointerDragActive\(false\);\n\}, \{ capture: true \}\);/);
+  assert.match(script, /window\.addEventListener\("wheel", parallaizeHandleHistorySwipeGuard, \{ capture: true, passive: false \}\);/);
   assert.match(
     script,
     /function parallaizeMaybeAutoplayVideo\(delay = 0\) \{\n    if \(parallaizePreviewMode\) \{\n        return;\n    \}/,

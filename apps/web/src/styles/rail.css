@@ -19,7 +19,7 @@
   right: 0;
   bottom: 0;
   z-index: 6;
-  width: 1rem;
+  width: 1.2rem;
   transform: translateX(50%);
   pointer-events: none;
 }
@@ -43,8 +43,8 @@
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 1rem;
-  height: 4.8rem;
+  width: 1.2rem;
+  height: 5.4rem;
   transform: translate(-50%, -50%);
   cursor: col-resize;
   pointer-events: auto;
@@ -801,6 +801,10 @@
 
 .vm-tile__compact-status.status-badge--running::after {
   content: none;
+}
+
+.vm-tile__compact-status.status-badge--paused {
+  background: #0891b2;
 }
 
 .vm-tile__compact-status.status-badge--stopped {

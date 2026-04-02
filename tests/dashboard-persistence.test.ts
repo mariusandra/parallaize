@@ -4,9 +4,11 @@ import test, { type TestContext } from "node:test";
 import {
   activeCpuThresholdsByVmStorageKey,
   desktopResolutionByVmStorageKey,
+  homepageWallpaperStorageKey,
   readActiveCpuThresholdsByVm,
   readDesktopResolutionByVm,
   readDocumentVisible,
+  readHomepageWallpaperName,
   readSidepanelCollapsedByVm,
   readStoredBoolean,
   readStoredNumber,
@@ -20,6 +22,7 @@ import {
 test("dashboard persistence reads theme and primitive values from browser storage", (context) => {
   const storage = new Map<string, string>([
     [themeModeStorageKey, "dark"],
+    [homepageWallpaperStorageKey, "calm-otter"],
     ["feature-flag", "true"],
     ["rail-width", "320"],
   ]);
@@ -30,6 +33,7 @@ test("dashboard persistence reads theme and primitive values from browser storag
   });
 
   assert.equal(readThemeMode(), "dark");
+  assert.equal(readHomepageWallpaperName(), "calm-otter");
   assert.equal(readStoredBoolean("feature-flag", false), true);
   assert.equal(readStoredNumber("rail-width"), 320);
   assert.equal(readViewportWidth(), 1660);
@@ -47,12 +51,14 @@ test("dashboard persistence falls back to system dark mode and ignores bad stora
       desktopResolutionByVmStorageKey,
       "{\"vm-0001\":{\"mode\":\"fixed\",\"width\":1600},\"\":{\"mode\":\"viewport\"}}",
     ],
+    [homepageWallpaperStorageKey, "   "],
   ]);
   installBrowserGlobals(context, storage, {
     prefersDark: true,
   });
 
   assert.equal(readThemeMode(), "dark");
+  assert.equal(readHomepageWallpaperName(), null);
   assert.deepEqual(readSidepanelCollapsedByVm(), {
     "vm-0001": true,
   });

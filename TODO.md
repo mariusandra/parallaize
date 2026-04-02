@@ -1,6 +1,6 @@
 # Parallaize TODO
 
-Last updated: 2026-04-01
+Last updated: 2026-04-02
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
@@ -24,5 +24,3 @@ Completed implementation details now live in:
 - [ ] Run one full host reboot validation on the live machine and compare cold restart-to-picture timing against the in-process host-process restart benchmark.
 - [ ] Audit all Docker-published ports on the live host and keep `DOCKER-USER` policy aligned with the intended UFW exposure model.
 - [ ] Add to the installation instructions how to get incus running on a macos; brew install colima; colima start --runtime incus
-- [ ] When the user starts incus with the "dir" mode, guide them to enable lvm thin single-file mode. say what commands to run and what to add to the env file. Show this in the middle panel
-- [ ] Add a little "reload" icon to the end of the "name" textfield when adding a new vm. This would generate a new random name (and background image string)

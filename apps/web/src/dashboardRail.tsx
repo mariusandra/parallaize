@@ -194,6 +194,9 @@ export function VmTile({
         ? "rgb(34 197 94 / 0.3)"
         : compactVmCpuColor(compactCpuPercent)
       : null;
+  const primaryPowerAction = vm.status === "running" ? "pause" : "start";
+  const primaryPowerLabel =
+    vm.status === "running" ? "Pause" : vm.status === "paused" ? "Resume" : "Start";
   const menu = (
     <div className="vm-tile__menu" onClick={(event) => event.stopPropagation()}>
       <button
@@ -215,7 +218,7 @@ export function VmTile({
           open={menuOpen}
           onClose={() => onToggleMenu(vm.id)}
         >
-          {compact ? (
+          {compact && vm.status === "running" ? (
             <div className="vm-tile__popover-telemetry">
               <TelemetryPanel
                 activeCpuThresholdPercent={activeCpuThresholdPercent}
@@ -267,11 +270,22 @@ export function VmTile({
             type="button"
             onClick={() => {
               onToggleMenu(vm.id);
-              void onPowerAction(vm.id, vm.status === "running" ? "stop" : "start");
+              void onPowerAction(vm.id, primaryPowerAction);
             }}
             disabled={busy}
           >
-            {vm.status === "running" ? "Stop" : "Start"}
+            {primaryPowerLabel}
+          </button>
+          <button
+            className="menu-action"
+            type="button"
+            onClick={() => {
+              onToggleMenu(vm.id);
+              void onPowerAction(vm.id, "stop");
+            }}
+            disabled={busy || vm.status !== "running"}
+          >
+            Stop
           </button>
           <button
             className="menu-action"
@@ -538,10 +552,12 @@ export function VmTile({
             <StatusBadge status={vm.status}>{vm.status}</StatusBadge>
           </div>
 
-          <TelemetryPanel
-            activeCpuThresholdPercent={activeCpuThresholdPercent}
-            telemetry={vm.telemetry}
-          />
+          {vm.status === "running" ? (
+            <TelemetryPanel
+              activeCpuThresholdPercent={activeCpuThresholdPercent}
+              telemetry={vm.telemetry}
+            />
+          ) : null}
         </div>
       </button>
       {menu}

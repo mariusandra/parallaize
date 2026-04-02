@@ -159,7 +159,7 @@ export interface WorkspaceSidepanelProps {
   style?: CSSProperties;
   width: number;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (pointerClientX: number) => void;
   canKickBrowserStream: boolean;
   canReloadBrowserStream: boolean;
   canRepairDesktopBridge: boolean;
@@ -170,19 +170,22 @@ interface SidepanelResizeHandleProps {
   collapsed: boolean;
   onClosedResizeStart: (pointerClientX: number, handleCenterX: number) => void;
   onOpenCollapsed: () => void;
+  onToggleCollapsed: () => void;
   resizable: boolean;
   resizing: boolean;
   width: number;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (pointerClientX: number) => void;
 }
 
 interface RailResizeHandleProps {
+  collapsed: boolean;
   resizable: boolean;
   resizing: boolean;
   width: number;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizePointerDown: () => void;
+  onToggleCollapsed: () => void;
 }
 
 export interface OverviewSidepanelProps {
@@ -207,7 +210,7 @@ export interface OverviewSidepanelProps {
   style?: CSSProperties;
   width: number;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (pointerClientX: number) => void;
 }
 
 interface TemplateCardProps {
@@ -235,14 +238,73 @@ interface SnapshotCardProps {
 }
 
 export function RailResizeHandle({
+  collapsed,
   resizable,
   resizing,
   width,
   onResizeKeyDown,
   onResizePointerDown,
+  onToggleCollapsed,
 }: RailResizeHandleProps): JSX.Element | null {
   if (!resizable) {
     return null;
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    let completed = false;
+
+    function cleanup(): void {
+      window.removeEventListener("blur", handleBlur);
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", handlePointerUp);
+      document.removeEventListener("pointercancel", handlePointerCancel);
+    }
+
+    function handleBlur(): void {
+      cleanup();
+    }
+
+    function handlePointerMove(moveEvent: PointerEvent): void {
+      if (completed) {
+        return;
+      }
+
+      if (Math.hypot(moveEvent.clientX - startClientX, moveEvent.clientY - startClientY) < 4) {
+        return;
+      }
+
+      completed = true;
+      cleanup();
+      onResizePointerDown();
+    }
+
+    function handlePointerUp(): void {
+      if (completed) {
+        cleanup();
+        return;
+      }
+
+      completed = true;
+      cleanup();
+      onToggleCollapsed();
+    }
+
+    function handlePointerCancel(): void {
+      completed = true;
+      cleanup();
+    }
+
+    window.addEventListener("blur", handleBlur);
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", handlePointerUp);
+    document.addEventListener("pointercancel", handlePointerCancel);
   }
 
   return (
@@ -254,7 +316,7 @@ export function RailResizeHandle({
     >
       <div aria-hidden="true" className="workspace-rail__resize-line" />
       <div
-        aria-label="Resize workspace rail"
+        aria-label={collapsed ? "Open workspace rail" : "Resize workspace rail"}
         aria-orientation="vertical"
         aria-valuemax={railMaxWidth}
         aria-valuemin={railMinWidth}
@@ -266,7 +328,7 @@ export function RailResizeHandle({
         role="separator"
         tabIndex={0}
         onKeyDown={onResizeKeyDown}
-        onPointerDown={onResizePointerDown}
+        onPointerDown={handlePointerDown}
       />
     </div>
   );
@@ -276,6 +338,7 @@ function SidepanelResizeHandle({
   collapsed,
   onClosedResizeStart,
   onOpenCollapsed,
+  onToggleCollapsed,
   resizable,
   resizing,
   width,
@@ -287,11 +350,6 @@ function SidepanelResizeHandle({
   }
 
   function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>): void {
-    if (!collapsed) {
-      onResizePointerDown(event);
-      return;
-    }
-
     if (event.button !== 0) {
       return;
     }
@@ -319,15 +377,19 @@ function SidepanelResizeHandle({
         return;
       }
 
-      if (
-        Math.hypot(moveEvent.clientX - startClientX, moveEvent.clientY - startClientY) < 4
-      ) {
+      if (Math.hypot(moveEvent.clientX - startClientX, moveEvent.clientY - startClientY) < 4) {
         return;
       }
 
       completed = true;
       cleanup();
-      onClosedResizeStart(moveEvent.clientX, handleCenterX);
+
+      if (collapsed) {
+        onClosedResizeStart(moveEvent.clientX, handleCenterX);
+        return;
+      }
+
+      onResizePointerDown(moveEvent.clientX);
     }
 
     function handlePointerUp(): void {
@@ -338,7 +400,13 @@ function SidepanelResizeHandle({
 
       completed = true;
       cleanup();
-      onOpenCollapsed();
+
+      if (collapsed) {
+        onOpenCollapsed();
+        return;
+      }
+
+      onToggleCollapsed();
     }
 
     function handlePointerCancel(): void {
@@ -361,7 +429,7 @@ function SidepanelResizeHandle({
     >
       <div aria-hidden="true" className="workspace-sidepanel__resize-line" />
       <div
-        aria-label="Resize inspector"
+        aria-label={collapsed ? "Open inspector" : "Resize inspector"}
         aria-orientation="vertical"
         aria-valuemax={sidepanelMaxWidth}
         aria-valuemin={sidepanelClosedWidth}
@@ -490,6 +558,11 @@ export function WorkspaceSidepanel({
     detail?.vm.session?.kind === "selkies" || vm.desktopTransport === "selkies";
   const currentDesktopTransport =
     detail?.vm.desktopTransport ?? vm.desktopTransport ?? "vnc";
+  const runningJobs = detail?.recentJobs.filter((job) => job.status === "running") ?? [];
+  const recentActivityJobs = detail?.recentJobs.filter((job) => job.status !== "running") ?? [];
+  const requestedDiskGb = Number(resourceDraft.diskGb);
+  const diskResizePending =
+    Number.isFinite(requestedDiskGb) && requestedDiskGb !== vm.resources.diskGb;
 
   useEffect(() => {
     if (!detail || !filesSectionOpen || currentFileBrowser) {
@@ -533,6 +606,7 @@ export function WorkspaceSidepanel({
         collapsed={collapsed}
         onClosedResizeStart={onClosedResizeStart}
         onOpenCollapsed={onOpenCollapsed}
+        onToggleCollapsed={onToggleCollapsed}
         resizable={resizable}
         resizing={resizing}
         width={width}
@@ -596,17 +670,49 @@ export function WorkspaceSidepanel({
                   </div>
                 </section>
 
+                {runningJobs.length > 0 ? (
+                  <SidepanelSection title="Running now" defaultOpen>
+                    <div className="stack">
+                      {runningJobs.map((job) => (
+                        <div key={job.id} className="list-card list-card--active-job">
+                          <div className="list-card__head">
+                            <strong className="mono-font">{job.kind}</strong>
+                            <div className="chip-row">
+                              <span className="surface-pill surface-pill--busy">{job.status}</span>
+                              {job.progressPercent !== null && job.progressPercent !== undefined ? (
+                                <span className="surface-pill">{job.progressPercent}%</span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <p>{job.message}</p>
+                          <span className="list-card__timestamp">{formatTimestamp(job.updatedAt)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </SidepanelSection>
+                ) : null}
+
                 <SidepanelSection title="Actions" defaultOpen>
                   <div className="action-grid">
                     <button
                       className="button button--secondary"
                       type="button"
-                      onClick={() =>
-                        onPowerAction(vm.id, vm.status === "running" ? "stop" : "start")
-                      }
+                      onClick={() => void onPowerAction(vm.id, vm.status === "running" ? "pause" : "start")}
                       disabled={busy}
                     >
-                      {vm.status === "running" ? "Stop" : "Start"}
+                      {vm.status === "running"
+                        ? "Pause"
+                        : vm.status === "paused"
+                          ? "Resume"
+                          : "Start"}
+                    </button>
+                    <button
+                      className="button button--ghost"
+                      type="button"
+                      onClick={() => void onPowerAction(vm.id, "stop")}
+                      disabled={busy || vm.status !== "running"}
+                    >
+                      Stop
                     </button>
                     <button
                       className="button button--ghost"
@@ -688,12 +794,8 @@ export function WorkspaceSidepanel({
                   </SidepanelSection>
                 ) : null}
 
-                <SidepanelSection title="Session" defaultOpen>
+                <SidepanelSection title="Desktop layer" defaultOpen>
                   <div className="compact-grid">
-                    <FieldPair label="Resources" value={formatResources(vm.resources)} />
-                    <FieldPair label="Updated" value={formatTimestamp(vm.updatedAt)} />
-                    <FieldPair label="Workspace path" mono value={vm.workspacePath} />
-                    <FieldPair label="Last action" value={vm.lastAction} />
                     <FieldPair
                       label="Desktop transport"
                       value={formatDesktopTransportLabel(detail.vm)}
@@ -711,9 +813,9 @@ export function WorkspaceSidepanel({
                           ? (detail.vm.session.webSocketPath ?? "Waiting for VNC bridge")
                           : detail.vm.session?.kind === "guacamole"
                             ? (detail.vm.session.webSocketPath ?? "Waiting for Guacamole bridge")
-                          : detail.vm.session?.kind === "selkies"
-                            ? "Handled inside the Selkies page"
-                            : "Not applicable"
+                            : detail.vm.session?.kind === "selkies"
+                              ? "Handled inside the Selkies page"
+                              : "Not applicable"
                       }
                     />
                     <FieldPair
@@ -721,29 +823,14 @@ export function WorkspaceSidepanel({
                       mono
                       value={
                         detail.vm.session?.host && detail.vm.session?.port
-                          ? `${detail.vm.session.host}:${detail.vm.session.port}`
+                          ? detail.vm.session.host + ":" + detail.vm.session.port
                           : "Guest endpoint pending"
-                      }
-                    />
-                    <FieldPair
-                      label="Ready in"
-                      value={formatDesktopReadyMs(detail.vm.desktopReadyMs)}
-                    />
-                    <FieldPair
-                      label="Ready at"
-                      value={
-                        detail.vm.desktopReadyAt
-                          ? formatTimestamp(detail.vm.desktopReadyAt)
-                          : "Pending"
                       }
                     />
                   </div>
 
                   {canSwitchDesktopTransport ? (
                     <>
-                      <div className="field-shell" style={{ marginTop: "0.9rem" }}>
-                        <span>Desktop Layer</span>
-                      </div>
                       <p className="empty-copy">
                         {vm.status === "running"
                           ? "Switching replaces the running desktop bridge immediately."
@@ -753,13 +840,18 @@ export function WorkspaceSidepanel({
                         {desktopTransportChoices.map((choice) => (
                           <label
                             key={choice.value}
-                            className={`transport-choice ${currentDesktopTransport === choice.value ? "transport-choice--selected" : ""}`}
+                            className={
+                              "transport-choice " +
+                              (currentDesktopTransport === choice.value
+                                ? "transport-choice--selected"
+                                : "")
+                            }
                           >
                             <input
                               checked={currentDesktopTransport === choice.value}
                               className="transport-choice__input"
                               disabled={busy || sessionRecoveryBusy}
-                              name={`desktopTransport-${vm.id}`}
+                              name={"desktopTransport-" + vm.id}
                               onChange={() => void onSetDesktopTransport(vm, choice.value)}
                               type="radio"
                               value={choice.value}
@@ -773,6 +865,27 @@ export function WorkspaceSidepanel({
                       </div>
                     </>
                   ) : null}
+                </SidepanelSection>
+
+                <SidepanelSection title="Session" defaultOpen>
+                  <div className="compact-grid">
+                    <FieldPair label="Resources" value={formatResources(vm.resources)} />
+                    <FieldPair label="Updated" value={formatTimestamp(vm.updatedAt)} />
+                    <FieldPair label="Workspace path" mono value={vm.workspacePath} />
+                    <FieldPair label="Last action" value={vm.lastAction} />
+                    <FieldPair
+                      label="Ready in"
+                      value={formatDesktopReadyMs(detail.vm.desktopReadyMs)}
+                    />
+                    <FieldPair
+                      label="Ready at"
+                      value={
+                        detail.vm.desktopReadyAt
+                          ? formatTimestamp(detail.vm.desktopReadyAt)
+                          : "Pending"
+                      }
+                    />
+                  </div>
                 </SidepanelSection>
 
                 <SidepanelSection title="Viewport" defaultOpen>
@@ -1054,6 +1167,9 @@ export function WorkspaceSidepanel({
                     >
                       Save resources
                     </button>
+                    {diskResizePending ? (
+                      <p className="empty-copy">Restart the VM for the disk resize to take effect.</p>
+                    ) : null}
                   </form>
                 </SidepanelSection>
 
@@ -1600,8 +1716,8 @@ export function WorkspaceSidepanel({
 
                 <SidepanelSection title="Activity">
                   <div className="stack">
-                    {detail.recentJobs.length > 0 ? (
-                      detail.recentJobs.map((job) => (
+                    {recentActivityJobs.length > 0 ? (
+                      recentActivityJobs.map((job) => (
                         <div key={job.id} className="list-card">
                           <div className="list-card__head">
                             <strong className="mono-font">{job.kind}</strong>
@@ -1620,7 +1736,7 @@ export function WorkspaceSidepanel({
                         </div>
                       ))
                     ) : (
-                      <p className="empty-copy">No recent jobs for this VM.</p>
+                      <p className="empty-copy">No completed or queued jobs for this VM.</p>
                     )}
 
                     {detail.vm.activityLog.length > 0 ? (
@@ -1865,6 +1981,18 @@ function SnapshotCard({
         </div>
       </div>
 
+      <div className="chip-row">
+        <span
+          className={
+            snapshot.stateful
+              ? "surface-pill surface-pill--success"
+              : "surface-pill"
+          }
+        >
+          {snapshot.stateful ? "Includes RAM" : "Disk only"}
+        </span>
+      </div>
+
       <p>{snapshot.summary}</p>
     </div>
   );
@@ -1964,6 +2092,7 @@ export function OverviewSidepanel({
         collapsed={collapsed}
         onClosedResizeStart={onClosedResizeStart}
         onOpenCollapsed={onOpenCollapsed}
+        onToggleCollapsed={onToggleCollapsed}
         resizable={resizable}
         resizing={resizing}
         width={width}

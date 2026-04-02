@@ -1,6 +1,6 @@
 import type { ChangeEvent, FormEvent, JSX } from "react";
 
-import { formatResources, formatTimestamp } from "../../../packages/shared/src/helpers.js";
+import { formatRam, formatResources, formatTimestamp } from "../../../packages/shared/src/helpers.js";
 import type { EnvironmentTemplate, VmLogsSnapshot } from "../../../packages/shared/src/types.js";
 
 import type {
@@ -12,6 +12,12 @@ import type {
 } from "./dashboardHelpers.js";
 import { createSourceSupportsDesktopTransportChoice } from "./dashboardHelpers.js";
 import { desktopTransportChoiceLabel, desktopTransportChoices } from "./desktopTransportChoices.js";
+import {
+  liveCaptureWarningCopy,
+  liveCloneWarningCopy,
+  type CloneVmDialogState,
+  type SnapshotDialogState,
+} from "./dashboardShell.js";
 import { InlineWarningNote, NumberField } from "./dashboardPrimitives.js";
 import { VmLogOutput } from "./dashboardUi.js";
 
@@ -24,6 +30,8 @@ interface CreateVmDialogProps {
   onClose: () => void;
   onFieldChange: (field: keyof CreateDraft, value: string) => void;
   onShutdownBeforeCloneChange: (checked: boolean) => void;
+  onStatefulCloneChange: (checked: boolean) => void;
+  onRandomizeName: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSourceChange: (event: ChangeEvent<HTMLSelectElement>) => void;
 }
@@ -47,10 +55,11 @@ interface TemplateEditDialogProps {
 
 interface CloneVmDialogProps {
   busy: boolean;
+  dialog: CloneVmDialogState;
   draft: string;
-  sourceVmName: string;
   onClose: () => void;
   onDraftChange: (value: string) => void;
+  onStatefulChange: (checked: boolean) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
 }
 
@@ -64,6 +73,15 @@ interface RenameDialogProps {
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
 }
 
+interface SnapshotDialogProps {
+  busy: boolean;
+  dialog: SnapshotDialogState;
+  onClose: () => void;
+  onLabelChange: (value: string) => void;
+  onStatefulChange: (checked: boolean) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+}
+
 interface VmLogsDialogProps {
   error: string | null;
   loading: boolean;
@@ -72,6 +90,20 @@ interface VmLogsDialogProps {
   vmName: string;
   onClose: () => void;
   onRefresh: () => void;
+}
+
+function RefreshNameIcon(): JSX.Element {
+  return (
+    <svg aria-hidden="true" fill="none" viewBox="0 0 16 16">
+      <path
+        d="M12.75 5.75V3.5h-2.25M3.6 6.2A4.75 4.75 0 0 1 12.75 5.75M3.25 10.25v2.25H5.5m6.9-2.7A4.75 4.75 0 0 1 3.25 10.25"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.35"
+      />
+    </svg>
+  );
 }
 
 export function RenameDialog({
@@ -201,6 +233,120 @@ export function VmLogsDialog({
   );
 }
 
+export function SnapshotDialog({
+  busy,
+  dialog,
+  onClose,
+  onLabelChange,
+  onStatefulChange,
+  onSubmit,
+}: SnapshotDialogProps): JSX.Element {
+  const normalizedLabel = dialog.label.trim();
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onClick={() => {
+        if (!busy) {
+          onClose();
+        }
+      }}
+    >
+      <section
+        className="dialog-panel dialog-panel--snapshot"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-panel__header">
+          <div>
+            <p className="workspace-shell__eyebrow">Workspace snapshot</p>
+            <h2 className="dialog-panel__title">Capture {dialog.vmName}</h2>
+            <p className="dialog-panel__copy">
+              Save a restorable checkpoint now. Leave RAM enabled to resume apps,
+              terminals, and guest state exactly where they were.
+            </p>
+          </div>
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Close
+          </button>
+        </div>
+
+        <form className="dialog-panel__form" onSubmit={onSubmit}>
+          <div className="snapshot-dialog__hero">
+            <div className="snapshot-dialog__hero-copy">
+              <strong>{dialog.vmName}</strong>
+              <p>
+                {dialog.stateful
+                  ? `Restore will need at least ${formatRam(dialog.ramMb)} RAM to reload the saved memory image.`
+                  : "This will save the disk state only, so the workspace boots cleanly on restore."}
+              </p>
+            </div>
+            <div className="chip-row">
+              <span
+                className={
+                  dialog.stateful
+                    ? "surface-pill surface-pill--success"
+                    : "surface-pill"
+                }
+              >
+                {dialog.stateful ? "RAM included" : "Disk only"}
+              </span>
+              <span className="surface-pill">{dialog.vmStatus}</span>
+            </div>
+          </div>
+
+          <label className="field-shell">
+            <span>Label</span>
+            <input
+              className="field-input"
+              value={dialog.label}
+              onChange={(event) => onLabelChange(event.target.value)}
+              disabled={busy}
+              autoFocus
+            />
+          </label>
+
+          {dialog.canCaptureRam ? (
+            <InlineWarningNote title="Live capture">{liveCaptureWarningCopy}</InlineWarningNote>
+          ) : null}
+
+          <label
+            className={`snapshot-dialog__toggle ${dialog.stateful ? "snapshot-dialog__toggle--selected" : ""} ${dialog.canCaptureRam ? "" : "snapshot-dialog__toggle--disabled"}`}
+          >
+            <input
+              checked={dialog.stateful}
+              className="snapshot-dialog__toggle-input"
+              disabled={busy || !dialog.canCaptureRam}
+              onChange={(event) => onStatefulChange(event.target.checked)}
+              type="checkbox"
+            />
+            <div className="snapshot-dialog__toggle-copy">
+              <strong>Include RAM for pause/resume</strong>
+              <p>
+                {dialog.canCaptureRam
+                  ? `Recommended for running workspaces. This keeps open applications and session memory in ${formatRam(dialog.ramMb)} of saved state.`
+                  : "RAM capture is only available while the workspace is running. This snapshot will be disk-only."}
+              </p>
+            </div>
+          </label>
+
+          <button
+            className="button button--primary button--full"
+            type="submit"
+            disabled={busy || normalizedLabel.length === 0}
+          >
+            {dialog.stateful ? "Capture snapshot with RAM" : "Capture snapshot"}
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 export function CreateVmDialog({
   busy,
   createDraft,
@@ -210,24 +356,30 @@ export function CreateVmDialog({
   onClose,
   onFieldChange,
   onShutdownBeforeCloneChange,
+  onStatefulCloneChange,
+  onRandomizeName,
   onSubmit,
   onSourceChange,
 }: CreateVmDialogProps): JSX.Element {
   const snapshotSelected = selectedSource?.kind === "snapshot";
   const cloneVmSelected = selectedSource?.kind === "vm";
   const cloneSourceRunning = cloneVmSelected && selectedSource.sourceVm?.status === "running";
+  const cloneRamRequested = cloneSourceRunning && !createDraft.shutdownSourceBeforeClone && createDraft.statefulClone;
   const reuseExistingDiskState = snapshotSelected || cloneVmSelected;
   const desktopTransportChoiceVisible =
     createSourceSupportsDesktopTransportChoice(selectedSource);
   const lanAccessDisabled = createDraft.networkMode === "dmz";
   const sourceSummary =
     selectedSource?.kind === "snapshot" && selectedSource.snapshot
-      ? `Snapshot ${selectedSource.snapshot.label} from ${selectedSource.sourceVm?.name ?? selectedSource.template.name}.`
+      ? selectedSource.snapshot.stateful
+        ? `Snapshot ${selectedSource.snapshot.label} from ${selectedSource.sourceVm?.name ?? selectedSource.template.name}. Launching a new workspace starts from disk only; use restore on the original workspace to resume saved RAM.`
+        : `Snapshot ${selectedSource.snapshot.label} from ${selectedSource.sourceVm?.name ?? selectedSource.template.name}.`
       : selectedSource?.kind === "vm" && selectedSource.sourceVm
         ? `Clone the current workspace state from ${selectedSource.sourceVm.name}.`
         : selectedSource
           ? `Template ${selectedSource.template.name} will provision a fresh workspace.`
           : "Choose a template, snapshot, or existing VM to define the initial workspace state.";
+  const nameFieldId = "create-vm-name";
 
   return (
     <div className="dialog-backdrop" onClick={onClose}>
@@ -314,21 +466,55 @@ export function CreateVmDialog({
 
           {cloneSourceRunning && !createDraft.shutdownSourceBeforeClone ? (
             <InlineWarningNote title="Running clone source">
-              Some apps might have stale state and lockfiles when you clone a running VM. Shut it
-              down first if you need a cleaner copy.
+              {cloneRamRequested
+                ? liveCloneWarningCopy
+                : "Some apps might have stale state and lockfiles when you clone a running VM. Shut it down first if you need a cleaner copy."}
             </InlineWarningNote>
           ) : null}
 
-          <label className="field-shell">
-            <span>Name</span>
-            <input
-              className="field-input"
-              value={createDraft.name}
-              onChange={(event) => onFieldChange("name", event.target.value)}
-              placeholder="agent-lab-01"
-              disabled={busy}
-            />
-          </label>
+          {cloneSourceRunning ? (
+            <label className="snapshot-dialog__toggle">
+              <input
+                checked={cloneRamRequested}
+                className="snapshot-dialog__toggle-input"
+                disabled={busy || createDraft.shutdownSourceBeforeClone}
+                onChange={(event) => onStatefulCloneChange(event.target.checked)}
+                type="checkbox"
+              />
+              <div className="snapshot-dialog__toggle-copy">
+                <strong>Include RAM for instant resume</strong>
+                <p>
+                  {createDraft.shutdownSourceBeforeClone
+                    ? "Turn off shutdown-before-clone to carry open apps and in-memory state into the fork."
+                    : `Keep the live session from ${selectedSource?.sourceVm?.name ?? "the source VM"}, including open apps and ${formatRam(selectedSource?.sourceVm?.resources.ramMb ?? 0)} of saved memory state.`}
+                </p>
+              </div>
+            </label>
+          ) : null}
+
+          <div className="field-shell">
+            <label htmlFor={nameFieldId}>Name</label>
+            <div className="field-input-action">
+              <input
+                id={nameFieldId}
+                className="field-input field-input-action__input"
+                value={createDraft.name}
+                onChange={(event) => onFieldChange("name", event.target.value)}
+                placeholder="agent-lab-01"
+                disabled={busy}
+              />
+              <button
+                className="field-input-action__button"
+                type="button"
+                aria-label="Generate random VM"
+                title="Generate random VM"
+                disabled={busy}
+                onClick={onRandomizeName}
+              >
+                <RefreshNameIcon />
+              </button>
+            </div>
+          </div>
 
           <div className="compact-grid compact-grid--triple">
             <NumberField
@@ -594,10 +780,11 @@ export function TemplateEditDialog({
 
 export function CloneVmDialog({
   busy,
+  dialog,
   draft,
-  sourceVmName,
   onClose,
   onDraftChange,
+  onStatefulChange,
   onSubmit,
 }: CloneVmDialogProps): JSX.Element {
   const normalizedDraft = draft.trim();
@@ -615,9 +802,10 @@ export function CloneVmDialog({
         <div className="dialog-panel__header">
           <div>
             <p className="workspace-shell__eyebrow">Clone workspace</p>
-            <h2 className="dialog-panel__title">Clone {sourceVmName}</h2>
+            <h2 className="dialog-panel__title">Clone {dialog.sourceVmName}</h2>
             <p className="dialog-panel__copy">
               Create a new workspace from the current VM without leaving the dashboard UI.
+              Keep RAM enabled when you want the fork to resume open apps and terminals.
             </p>
           </div>
           <button
@@ -637,18 +825,40 @@ export function CloneVmDialog({
               className="field-input"
               value={draft}
               onChange={(event) => onDraftChange(event.target.value)}
-              placeholder={`${sourceVmName}-clone`}
+              placeholder={`${dialog.sourceVmName}-clone`}
               disabled={busy}
               autoFocus
             />
           </label>
+
+          <label className="snapshot-dialog__toggle">
+            <input
+              checked={dialog.stateful}
+              className="snapshot-dialog__toggle-input"
+              disabled={busy || !dialog.canCaptureRam}
+              onChange={(event) => onStatefulChange(event.target.checked)}
+              type="checkbox"
+            />
+            <div className="snapshot-dialog__toggle-copy">
+              <strong>Include RAM for instant resume</strong>
+              <p>
+                {dialog.canCaptureRam
+                  ? `Recommended for running workspaces. This carries open apps and ${formatRam(dialog.ramMb)} of saved memory state into the clone.`
+                  : "RAM cloning is only available while the source workspace is running. This clone will be disk-only."}
+              </p>
+            </div>
+          </label>
+
+          {dialog.stateful ? (
+            <InlineWarningNote title="Live RAM clone">{liveCloneWarningCopy}</InlineWarningNote>
+          ) : null}
 
           <button
             className="button button--primary button--full"
             type="submit"
             disabled={busy || normalizedDraft.length === 0}
           >
-            Queue clone
+            {dialog.stateful ? "Queue clone with RAM" : "Queue clone"}
           </button>
         </form>
       </section>

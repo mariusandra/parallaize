@@ -53,10 +53,17 @@ test("incus storage diagnostics warn when Parallaize targets a dir pool", () => 
   assert.equal(diagnostics.status, "warning");
   assert.equal(diagnostics.selectedPool, "default");
   assert.equal(diagnostics.selectedPoolDriver, "dir");
-  assert.match(diagnostics.detail, /slow path/i);
+  assert.match(diagnostics.detail, /single-file `lvm` pool/i);
   assert.ok(
     diagnostics.nextSteps.some((entry) =>
-      entry.includes("PARALLAIZE_INCUS_STORAGE_POOL"),
+      entry.includes("sudo incus storage create parallaize-lvm lvm size=200GiB lvm.use_thinpool=true"),
+    ),
+  );
+  assert.ok(
+    diagnostics.nextSteps.some((entry) =>
+      entry.includes("/etc/parallaize/parallaize.env") &&
+      entry.includes("PARALLAIZE_INCUS_STORAGE_POOL=parallaize-lvm") &&
+      entry.includes("sudo systemctl restart parallaize"),
     ),
   );
 });

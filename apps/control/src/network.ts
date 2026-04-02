@@ -172,6 +172,13 @@ export class VmNetworkBridge {
       return true;
     }
 
+    const selkiesMatch = matchSelkiesPath(url.pathname);
+
+    if (selkiesMatch) {
+      void this.handleRetriedSelkiesUpgrade(request, socket, head, url, selkiesMatch);
+      return true;
+    }
+
     let route: ResolvedProxyRoute | null;
 
     try {

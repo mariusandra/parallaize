@@ -6,6 +6,7 @@ import {
   CloneVmDialog,
   CreateVmDialog,
   RenameDialog,
+  SnapshotDialog,
   TemplateCloneDialog,
   TemplateEditDialog,
   VmLogsDialog,
@@ -21,6 +22,7 @@ import {
 import type {
   CloneVmDialogState,
   RenameDialogState,
+  SnapshotDialogState,
   VmLogsDialogState,
 } from "./dashboardShell.js";
 
@@ -33,25 +35,33 @@ interface DashboardDialogsHostProps {
   renameDialog: RenameDialogState | null;
   renameDraft: string;
   showCreateDialog: boolean;
+  snapshotDialog: SnapshotDialogState | null;
   summary: DashboardSummary;
   templateCloneDraft: TemplateCloneDraft | null;
   templateEditDraft: TemplateEditDraft | null;
   vmLogsDialog: VmLogsDialogState | null;
   onCloneDraftChange: (value: string) => void;
+  onCloneStatefulChange: (checked: boolean) => void;
   onCloseCloneVmDialog: () => void;
   onCloseCreateDialog: () => void;
   onCloseRenameDialog: () => void;
+  onCloseSnapshotDialog: () => void;
   onCloseTemplateCloneDialog: () => void;
   onCloseTemplateEditDialog: () => void;
   onCloseVmLogsDialog: () => void;
   onCloneVmSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onCreateFieldChange: (field: keyof CreateDraft, value: string) => void;
   onCreateShutdownBeforeCloneChange: (checked: boolean) => void;
+  onCreateStatefulCloneChange: (checked: boolean) => void;
+  onCreateRandomizeName: () => void;
   onCreateSourceChange: (event: React.ChangeEvent<HTMLSelectElement>) => void;
   onCreateSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onRefreshVmLogsDialog: () => void;
   onRenameDraftChange: (value: string) => void;
   onRenameSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  onSnapshotLabelChange: (value: string) => void;
+  onSnapshotStatefulChange: (checked: boolean) => void;
+  onSnapshotSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onTemplateCloneFieldChange: (
     field: keyof TemplateCloneDraft,
     value: string,
@@ -73,25 +83,33 @@ export function DashboardDialogsHost({
   renameDialog,
   renameDraft,
   showCreateDialog,
+  snapshotDialog,
   summary,
   templateCloneDraft,
   templateEditDraft,
   vmLogsDialog,
   onCloneDraftChange,
+  onCloneStatefulChange,
   onCloseCloneVmDialog,
   onCloseCreateDialog,
   onCloseRenameDialog,
+  onCloseSnapshotDialog,
   onCloseTemplateCloneDialog,
   onCloseTemplateEditDialog,
   onCloseVmLogsDialog,
   onCloneVmSubmit,
   onCreateFieldChange,
   onCreateShutdownBeforeCloneChange,
+  onCreateStatefulCloneChange,
+  onCreateRandomizeName,
   onCreateSourceChange,
   onCreateSubmit,
   onRefreshVmLogsDialog,
   onRenameDraftChange,
   onRenameSubmit,
+  onSnapshotLabelChange,
+  onSnapshotStatefulChange,
+  onSnapshotSubmit,
   onTemplateCloneFieldChange,
   onTemplateCloneSubmit,
   onTemplateEditFieldChange,
@@ -117,11 +135,17 @@ export function DashboardDialogsHost({
               summary.vms,
               createDraft.launchSource,
             ),
+            createDraft.ramGb,
             createDraft.diskGb,
+            {
+              statefulClone: createDraft.statefulClone,
+            },
           )}
           onClose={onCloseCreateDialog}
           onFieldChange={onCreateFieldChange}
           onShutdownBeforeCloneChange={onCreateShutdownBeforeCloneChange}
+          onStatefulCloneChange={onCreateStatefulCloneChange}
+          onRandomizeName={onCreateRandomizeName}
           onSubmit={onCreateSubmit}
           onSourceChange={onCreateSourceChange}
         />
@@ -150,10 +174,11 @@ export function DashboardDialogsHost({
       {cloneVmDialog ? (
         <CloneVmDialog
           busy={busy}
+          dialog={cloneVmDialog}
           draft={cloneVmDraft}
-          sourceVmName={cloneVmDialog.sourceVmName}
           onClose={onCloseCloneVmDialog}
           onDraftChange={onCloneDraftChange}
+          onStatefulChange={onCloneStatefulChange}
           onSubmit={onCloneVmSubmit}
         />
       ) : null}
@@ -166,6 +191,16 @@ export function DashboardDialogsHost({
           onClose={onCloseRenameDialog}
           onDraftChange={onRenameDraftChange}
           onSubmit={onRenameSubmit}
+        />
+      ) : null}
+      {snapshotDialog ? (
+        <SnapshotDialog
+          busy={busy}
+          dialog={snapshotDialog}
+          onClose={onCloseSnapshotDialog}
+          onLabelChange={onSnapshotLabelChange}
+          onStatefulChange={onSnapshotStatefulChange}
+          onSubmit={onSnapshotSubmit}
         />
       ) : null}
       {vmLogsDialog ? (

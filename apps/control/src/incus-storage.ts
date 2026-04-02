@@ -10,6 +10,11 @@ import type { AppConfig } from "./config.js";
 
 const STORAGE_PROBE_TIMEOUT_MS = 2_500;
 const STORAGE_BOOTSTRAP_TIMEOUT_MS = 15_000;
+const DIR_POOL_THIN_LVM_COMMAND =
+  "sudo incus storage create parallaize-lvm lvm size=200GiB lvm.use_thinpool=true";
+const DIR_POOL_THIN_LVM_ENV_FILE = "/etc/parallaize/parallaize.env";
+const DIR_POOL_THIN_LVM_ENV_LINE = "PARALLAIZE_INCUS_STORAGE_POOL=parallaize-lvm";
+const DIR_POOL_THIN_LVM_RESTART_COMMAND = "sudo systemctl restart parallaize";
 
 export interface ShellCommandRunner {
   execute(
@@ -89,7 +94,8 @@ export function collectIncusStorageDiagnostics(
         status: "warning",
         detail:
           `New VMs are landing on the Incus pool "${selectedPool}" with the ` +
-          "`dir` driver. That is the slow path for create, clone, and snapshot churn.",
+          "`dir` driver. Move new workspaces to a thin, single-file `lvm` pool so " +
+          "create, clone, and snapshot churn stop paying the `dir` penalty.",
         configuredPool,
         defaultProfilePool,
         selectedPool,
@@ -98,8 +104,8 @@ export function collectIncusStorageDiagnostics(
         selectedPoolLoopBacked,
         availablePools: availablePoolSummaries,
         nextSteps: [
-          "Create a faster Incus pool such as `zfs`, `lvm`, or native `btrfs` on the host.",
-          "Set `PARALLAIZE_INCUS_STORAGE_POOL=<pool-name>` and restart Parallaize so new VMs target it.",
+          `Run \`${DIR_POOL_THIN_LVM_COMMAND}\` on the host to create the thin, loop-backed LVM pool.`,
+          `Add \`${DIR_POOL_THIN_LVM_ENV_LINE}\` to \`${DIR_POOL_THIN_LVM_ENV_FILE}\`, then run \`${DIR_POOL_THIN_LVM_RESTART_COMMAND}\` so Parallaize starts targeting it.`,
           "Keep in mind that existing VMs stay on their current Incus pool until you migrate them separately.",
         ],
       };

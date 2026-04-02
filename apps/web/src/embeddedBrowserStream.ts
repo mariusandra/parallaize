@@ -3,7 +3,11 @@ export interface EmbeddedBrowserStreamState {
   status: string | null;
 }
 
-export type SelkiesStreamRecoveryCandidate = "failed" | "reconnecting" | "waiting";
+export type SelkiesStreamRecoveryCandidate =
+  | "failed"
+  | "reconnecting"
+  | "stalled"
+  | "waiting";
 
 export interface SelkiesStreamRecoveryState {
   candidateSinceMs: number;
@@ -42,6 +46,12 @@ interface EmbeddedBrowserStreamBridgeWindow extends Window {
     } | null;
     reset?: (() => void) | undefined;
   } | null;
+}
+
+interface EmbeddedBrowserElementOwnerWindow extends Window {
+  HTMLCanvasElement?: typeof HTMLCanvasElement;
+  HTMLImageElement?: typeof HTMLImageElement;
+  HTMLVideoElement?: typeof HTMLVideoElement;
 }
 
 const embeddedBrowserRecentLogWindow = 12;
@@ -194,15 +204,57 @@ function hasSuspiciousEmbeddedBrowserVideoState(
 }
 
 function isEmbeddedBrowserVideoElement(candidate: unknown): candidate is HTMLVideoElement {
-  return typeof HTMLVideoElement !== "undefined" && candidate instanceof HTMLVideoElement;
+  if (!candidate || typeof candidate !== "object") {
+    return false;
+  }
+
+  if (typeof HTMLVideoElement !== "undefined" && candidate instanceof HTMLVideoElement) {
+    return true;
+  }
+
+  const ownerWindow = (candidate as {
+    ownerDocument?: { defaultView?: EmbeddedBrowserElementOwnerWindow | null };
+  })
+    .ownerDocument?.defaultView;
+
+  return typeof ownerWindow?.HTMLVideoElement === "function" &&
+    candidate instanceof ownerWindow.HTMLVideoElement;
 }
 
 function isEmbeddedBrowserImageElement(candidate: unknown): candidate is HTMLImageElement {
-  return typeof HTMLImageElement !== "undefined" && candidate instanceof HTMLImageElement;
+  if (!candidate || typeof candidate !== "object") {
+    return false;
+  }
+
+  if (typeof HTMLImageElement !== "undefined" && candidate instanceof HTMLImageElement) {
+    return true;
+  }
+
+  const ownerWindow = (candidate as {
+    ownerDocument?: { defaultView?: EmbeddedBrowserElementOwnerWindow | null };
+  })
+    .ownerDocument?.defaultView;
+
+  return typeof ownerWindow?.HTMLImageElement === "function" &&
+    candidate instanceof ownerWindow.HTMLImageElement;
 }
 
 function isEmbeddedBrowserCanvasElement(candidate: unknown): candidate is HTMLCanvasElement {
-  return typeof HTMLCanvasElement !== "undefined" && candidate instanceof HTMLCanvasElement;
+  if (!candidate || typeof candidate !== "object") {
+    return false;
+  }
+
+  if (typeof HTMLCanvasElement !== "undefined" && candidate instanceof HTMLCanvasElement) {
+    return true;
+  }
+
+  const ownerWindow = (candidate as {
+    ownerDocument?: { defaultView?: EmbeddedBrowserElementOwnerWindow | null };
+  })
+    .ownerDocument?.defaultView;
+
+  return typeof ownerWindow?.HTMLCanvasElement === "function" &&
+    candidate instanceof ownerWindow.HTMLCanvasElement;
 }
 
 export function createSelkiesStreamRecoveryState(): SelkiesStreamRecoveryState {
@@ -221,7 +273,7 @@ export function updateSelkiesStreamRecoveryState(
   nowMs: number,
 ): SelkiesStreamRecoveryState {
   if (candidate === null) {
-    return current.kickCount > 0 && current.trackedCandidate !== null && state?.ready !== true
+    return current.trackedCandidate !== null && state?.ready !== true
       ? current
       : createSelkiesStreamRecoveryState();
   }
@@ -245,6 +297,49 @@ export function updateSelkiesStreamRecoveryState(
   return current;
 }
 
+export function resolveSelkiesStreamRecoveryCandidate(
+  state: EmbeddedBrowserStreamState | null,
+): SelkiesStreamRecoveryCandidate | null {
+  if (!state || state.ready) {
+    return null;
+  }
+
+  const normalizedStatus = state.status?.trim().toLowerCase() ?? "";
+
+  if (normalizedStatus.length === 0) {
+    return null;
+  }
+
+  if (
+    normalizedStatus.includes("connection failed") ||
+    normalizedStatus.includes("peer connection failed") ||
+    normalizedStatus.includes("server closed connection") ||
+    normalizedStatus.includes("error from server") ||
+    normalizedStatus === "failed" ||
+    normalizedStatus === "disconnected" ||
+    normalizedStatus === "closed"
+  ) {
+    return "failed";
+  }
+
+  if (normalizedStatus === "connected") {
+    return "stalled";
+  }
+
+  if (normalizedStatus.includes("waiting for stream")) {
+    return "waiting";
+  }
+
+  if (
+    normalizedStatus.includes("reconnecting stream") ||
+    normalizedStatus.includes("connection error, retrying")
+  ) {
+    return "reconnecting";
+  }
+
+  return null;
+}
+
 export function readEmbeddedBrowserStreamState(
   frame: HTMLIFrameElement | null,
 ): EmbeddedBrowserStreamState | null {
@@ -258,64 +353,110 @@ export function readEmbeddedBrowserStreamState(
   try {
     const target = frame.contentWindow as EmbeddedBrowserStreamBridgeWindow | null;
     const bridgedState = target?.parallaizeGetStreamState?.();
+    let bridgedReady = false;
+    let bridgedStatus: string | null = null;
+    let hasBridgedState = false;
 
     if (typeof bridgedState === "boolean") {
-      return {
-        ready: bridgedState,
-        status: null,
-      };
+      bridgedReady = bridgedState;
+      hasBridgedState = true;
     }
 
     if (bridgedState && typeof bridgedState === "object") {
-      const ready =
+      bridgedReady =
         "ready" in bridgedState && typeof bridgedState.ready === "boolean"
           ? bridgedState.ready
           : false;
-      const status =
+      bridgedStatus =
         "status" in bridgedState && typeof bridgedState.status === "string"
           ? bridgedState.status
           : null;
-
-      return {
-        ready,
-        status,
-      };
+      hasBridgedState = true;
     }
 
     const sourceDocument = frame.contentDocument ?? target?.document ?? null;
     const video = sourceDocument?.querySelector("video");
+    const resolvedStatus = resolveEmbeddedBrowserStatus(bridgedStatus, target);
+    const bridgedNotReady = hasBridgedState && !bridgedReady;
 
     if (isEmbeddedBrowserVideoElement(video)) {
+      const videoReady = hasRenderableEmbeddedBrowserVideo(video);
+
+      if (
+        hasSuspiciousEmbeddedBrowserVideoState(target, video, bridgedReady, bridgedStatus)
+      ) {
+        return {
+          ready: false,
+          status: resolvedStatus,
+        };
+      }
+
       return {
-        ready: hasRenderableEmbeddedBrowserVideo(video),
-        status: null,
+        ready: videoReady && !bridgedNotReady,
+        status: resolvedStatus,
       };
     }
 
     const image = sourceDocument?.querySelector("img");
 
     if (isEmbeddedBrowserImageElement(image)) {
+      const imageReady = image.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
+
       return {
-        ready: image.complete && image.naturalWidth > 0 && image.naturalHeight > 0,
-        status: null,
+        ready: imageReady && !bridgedNotReady,
+        status: resolvedStatus,
       };
     }
 
     const canvas = sourceDocument?.querySelector("canvas");
 
     if (isEmbeddedBrowserCanvasElement(canvas)) {
+      const canvasReady = canvas.width > 0 && canvas.height > 0;
+
       return {
-        ready: canvas.width > 0 && canvas.height > 0,
-        status: null,
+        ready: canvasReady && !bridgedNotReady,
+        status: resolvedStatus,
       };
     }
 
     return {
       ready: false,
-      status: null,
+      status: resolvedStatus,
     };
   } catch {
     return null;
+  }
+}
+
+export function hasEmbeddedBrowserRenderSurface(
+  frame: HTMLIFrameElement | null,
+): boolean {
+  if (!frame) {
+    return false;
+  }
+
+  try {
+    const target = frame.contentWindow as EmbeddedBrowserStreamBridgeWindow | null;
+    const sourceDocument = frame.contentDocument ?? target?.document ?? null;
+    const video = sourceDocument?.querySelector("video");
+
+    if (isEmbeddedBrowserVideoElement(video)) {
+      return hasRenderableEmbeddedBrowserVideo(video);
+    }
+
+    const image = sourceDocument?.querySelector("img");
+
+    if (isEmbeddedBrowserImageElement(image)) {
+      return image.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
+    }
+
+    const canvas = sourceDocument?.querySelector("canvas");
+
+    return isEmbeddedBrowserCanvasElement(canvas) &&
+      canvas.width > 0 &&
+      canvas.height > 0;
+  } catch {
+    return false;
   }
 }
 

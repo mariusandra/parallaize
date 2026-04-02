@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   createSelkiesStreamRecoveryState,
+  hasEmbeddedBrowserRenderSurface,
   kickEmbeddedBrowserStream,
   readEmbeddedBrowserStreamScale,
   readEmbeddedBrowserStreamState,
+  resolveSelkiesStreamRecoveryCandidate,
   setEmbeddedBrowserStreamScale,
   updateSelkiesStreamRecoveryState,
 } from "../apps/web/src/embeddedBrowserStream.js";
@@ -61,6 +63,70 @@ test("readEmbeddedBrowserStreamState reads the guest bridge payload", () => {
   });
 });
 
+test("readEmbeddedBrowserStreamState respects a bridged not-ready image stream", () => {
+  const frame = {
+    contentDocument: {
+      querySelector(selector: string) {
+        return selector === "img"
+          ? {
+              complete: true,
+              naturalHeight: 720,
+              naturalWidth: 1280,
+            }
+          : null;
+      },
+    },
+    contentWindow: {
+      parallaizeGetStreamState: () => ({
+        ready: false,
+        status: "Waiting for stream.",
+      }),
+    },
+  } as unknown as HTMLIFrameElement;
+
+  assert.deepEqual(readEmbeddedBrowserStreamState(frame), {
+    ready: false,
+    status: "Waiting for stream.",
+  });
+});
+
+test("hasEmbeddedBrowserRenderSurface detects a loaded iframe image", () => {
+  const originalHtmlImageElement = globalThis.HTMLImageElement;
+
+  class MockHtmlImageElement {}
+
+  Object.defineProperty(globalThis, "HTMLImageElement", {
+    configurable: true,
+    value: MockHtmlImageElement,
+  });
+
+  try {
+    const image = Object.assign(new MockHtmlImageElement(), {
+      complete: true,
+      naturalHeight: 720,
+      naturalWidth: 1280,
+    });
+    const frame = {
+      contentDocument: {
+        querySelector(selector: string) {
+          return selector === "img" ? image : null;
+        },
+      },
+    } as unknown as HTMLIFrameElement;
+
+    assert.equal(hasEmbeddedBrowserRenderSurface(frame), true);
+  } finally {
+    if (originalHtmlImageElement === undefined) {
+      delete (globalThis as { HTMLImageElement?: typeof HTMLImageElement }).HTMLImageElement;
+    } else {
+      Object.defineProperty(globalThis, "HTMLImageElement", {
+        configurable: true,
+        value: originalHtmlImageElement,
+      });
+    }
+  }
+});
+
 test("readEmbeddedBrowserStreamState rejects a false-connected placeholder video", () => {
   withMockVideoDom(
     () => ({
@@ -114,6 +180,71 @@ test("readEmbeddedBrowserStreamState rejects a false-connected placeholder video
       });
     },
   );
+});
+
+test("readEmbeddedBrowserStreamState does not trust a bridged ready state without a render surface", () => {
+  const frame = {
+    contentDocument: {
+      querySelector() {
+        return null;
+      },
+    },
+    contentWindow: {
+      app: {
+        loadingText: "",
+        status: "connected",
+      },
+      parallaizeGetStreamState: () => ({
+        ready: true,
+        status: "connected",
+      }),
+    },
+  } as unknown as HTMLIFrameElement;
+
+  assert.deepEqual(readEmbeddedBrowserStreamState(frame), {
+    ready: false,
+    status: "connected",
+  });
+});
+
+test("readEmbeddedBrowserStreamState accepts iframe-owned video elements", () => {
+  class MockFrameVideoElement {}
+
+  const video = Object.assign(new MockFrameVideoElement(), {
+    currentTime: 2,
+    ended: false,
+    ownerDocument: {
+      defaultView: {
+        HTMLVideoElement: MockFrameVideoElement,
+      },
+    },
+    paused: false,
+    readyState: 4,
+    videoHeight: 720,
+    videoWidth: 1280,
+  });
+  const frame = {
+    contentDocument: {
+      querySelector(selector: string) {
+        return selector === "video" ? video : null;
+      },
+    },
+    contentWindow: {
+      app: {
+        loadingText: "",
+        status: "connected",
+      },
+      parallaizeGetStreamState: () => ({
+        ready: true,
+        status: "connected",
+      }),
+    },
+  } as unknown as HTMLIFrameElement;
+
+  assert.deepEqual(readEmbeddedBrowserStreamState(frame), {
+    ready: true,
+    status: "connected",
+  });
 });
 
 test("kickEmbeddedBrowserStream prefers the explicit guest kick bridge", () => {
@@ -275,6 +406,16 @@ test("Selkies recovery state survives a kicked reconnecting phase", () => {
     lastRecoveryAttemptMs: 13_000,
     trackedCandidate: "reconnecting",
   });
+});
+
+test("resolveSelkiesStreamRecoveryCandidate escalates a connected but blank stream", () => {
+  assert.equal(
+    resolveSelkiesStreamRecoveryCandidate({
+      ready: false,
+      status: "connected",
+    }),
+    "stalled",
+  );
 });
 
 test("Selkies recovery state keeps a reconnecting candidate through a blank spinner phase", () => {

@@ -26,6 +26,12 @@ import type {
   VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
 import {
+  vmNameAdjectives,
+  vmNameAnimals,
+  type VmNameAdjective,
+  type VmNameAnimal,
+} from "../../../packages/shared/src/vm-name-words.js";
+import {
   hasBrowserDesktopSession,
 } from "./desktopSession.js";
 import { buildRandomVmName } from "./vmNames.js";
@@ -47,6 +53,7 @@ export interface CreateDraft {
   desktopTransport: VmDesktopTransport;
   networkMode: VmNetworkMode;
   initCommands: string;
+  statefulClone: boolean;
   shutdownSourceBeforeClone: boolean;
 }
 
@@ -94,6 +101,49 @@ export interface DesktopBootState {
 }
 
 export const activeCpuThresholdDefault = 2;
+export const defaultHomepageWallpaperName = "angry-puffin";
+export const homepageWallpaperAdjectives = vmNameAdjectives;
+export const homepageWallpaperAnimals = vmNameAnimals;
+
+export interface WallpaperSelection {
+  adjective: VmNameAdjective;
+  animal: VmNameAnimal;
+  wallpaperName: string;
+}
+
+export function buildWallpaperNameFromParts(
+  adjective: VmNameAdjective,
+  animal: VmNameAnimal,
+): string {
+  return `${adjective}-${animal}`;
+}
+
+export function resolveWallpaperSelection(
+  wallpaperName: string | null | undefined,
+): WallpaperSelection {
+  const [rawAdjective = "", ...rest] = (wallpaperName ?? "").trim().split("-");
+  const rawAnimal = rest.join("-");
+  const adjective = vmNameAdjectives.find((entry) => entry === rawAdjective);
+  const animal = vmNameAnimals.find((entry) => entry === rawAnimal);
+
+  if (!adjective || !animal) {
+    return {
+      adjective: "angry",
+      animal: "puffin",
+      wallpaperName: defaultHomepageWallpaperName,
+    };
+  }
+
+  return {
+    adjective,
+    animal,
+    wallpaperName: buildWallpaperNameFromParts(adjective, animal),
+  };
+}
+
+export function buildWallpaperUrl(wallpaperName: string): string {
+  return `https://wallpapers.parallaize.com/24.04/${wallpaperName}.jpg`;
+}
 
 export function syncCreateDraft(
   current: CreateDraft,
@@ -265,12 +315,17 @@ export function resolveCreateSourceSelection(
 
 export function buildCreateLaunchValidationError(
   source: CreateSourceSelection | null,
+  ramGbInput: string,
   diskGbInput: string,
+  options?: {
+    statefulClone?: boolean;
+  },
 ): string | null {
   if (!source) {
     return null;
   }
 
+  const requestedRamMb = parseRamDraftValue(ramGbInput);
   const requestedDiskGb = Number(diskGbInput);
 
   if (!Number.isFinite(requestedDiskGb)) {
@@ -290,6 +345,14 @@ export function buildCreateLaunchValidationError(
 
     if (requestedDiskGb < minimumVmDiskGb) {
       return `${source.sourceVm.name} needs at least ${minimumVmDiskGb} GB disk because shrinking a cloned filesystem is not supported.`;
+    }
+
+    if (
+      options?.statefulClone &&
+      Number.isFinite(requestedRamMb) &&
+      requestedRamMb < source.sourceVm.resources.ramMb
+    ) {
+      return `${source.sourceVm.name} needs at least ${source.sourceVm.resources.ramMb} MB RAM for a clone that includes saved memory state.`;
     }
   }
 
@@ -941,6 +1004,7 @@ export function buildCreateDraftFromTemplate(
     desktopTransport: normalizeTemplateDesktopTransport(template.defaultDesktopTransport),
     networkMode: template.defaultNetworkMode ?? "default",
     initCommands: formatInitCommandsDraft(template.initCommands),
+    statefulClone: false,
     shutdownSourceBeforeClone: false,
   };
 }
@@ -964,6 +1028,7 @@ export function buildCreateDraftFromSnapshot(
     desktopTransport: resolveCreateDraftDesktopTransport(template, sourceVm),
     networkMode: normalizeVmNetworkMode(sourceVm?.networkMode ?? template.defaultNetworkMode),
     initCommands: "",
+    statefulClone: false,
     shutdownSourceBeforeClone: false,
   };
 }
@@ -986,6 +1051,7 @@ export function buildCreateDraftFromVm(
     desktopTransport: resolveCreateDraftDesktopTransport(template, sourceVm),
     networkMode: normalizeVmNetworkMode(sourceVm.networkMode ?? template.defaultNetworkMode),
     initCommands: "",
+    statefulClone: false,
     shutdownSourceBeforeClone: sourceVm.status === "running",
   };
 }

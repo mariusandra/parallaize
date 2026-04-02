@@ -1,4 +1,4 @@
-import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, RefObject, JSX } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, RefObject, JSX } from "react";
 
 import type { DashboardSummary, VmInstance, VmPowerAction } from "../../../packages/shared/src/types.js";
 
@@ -43,7 +43,8 @@ interface DashboardWorkspaceRailProps {
   onInspectVm: (vmId: string) => void;
   onRename: (vm: VmInstance) => Promise<void>;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizePointerDown: () => void;
+  onToggleCompactRail: () => void;
   onSelectVm: (vmId: string) => void;
   onSetActiveCpuThreshold: (vm: VmInstance) => void;
   onSnapshot: (vm: VmInstance) => Promise<void>;
@@ -117,6 +118,7 @@ export function DashboardWorkspaceRail({
   onRename,
   onResizeKeyDown,
   onResizePointerDown,
+  onToggleCompactRail,
   onSelectVm,
   onSetActiveCpuThreshold,
   onSnapshot,
@@ -148,11 +150,13 @@ export function DashboardWorkspaceRail({
       )}
     >
       <RailResizeHandle
+        collapsed={compactRail}
         resizable={wideShellLayout}
         resizing={railResizeActive}
         width={railWidth}
         onResizeKeyDown={onResizeKeyDown}
         onResizePointerDown={onResizePointerDown}
+        onToggleCollapsed={onToggleCompactRail}
       />
 
       <div className="workspace-rail__header">
