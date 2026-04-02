@@ -24,9 +24,11 @@ import {
   type CaptureTemplateProgressReporter,
   type CaptureTemplateTarget,
   type DesktopProvider,
+  type ProviderCloneOptions,
   type ProviderMutation,
   type ProviderProgressReporter,
   type ProviderSnapshot,
+  type ProviderSnapshotOptions,
   type ProviderTelemetrySample,
   type ProviderTick,
   type ProviderVmPowerState,
@@ -78,7 +80,7 @@ export class MockProvider implements DesktopProvider {
   }
 
   observeVmPowerState(vm: VmInstance): ProviderVmPowerState | null {
-    if (vm.status === "running" || vm.status === "stopped") {
+    if (vm.status === "running" || vm.status === "paused" || vm.status === "stopped") {
       return {
         status: vm.status,
       };
@@ -128,6 +130,7 @@ export class MockProvider implements DesktopProvider {
     targetVm: VmInstance,
     template: EnvironmentTemplate,
     report?: ProviderProgressReporter,
+    options?: ProviderCloneOptions,
   ): Promise<ProviderMutation> {
     report?.("Cloning disks", VM_CLONE_COPY_START_PERCENT);
     await sleep(40);
@@ -139,6 +142,7 @@ export class MockProvider implements DesktopProvider {
       lastAction: `Cloned from ${vm.name}`,
       activity: [
         `clone: copied disks and metadata from ${vm.name}`,
+        ...(options?.stateful ? ["state: resumed source RAM from the running clone"] : []),
         `template: ${template.name}`,
         `network: ${describeVmNetworkMode(targetVm.networkMode)}`,
         `workspace: /srv/workspaces/${slugify(targetVm.name)}`,
@@ -158,6 +162,18 @@ export class MockProvider implements DesktopProvider {
       ],
       activeWindow: "terminal",
       session: this.buildSession(vm.id),
+    };
+  }
+
+  async pauseVm(vm: VmInstance): Promise<ProviderMutation> {
+    return {
+      lastAction: "Workspace paused",
+      activity: [
+        "pause: VM memory checkpointed to disk",
+        "session: desktop state frozen for resume",
+      ],
+      activeWindow: "logs",
+      session: null,
     };
   }
 
@@ -223,10 +239,19 @@ export class MockProvider implements DesktopProvider {
     void height;
   }
 
-  async snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot> {
+  async snapshotVm(
+    vm: VmInstance,
+    label: string,
+    options?: ProviderSnapshotOptions,
+  ): Promise<ProviderSnapshot> {
+    const stateful = options?.stateful === true;
+
     return {
       providerRef: `mock://snapshots/${slugify(vm.name)}-${slugify(label)}`,
-      summary: `Snapshot ${label} captured from ${vm.name}.`,
+      summary: stateful
+        ? `Stateful snapshot ${label} captured from ${vm.name}.`
+        : `Snapshot ${label} captured from ${vm.name}.`,
+      stateful,
     };
   }
 
@@ -286,6 +311,7 @@ export class MockProvider implements DesktopProvider {
     return {
       providerRef: `mock://snapshots/${target.templateId}`,
       summary: `Template ${target.name} captured from ${vm.name}.`,
+      stateful: false,
       launchSource: `mock://templates/${slugify(target.name)}`,
     };
   }

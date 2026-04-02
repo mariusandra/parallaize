@@ -141,6 +141,12 @@ export function formatMemoryLimit(ramMb: number): string {
   return `${ramMb}MiB`;
 }
 
+export function formatStateVolumeSize(ramMb: number): string {
+  const minimumHeadroomMb = 512;
+  const targetMb = Math.max(ramMb + minimumHeadroomMb, Math.ceil(ramMb * 1.1));
+  return `${targetMb}MiB`;
+}
+
 export function formatDiskSize(diskGb: number): string {
   return `${diskGb}GiB`;
 }

@@ -215,7 +215,15 @@ function normalizeVm(vm: LegacyVm): VmInstance {
     templateId: vm.templateId ?? "tpl-missing",
     provider,
     providerRef: vm.providerRef ?? buildProviderRef(vm.id ?? "vm-missing", name),
-    status: vm.status ?? "stopped",
+    status:
+      vm.status === "running" ||
+      vm.status === "paused" ||
+      vm.status === "stopped" ||
+      vm.status === "creating" ||
+      vm.status === "deleting" ||
+      vm.status === "error"
+        ? vm.status
+        : "stopped",
     resources: {
       cpu: vm.resources?.cpu ?? 4,
       ramMb: vm.resources?.ramMb ?? 8192,
@@ -260,6 +268,7 @@ function normalizeSnapshot(snapshot: LegacySnapshot): Snapshot | null {
     label: snapshot.label ?? "Recovered snapshot",
     summary: snapshot.summary ?? "Recovered from persisted state.",
     providerRef: snapshot.providerRef ?? "unknown",
+    stateful: snapshot.stateful === true,
     resources: {
       cpu: snapshot.resources?.cpu ?? 4,
       ramMb: snapshot.resources?.ramMb ?? 8192,

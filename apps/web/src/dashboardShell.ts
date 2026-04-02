@@ -2,6 +2,7 @@ import type {
   SetVmResolutionInput,
   VmSessionKind,
   VmLogsSnapshot,
+  VmStatus,
 } from "../../../packages/shared/src/types.js";
 
 import type { ViewportBounds } from "./desktopResolution.js";
@@ -117,9 +118,27 @@ export interface VmLogsViewState {
 }
 
 export interface CloneVmDialogState {
+  canCaptureRam: boolean;
+  ramMb: number;
   sourceVmId: string;
   sourceVmName: string;
+  sourceVmStatus: VmStatus;
+  stateful: boolean;
   wallpaperName: string;
+}
+
+export interface SnapshotDialogState {
+  canCaptureRam: boolean;
+  label: string;
+  ramMb: number;
+  stateful: boolean;
+  vmId: string;
+  vmName: string;
+  vmStatus: VmStatus;
+}
+
+export function buildDefaultSnapshotLabel(date = new Date()): string {
+  return `snapshot-${date.toISOString().slice(0, 16)}`;
 }
 
 export const quickCommands = ["pwd", "ls -la", "pnpm build", "pnpm test", "incus list"];
@@ -135,6 +154,8 @@ export const desktopViewportScaleMax = 3;
 export const desktopViewportScaleStep = 0.25;
 export const liveCaptureWarningCopy =
   "This is fine, but you might capture inconsistent state or leave lockfiles open. Shut the VM down first if you need a clean checkpoint.";
+export const liveCloneWarningCopy =
+  "This carries open apps and in-memory edits into the fork. Turn RAM off or shut the source down first if you need a colder copy.";
 export const desktopFixedWidthDefault = 1280;
 export const desktopFixedHeightDefault = 800;
 export const desktopFixedWidthMin = 640;

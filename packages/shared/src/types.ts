@@ -14,6 +14,7 @@ export type IncusStorageStatus = "ready" | "warning" | "unavailable";
 export type VmStatus =
   | "creating"
   | "running"
+  | "paused"
   | "stopped"
   | "deleting"
   | "error";
@@ -23,7 +24,7 @@ export type VmWindow = "editor" | "terminal" | "browser" | "logs";
 export type VmDesktopTransport = "vnc" | "selkies" | "guacamole";
 export type VmSessionKind = "synthetic" | "vnc" | "selkies" | "guacamole";
 export type VmForwardProtocol = "http";
-export type VmPowerAction = "start" | "stop" | "restart";
+export type VmPowerAction = "start" | "pause" | "stop" | "restart";
 export type VmNetworkMode = "default" | "dmz";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
@@ -187,6 +188,7 @@ export interface Snapshot {
   label: string;
   summary: string;
   providerRef: string;
+  stateful: boolean;
   resources: ResourceSpec;
   createdAt: string;
 }
@@ -386,6 +388,7 @@ export interface CloneVmInput {
   resources?: ResourceSpec;
   networkMode?: VmNetworkMode;
   shutdownSourceBeforeClone?: boolean;
+  stateful?: boolean;
 }
 
 export interface ResizeVmInput {
@@ -415,6 +418,7 @@ export interface VmResolutionControlSnapshot {
 
 export interface SnapshotInput {
   label?: string;
+  stateful?: boolean;
 }
 
 export interface SnapshotLaunchInput {

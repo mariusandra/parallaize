@@ -308,7 +308,7 @@ export async function handleVmRoute({
   }
 
   const actionMatch = url.pathname.match(
-    /^\/api\/vms\/([^/]+)\/(clone|start|stop|restart|delete|snapshot|resize|template|input)$/,
+    /^\/api\/vms\/([^/]+)\/(clone|start|pause|stop|restart|delete|snapshot|resize|template|input)$/,
   );
   if (method === "POST" && actionMatch) {
     const vmId = actionMatch[1];
@@ -325,12 +325,17 @@ export async function handleVmRoute({
             resources: payload.resources,
             networkMode: payload.networkMode,
             shutdownSourceBeforeClone: payload.shutdownSourceBeforeClone,
+            stateful: payload.stateful,
           }),
         });
         return true;
       }
       case "start":
         manager.startVm(vmId);
+        writeAccepted(response);
+        return true;
+      case "pause":
+        manager.pauseVm(vmId);
         writeAccepted(response);
         return true;
       case "stop":

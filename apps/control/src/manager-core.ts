@@ -193,6 +193,7 @@ export function buildSnapshot(
   label: string,
   providerRef: string,
   summary: string,
+  stateful: boolean,
   templateId = vm.templateId,
 ): Snapshot {
   return {
@@ -202,6 +203,7 @@ export function buildSnapshot(
     label,
     summary,
     providerRef,
+    stateful,
     resources: { ...vm.resources },
     createdAt: nowIso(),
   };
@@ -342,6 +344,20 @@ export function markVmStoppedOutsideControlPlane(vm: VmInstance): void {
   appendActivity(
     vm,
     `${vm.provider}: detected ${vm.providerRef} stopped outside the dashboard`,
+  );
+}
+
+export function markVmPausedOutsideControlPlane(vm: VmInstance): void {
+  vm.status = "paused";
+  vm.liveSince = null;
+  vm.lastAction = "Workspace paused";
+  vm.updatedAt = nowIso();
+  vm.frameRevision += 1;
+  vm.activeWindow = "logs";
+  vm.session = null;
+  appendActivity(
+    vm,
+    `${vm.provider}: detected ${vm.providerRef} paused outside the dashboard`,
   );
 }
 
@@ -696,13 +712,33 @@ export function validateSnapshotCreateResources(
   }
 }
 
+export function validateSnapshotRestoreResources(
+  vm: VmInstance,
+  snapshot: Snapshot,
+): void {
+  if (snapshot.stateful && vm.resources.ramMb < snapshot.resources.ramMb) {
+    throw new Error(
+      `${vm.name} needs at least ${snapshot.resources.ramMb} MB RAM to restore stateful snapshot ${snapshot.label}.`,
+    );
+  }
+}
+
 export function validateVmCloneResources(
   sourceVm: VmInstance,
   resources: CreateVmInput["resources"],
+  options?: {
+    stateful?: boolean;
+  },
 ): void {
   if (resources.diskGb < sourceVm.resources.diskGb) {
     throw new Error(
       `VM ${sourceVm.name} needs at least ${sourceVm.resources.diskGb} GB disk because shrinking a cloned filesystem is not supported.`,
+    );
+  }
+
+  if (options?.stateful && resources.ramMb < sourceVm.resources.ramMb) {
+    throw new Error(
+      `VM ${sourceVm.name} needs at least ${sourceVm.resources.ramMb} MB RAM for a clone that includes saved memory state.`,
     );
   }
 }

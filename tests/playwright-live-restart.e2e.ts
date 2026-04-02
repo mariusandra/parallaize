@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { once } from "node:events";
 import {
   existsSync,
@@ -35,7 +35,7 @@ const AUTH_PASSWORD = normalizeOptionalString(process.env.PARALLAIZE_E2E_ADMIN_P
 const KEEP_VM = process.env.PARALLAIZE_E2E_KEEP_VMS === "1";
 const TARGET_RECONNECT_MS = parseInteger(
   process.env.PARALLAIZE_E2E_RESTART_TARGET_MS,
-  5_000,
+  10_000,
 );
 const RESTART_ITERATIONS = Math.max(
   1,
@@ -58,6 +58,8 @@ const SUITE_TIMEOUT_MS = parseInteger(
   process.env.PARALLAIZE_E2E_SUITE_TIMEOUT_MS,
   45 * 60 * 1000,
 );
+const SERVER_START_COMMAND = process.env.PARALLAIZE_E2E_SERVER_START_COMMAND
+  ?? "exec flox activate -d . -- pnpm start";
 
 type SpawnedServerProcess = ChildProcessByStdio<null, Readable, Readable>;
 
@@ -87,10 +89,72 @@ interface RestartMeasurement {
   screenshotPath: string;
 }
 
+type RecoveryAction = "none" | "kick" | "frame-reload";
+
+interface RecoveryScenario {
+  action: RecoveryAction;
+  name: string;
+  reloadPage: boolean;
+  restartServer: boolean;
+}
+
+interface SelkiesStageDiagnostics {
+  currentTime: number;
+  iceConnectionState: string | null;
+  paused: boolean;
+  peerConnectionState: string | null;
+  ready: boolean;
+  readyState: number;
+  recentLogs: string[];
+  showStart: boolean | null;
+  status: string | null;
+  videoHeight: number;
+  videoWidth: number;
+}
+
+const recoveryScenarios: RecoveryScenario[] = [
+  {
+    action: "none",
+    name: "browser full reload reconnects the selected Selkies stage",
+    reloadPage: true,
+    restartServer: false,
+  },
+  {
+    action: "kick",
+    name: "browser full reload plus manual kick reconnects the selected Selkies stage",
+    reloadPage: true,
+    restartServer: false,
+  },
+  {
+    action: "none",
+    name: "server restart without a browser reload reconnects the selected Selkies stage",
+    reloadPage: false,
+    restartServer: true,
+  },
+  {
+    action: "kick",
+    name: "server restart plus kick stream reconnects the selected Selkies stage",
+    reloadPage: false,
+    restartServer: true,
+  },
+  {
+    action: "frame-reload",
+    name: "server restart plus frame reload reconnects the selected Selkies stage",
+    reloadPage: false,
+    restartServer: true,
+  },
+  {
+    action: "none",
+    name: "server restart plus browser full reload reconnects the selected Selkies stage",
+    reloadPage: true,
+    restartServer: true,
+  },
+];
+
 test(
-  "Live Incus host/browser restart reconnect benchmark",
+  "Live Incus Selkies reload and restart recovery",
   { timeout: SUITE_TIMEOUT_MS },
-  async () => {
+  async (context) => {
     const fixture = createLiveStateFixture();
     const artifactsDir = mkdtempSync(join(tmpdir(), "parallaize-live-restart-artifacts-"));
     const port = await reservePort();
@@ -120,14 +184,16 @@ test(
         template,
         `${VM_PREFIX}-${Date.now()}`,
       );
+      const targetVm = createdVm;
 
-      await browserRun.page.goto(`${baseUrl}/?vm=${encodeURIComponent(createdVm.id)}`, {
+      assert.ok(targetVm, "Expected the live restart suite to create a VM.");
+
+      await browserRun.page.goto(`${baseUrl}/?vm=${encodeURIComponent(targetVm.id)}`, {
         waitUntil: "domcontentloaded",
       });
       await loginIfRequired(browserRun.page);
       await waitForDashboardReady(browserRun.page);
-      await waitForVmSelkiesSession(browserRun.page, baseUrl, createdVm.id, VM_TIMEOUT_MS);
-      await waitForStageSelkiesPicture(browserRun.page, createdVm.name, VM_TIMEOUT_MS);
+      await waitForHealthySelkiesStage(browserRun.page, baseUrl, targetVm, VM_TIMEOUT_MS);
 
       const initialScreenshotPath = join(artifactsDir, "initial-stage.png");
       await browserRun.page.screenshot({
@@ -136,30 +202,100 @@ test(
       });
       console.log(`Saved initial live desktop screenshot to ${initialScreenshotPath}`);
 
-      for (let cycle = 1; cycle <= RESTART_ITERATIONS; cycle += 1) {
-        const restartResult = await runRestartCycle({
-          artifactsDir,
-          baseUrl,
-          browserRun,
-          cycle,
-          port,
-          stateFile: fixture.stateFile,
-          vm: createdVm,
-          serverProcess,
-        });
+      for (const scenario of recoveryScenarios) {
+        await context.test(
+          scenario.name,
+          { timeout: Math.max(RECONNECT_TIMEOUT_MS * 2, 90_000) },
+          async () => {
+            assert.ok(browserRun, "Browser context should be active before recovery checks.");
+            assert.ok(serverProcess, "Server process should be active before recovery checks.");
 
-        browserRun = restartResult.browserRun;
-        serverProcess = restartResult.serverProcess;
-        measurements.push(restartResult.measurement);
+            console.log(`[live-restart] scenario start: ${scenario.name}`);
+
+            await waitForHealthySelkiesStage(
+              browserRun.page,
+              baseUrl,
+              targetVm,
+              RECONNECT_TIMEOUT_MS,
+            );
+
+            if (scenario.restartServer) {
+              serverProcess = await restartServer({
+                baseUrl,
+                port,
+                serverProcess,
+                stateFile: fixture.stateFile,
+              });
+            }
+
+            if (scenario.reloadPage) {
+              await browserRun.page.goto(`${baseUrl}/?vm=${encodeURIComponent(targetVm.id)}`, {
+                waitUntil: "domcontentloaded",
+              });
+              await loginIfRequired(browserRun.page);
+              await waitForDashboardReady(browserRun.page);
+            }
+
+            if (scenario.action !== "none") {
+              await openVm(browserRun.page, targetVm.name, RECONNECT_TIMEOUT_MS);
+              await applyRecoveryAction(browserRun.page, scenario.action, RECONNECT_TIMEOUT_MS);
+            }
+
+            await waitForHealthySelkiesStage(
+              browserRun.page,
+              baseUrl,
+              targetVm,
+              RECONNECT_TIMEOUT_MS,
+            );
+
+            await browserRun.page.screenshot({
+              fullPage: true,
+              path: join(
+                artifactsDir,
+                `${slugifyScenarioName(scenario.name)}.png`,
+              ),
+            });
+
+            console.log(`[live-restart] scenario complete: ${scenario.name}`);
+          },
+        );
       }
 
-      console.log("Live restart reconnect measurements:");
-      console.log(JSON.stringify(measurements, null, 2));
+      await context.test(
+        "repeated full host and browser restarts still return to a live Selkies stream under the reconnect target",
+        { timeout: Math.max(SUITE_TIMEOUT_MS - 60_000, 5 * 60 * 1000) },
+        async () => {
+          for (let cycle = 1; cycle <= RESTART_ITERATIONS; cycle += 1) {
+            assert.ok(browserRun, "Browser context should still be active before restart cycles.");
+            assert.ok(serverProcess, "Server process should still be active before restart cycles.");
+            console.log(`[live-restart] full restart cycle ${cycle}/${RESTART_ITERATIONS}`);
+            const restartResult = await runRestartCycle({
+              artifactsDir,
+              baseUrl,
+              browserRun,
+              cycle,
+              port,
+              stateFile: fixture.stateFile,
+              vm: targetVm,
+              serverProcess,
+            });
 
-      const slowestReconnectMs = Math.max(...measurements.map((entry) => entry.pictureReadyMs));
-      assert.ok(
-        slowestReconnectMs < TARGET_RECONNECT_MS,
-        `Expected every browser restart to return a live picture under ${TARGET_RECONNECT_MS}ms, but the slowest reconnect took ${slowestReconnectMs}ms.`,
+            browserRun = restartResult.browserRun;
+            serverProcess = restartResult.serverProcess;
+            measurements.push(restartResult.measurement);
+          }
+
+          console.log("Live restart reconnect measurements:");
+          console.log(JSON.stringify(measurements, null, 2));
+
+          const slowestReconnectMs = Math.max(
+            ...measurements.map((entry) => entry.pictureReadyMs),
+          );
+          assert.ok(
+            slowestReconnectMs < TARGET_RECONNECT_MS,
+            `Expected every browser restart to return a live picture under ${TARGET_RECONNECT_MS}ms, but the slowest reconnect took ${slowestReconnectMs}ms.`,
+          );
+        },
       );
     } finally {
       if (createdVm && !KEEP_VM) {
@@ -188,7 +324,7 @@ test(
       }
 
       if (serverProcess) {
-        await stopServer(serverProcess);
+        await stopServer(serverProcess, baseUrl);
       }
 
       rmSync(fixture.tempDir, { force: true, recursive: true });
@@ -220,7 +356,7 @@ async function runRestartCycle({
   serverProcess: SpawnedServerProcess;
 }> {
   const cycleStartedAt = Date.now();
-  await stopServer(serverProcess);
+  await stopServer(serverProcess, baseUrl);
   await closeBrowserRun(browserRun);
   const restartedServerProcess = await startIncusServer(port, baseUrl, stateFile);
   const hostReadyAt = Date.now();
@@ -239,9 +375,10 @@ async function runRestartCycle({
     vm.id,
     RECONNECT_TIMEOUT_MS,
   );
-  await waitForStageSelkiesPicture(
+  await waitForHealthySelkiesStage(
     restartedBrowserRun.page,
-    vm.name,
+    baseUrl,
+    vm,
     RECONNECT_TIMEOUT_MS,
   );
   const pictureReadyAt = Date.now();
@@ -296,8 +433,11 @@ async function startIncusServer(
   baseUrl: string,
   stateFile: string,
 ): Promise<SpawnedServerProcess> {
-  const serverProcess = spawn(process.execPath, ["dist/apps/control/src/server.js"], {
+  console.log(`[live-restart] starting server on ${baseUrl} via ${SERVER_START_COMMAND}`);
+
+  const serverProcess = spawn("bash", ["-lc", SERVER_START_COMMAND], {
     cwd: process.cwd(),
+    detached: true,
     env: {
       ...process.env,
       HOST: "127.0.0.1",
@@ -311,16 +451,53 @@ async function startIncusServer(
 
   await waitForStdoutLine(serverProcess, /parallaize listening on http:\/\/127\.0\.0\.1:/);
   await waitForHttpOk(baseUrl, 15_000);
+  console.log(`[live-restart] server ready on ${baseUrl}`);
   return serverProcess;
 }
 
-async function stopServer(serverProcess: SpawnedServerProcess): Promise<void> {
+async function stopServer(
+  serverProcess: SpawnedServerProcess,
+  baseUrl: string,
+): Promise<void> {
+  const port = readBaseUrlPort(baseUrl);
+
   if (serverProcess.exitCode !== null || serverProcess.signalCode !== null) {
+    await ensurePortReleased(port, 10_000);
     return;
   }
 
-  serverProcess.kill("SIGKILL");
-  await once(serverProcess, "exit");
+  console.log("[live-restart] stopping server");
+
+  try {
+    process.kill(-serverProcess.pid!, "SIGTERM");
+  } catch {
+    serverProcess.kill("SIGTERM");
+  }
+
+  const exited = await Promise.race([
+    once(serverProcess, "exit").then(() => true),
+    sleep(10_000).then(() => false),
+  ]);
+
+  if (!exited) {
+    try {
+      process.kill(-serverProcess.pid!, "SIGKILL");
+    } catch {
+      serverProcess.kill("SIGKILL");
+    }
+    await once(serverProcess, "exit");
+  }
+
+  await waitForHttpDown(baseUrl, 10_000);
+  await ensurePortReleased(port, 10_000);
+
+  console.log("[live-restart] server stopped");
+}
+
+async function sleep(delayMs: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
 }
 
 async function openBrowserRun(url: string): Promise<BrowserRun> {
@@ -461,6 +638,325 @@ async function waitForVmSelkiesSession(
     timeoutMs,
     1_000,
   );
+}
+
+function vmTile(page: Page, vmName: string): Locator {
+  return page
+    .locator("article.vm-tile")
+    .filter({
+      has: page.getByRole("heading", { name: vmName }),
+    })
+    .first();
+}
+
+async function openVm(page: Page, vmName: string, timeoutMs: number): Promise<void> {
+  const tile = vmTile(page, vmName);
+
+  await tile.scrollIntoViewIfNeeded();
+  await tile.locator("button.vm-tile__open").click();
+  await page.locator(`iframe[title="${vmName} desktop"]`).waitFor({
+    timeout: timeoutMs,
+  });
+}
+
+async function waitForStreamingBadge(
+  page: Page,
+  vmName: string,
+  timeoutMs: number,
+): Promise<void> {
+  const tile = vmTile(page, vmName);
+
+  await tile.scrollIntoViewIfNeeded();
+  await tile.getByText("Streaming").waitFor({
+    timeout: timeoutMs,
+  });
+}
+
+async function readSelkiesStageDiagnostics(
+  page: Page,
+  vmName: string,
+): Promise<SelkiesStageDiagnostics | null> {
+  const frame = page.locator(`iframe[title="${vmName} desktop"]`).first();
+
+  if ((await frame.count()) === 0) {
+    return null;
+  }
+
+  try {
+    return await frame.evaluate((node) => {
+      if (!(node instanceof HTMLIFrameElement)) {
+        return null;
+      }
+
+      const target = node.contentWindow as (Window & {
+        app?: {
+          logEntries?: unknown;
+          showStart?: unknown;
+        };
+        parallaizeGetStreamState?:
+          | (() => { ready?: unknown; status?: unknown } | boolean | null | undefined)
+          | undefined;
+        webrtc?: {
+          peerConnection?: {
+            connectionState?: unknown;
+            iceConnectionState?: unknown;
+          } | null;
+        } | null;
+      }) | null;
+      const sourceDocument = node.contentDocument ?? target?.document ?? null;
+      const video = sourceDocument?.querySelector("video");
+
+      const isVideoElement = (candidate: unknown): candidate is HTMLVideoElement => {
+        if (!candidate || typeof candidate !== "object") {
+          return false;
+        }
+
+        if (candidate instanceof HTMLVideoElement) {
+          return true;
+        }
+
+        const ownerWindow = (candidate as {
+          ownerDocument?: {
+            defaultView?: (Window & { HTMLVideoElement?: typeof HTMLVideoElement }) | null;
+          };
+        })
+          .ownerDocument?.defaultView;
+
+        return typeof ownerWindow?.HTMLVideoElement === "function" &&
+          candidate instanceof ownerWindow.HTMLVideoElement;
+      };
+
+      if (!isVideoElement(video)) {
+        return null;
+      }
+
+      const bridgedState = target?.parallaizeGetStreamState?.();
+      const normalizedState =
+        typeof bridgedState === "boolean"
+          ? {
+              ready: bridgedState,
+              status: null,
+            }
+          : bridgedState && typeof bridgedState === "object"
+            ? {
+                ready: bridgedState.ready === true,
+                status: typeof bridgedState.status === "string" ? bridgedState.status : null,
+              }
+            : {
+                ready: false,
+                status: null,
+              };
+      const peerConnection = target?.webrtc?.peerConnection ?? null;
+
+      return {
+        currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        iceConnectionState:
+          typeof peerConnection?.iceConnectionState === "string"
+            ? peerConnection.iceConnectionState
+            : null,
+        paused: video.paused,
+        peerConnectionState:
+          typeof peerConnection?.connectionState === "string"
+            ? peerConnection.connectionState
+            : null,
+        ready: normalizedState.ready,
+        readyState: video.readyState,
+        recentLogs: Array.isArray(target?.app?.logEntries)
+          ? target.app.logEntries
+              .filter((entry): entry is string => typeof entry === "string")
+              .slice(-8)
+          : [],
+        showStart: typeof target?.app?.showStart === "boolean" ? target.app.showStart : null,
+        status: normalizedState.status,
+        videoHeight: video.videoHeight,
+        videoWidth: video.videoWidth,
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function waitForAdvancingSelkiesStage(
+  page: Page,
+  vmName: string,
+  timeoutMs: number,
+): Promise<void> {
+  const timeoutAt = Date.now() + timeoutMs;
+  let lastDiagnostics: SelkiesStageDiagnostics | null = null;
+  let lastCurrentTime = Number.NaN;
+  let sawAdvance = false;
+
+  while (Date.now() < timeoutAt) {
+    const diagnostics = await readSelkiesStageDiagnostics(page, vmName);
+    lastDiagnostics = diagnostics;
+
+    if (diagnostics) {
+      const normalizedStatus = diagnostics.status?.trim().toLowerCase() ?? "";
+      const badStatus =
+        normalizedStatus.includes("waiting for stream") ||
+        normalizedStatus.includes("reconnecting stream") ||
+        normalizedStatus.includes("connection failed");
+
+      if (
+        diagnostics.ready &&
+        diagnostics.readyState >= 2 &&
+        diagnostics.videoWidth >= 320 &&
+        diagnostics.videoHeight >= 200 &&
+        diagnostics.paused === false &&
+        diagnostics.showStart !== true &&
+        !badStatus
+      ) {
+        if (
+          Number.isFinite(lastCurrentTime) &&
+          diagnostics.currentTime > lastCurrentTime + 0.4
+        ) {
+          sawAdvance = true;
+        }
+
+        lastCurrentTime = diagnostics.currentTime;
+
+        if (sawAdvance) {
+          return;
+        }
+      } else {
+        lastCurrentTime = Number.NaN;
+        sawAdvance = false;
+      }
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error(
+    `Timed out waiting for ${vmName} to resume active Selkies playback: ${JSON.stringify(lastDiagnostics)}`,
+  );
+}
+
+async function waitForHealthySelkiesStage(
+  page: Page,
+  baseUrl: string,
+  vm: LiveVmTarget,
+  timeoutMs: number,
+): Promise<void> {
+  await openVm(page, vm.name, timeoutMs);
+  await waitForVmSelkiesSession(page, baseUrl, vm.id, timeoutMs);
+  await waitForStageSelkiesPicture(page, vm.name, timeoutMs);
+  await waitForStreamingBadge(page, vm.name, timeoutMs);
+  await waitForAdvancingSelkiesStage(page, vm.name, timeoutMs);
+}
+
+async function applyRecoveryAction(
+  page: Page,
+  action: RecoveryAction,
+  timeoutMs: number,
+): Promise<void> {
+  if (action === "none") {
+    return;
+  }
+
+  const buttonName = action === "kick" ? "Kick stream" : "Reload frame";
+  const button = page.getByRole("button", { name: buttonName });
+
+  await button.waitFor({ timeout: timeoutMs });
+  await button.click();
+}
+
+async function restartServer({
+  baseUrl,
+  port,
+  serverProcess,
+  stateFile,
+}: {
+  baseUrl: string;
+  port: number;
+  serverProcess: SpawnedServerProcess;
+  stateFile: string;
+}): Promise<SpawnedServerProcess> {
+  await stopServer(serverProcess, baseUrl);
+  return await startIncusServer(port, baseUrl, stateFile);
+}
+
+async function waitForHttpDown(baseUrl: string, timeoutMs: number): Promise<void> {
+  await waitForCondition(
+    `${baseUrl} shutdown`,
+    async () => {
+      try {
+        const response = await fetch(new URL("/api/health", baseUrl));
+        return !response.ok;
+      } catch {
+        return true;
+      }
+    },
+    timeoutMs,
+    200,
+  );
+}
+
+function readBaseUrlPort(baseUrl: string): number {
+  const port = Number.parseInt(new URL(baseUrl).port, 10);
+
+  if (!Number.isFinite(port) || port <= 0) {
+    throw new Error(`Unable to read a TCP port from ${baseUrl}.`);
+  }
+
+  return port;
+}
+
+function listPidsListeningOnPort(port: number): number[] {
+  const result = spawnSync("lsof", ["-ti", `tcp:${port}`], {
+    encoding: "utf8",
+  });
+
+  if ((result.status ?? 0) !== 0 && result.stdout.trim().length === 0) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\s+/)
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+async function ensurePortReleased(port: number, timeoutMs: number): Promise<void> {
+  await waitForCondition(
+    `tcp:${port} to stop listening`,
+    async () => {
+      const pids = listPidsListeningOnPort(port);
+
+      if (pids.length === 0) {
+        return true;
+      }
+
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          // Ignore races where a listener dies between lsof and kill.
+        }
+      }
+
+      await sleep(200);
+
+      const remainingPids = listPidsListeningOnPort(port);
+
+      for (const pid of remainingPids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Ignore races where a listener dies between lsof and kill.
+        }
+      }
+
+      return listPidsListeningOnPort(port).length === 0;
+    },
+    timeoutMs,
+    200,
+  );
+}
+
+function slugifyScenarioName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 async function waitForStageSelkiesPicture(

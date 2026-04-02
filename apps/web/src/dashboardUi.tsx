@@ -297,6 +297,8 @@ export function statusClassName(status: VmStatus): string {
   switch (status) {
     case "running":
       return "status-badge--running";
+    case "paused":
+      return "status-badge--paused";
     case "stopped":
       return "status-badge--stopped";
     case "creating":

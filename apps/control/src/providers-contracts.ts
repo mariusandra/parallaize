@@ -155,15 +155,21 @@ export interface DesktopProvider {
     targetVm: VmInstance,
     template: EnvironmentTemplate,
     report?: ProviderProgressReporter,
+    options?: ProviderCloneOptions,
   ): Promise<ProviderMutation>;
   startVm(vm: VmInstance): Promise<ProviderMutation>;
+  pauseVm(vm: VmInstance): Promise<ProviderMutation>;
   stopVm(vm: VmInstance): Promise<ProviderMutation>;
   deleteVm(vm: VmInstance): Promise<ProviderMutation>;
   resizeVm(vm: VmInstance, resources: ResourceSpec): Promise<ProviderMutation>;
   setNetworkMode(vm: VmInstance, networkMode: VmNetworkMode): Promise<ProviderMutation>;
   syncVmHostname(vm: VmInstance): Promise<string | null>;
   setDisplayResolution(vm: VmInstance, width: number, height: number): Promise<void>;
-  snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot>;
+  snapshotVm(
+    vm: VmInstance,
+    label: string,
+    options?: ProviderSnapshotOptions,
+  ): Promise<ProviderSnapshot>;
   deleteVmSnapshot(vm: VmInstance, snapshot: Snapshot): Promise<void>;
   launchVmFromSnapshot(
     snapshot: Snapshot,
@@ -213,10 +219,19 @@ export interface ProviderMutation {
   commandResult?: ProviderCommandResult;
 }
 
+export interface ProviderCloneOptions {
+  stateful?: boolean;
+}
+
 export interface ProviderSnapshot {
   providerRef: string;
   summary: string;
+  stateful: boolean;
   launchSource?: string;
+}
+
+export interface ProviderSnapshotOptions {
+  stateful?: boolean;
 }
 
 export interface ProviderTick {
@@ -236,7 +251,7 @@ export interface ProviderTelemetrySample {
 }
 
 export interface ProviderVmPowerState {
-  status: "running" | "stopped";
+  status: "running" | "paused" | "stopped";
 }
 
 export interface ResolveSessionOptions {
@@ -318,6 +333,8 @@ export interface IncusDaemonOwnershipSnapshot {
 export interface IncusListInstance {
   name?: string;
   status?: string;
+  stateful?: boolean;
+  config?: Record<string, string>;
   devices?: Record<string, IncusInstanceDevice>;
   expanded_devices?: Record<string, IncusInstanceDevice>;
   state?: {

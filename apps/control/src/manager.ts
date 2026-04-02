@@ -61,6 +61,7 @@ import {
   injectCommand,
   launchVmFromSnapshot,
   reorderVms,
+  pauseVm,
   resizeVm,
   restartVm,
   restoreVmSnapshot,
@@ -363,6 +364,10 @@ export class DesktopManager {
 
   startVm(vmId: string): void {
     startVm(this.runtime, vmId);
+  }
+
+  pauseVm(vmId: string): void {
+    pauseVm(this.runtime, vmId);
   }
 
   stopVm(vmId: string): void {

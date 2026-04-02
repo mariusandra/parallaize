@@ -18,7 +18,7 @@
     "persistence:import": "pnpm build && node dist/apps/control/src/persistence-cli.js import",
     "persistence:copy": "pnpm build && node dist/apps/control/src/persistence-cli.js copy",
     "playwright:install": "playwright install chromium",
-    "test:e2e:live": "pnpm build && node --test dist/tests/playwright-live.e2e.js",
+    "test:e2e:live": "pnpm build && node --test --test-concurrency=1 dist/tests/playwright-live.e2e.js dist/tests/playwright-live-restart.e2e.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm build && node --test dist/tests/*.test.js",
     "package:prepare": "pnpm build && node scripts/build-package-runtime.mjs",

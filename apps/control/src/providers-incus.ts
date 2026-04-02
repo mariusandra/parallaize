@@ -96,9 +96,11 @@ import type {
   IncusNetworkAclPayload,
   IncusOperation,
   IncusOperationListResponse,
+  ProviderCloneOptions,
   ProviderMutation,
   ProviderProgressReporter,
   ProviderSnapshot,
+  ProviderSnapshotOptions,
   ProviderTelemetrySample,
   ProviderTick,
   ProviderVmPowerState,
@@ -137,6 +139,7 @@ import {
   buildTemplateSnapshotName,
   formatDiskSize,
   formatMemoryLimit,
+  formatStateVolumeSize,
   parseSnapshotName,
   resolveGuestWallpaperName,
   validateDisplayResolution,
@@ -371,9 +374,15 @@ export class IncusProvider implements DesktopProvider {
 
       const status = normalizeStatus(info.status ?? info.state?.status);
 
-      if (status === "running" || status === "stopped") {
+      if (status === "running") {
         return {
           status,
+        };
+      }
+
+      if (status === "stopped") {
+        return {
+          status: info.stateful ? "paused" : "stopped",
         };
       }
     } catch {
@@ -638,6 +647,7 @@ export class IncusProvider implements DesktopProvider {
     }
 
     await this.setRootDiskSizeAsync(vm.providerRef, vm.resources.diskGb);
+    await this.ensureStatefulSupportAsync(vm.providerRef, vm.resources.ramMb);
     emitCreateProgress("Configuring guest", VM_CREATE_CONFIGURE_PERCENT);
     const cloudInitUserData =
       desktopTransport === "selkies"
@@ -731,9 +741,20 @@ export class IncusProvider implements DesktopProvider {
     targetVm: VmInstance,
     template: EnvironmentTemplate,
     report?: ProviderProgressReporter,
+    options?: ProviderCloneOptions,
   ): Promise<ProviderMutation> {
     this.assertAvailable();
     const emitProgress = buildProgressEmitter(report);
+    const stateful = options?.stateful === true;
+    const sourceRunning = sourceVm.status === "running";
+
+    if (stateful) {
+      if (!sourceRunning) {
+        throw new Error("Clone with RAM is only available while the source VM is running.");
+      }
+
+      await this.ensureStatefulSupportAsync(sourceVm.providerRef, sourceVm.resources.ramMb);
+    }
 
     const copyArgs = [
       "copy",
@@ -741,6 +762,10 @@ export class IncusProvider implements DesktopProvider {
       targetVm.providerRef,
       "--instance-only",
     ];
+
+    if (sourceRunning && !stateful) {
+      copyArgs.push("--stateless");
+    }
 
     if (this.storagePool) {
       copyArgs.push("-s", this.storagePool);
@@ -757,6 +782,7 @@ export class IncusProvider implements DesktopProvider {
     await this.runAsync(copyArgs);
     emitProgress("Configuring clone", VM_CLONE_CONFIGURE_PERCENT);
     await this.setRootDiskSizeAsync(targetVm.providerRef, targetVm.resources.diskGb);
+    await this.ensureStatefulSupportAsync(targetVm.providerRef, targetVm.resources.ramMb);
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
     emitProgress("Applying network", VM_CLONE_NETWORK_PERCENT);
     const networkMode = normalizeVmNetworkMode(targetVm.networkMode);
@@ -781,7 +807,9 @@ export class IncusProvider implements DesktopProvider {
     return {
       lastAction: `Cloned from ${sourceVm.name}`,
       activity: [
-        `incus: cloned ${sourceVm.providerRef} to ${targetVm.providerRef}`,
+        stateful
+          ? `incus: cloned ${sourceVm.providerRef} to ${targetVm.providerRef} with RAM state`
+          : `incus: cloned ${sourceVm.providerRef} to ${targetVm.providerRef}`,
         `template: ${template.name}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
@@ -802,6 +830,11 @@ export class IncusProvider implements DesktopProvider {
 
   async startVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
+    if (vm.status !== "paused") {
+      await this.ensureStatefulSupportAsync(vm.providerRef, vm.resources.ramMb, {
+        allowMissingWhileRunning: true,
+      });
+    }
     await this.ensureAgentDeviceAsync(vm.providerRef);
     const networkMode = normalizeVmNetworkMode(vm.networkMode);
     const networkActivity =
@@ -829,7 +862,9 @@ export class IncusProvider implements DesktopProvider {
     return {
       lastAction: "Workspace resumed",
       activity: [
-        `incus: started ${vm.providerRef}`,
+        vm.status === "paused"
+          ? `incus: resumed ${vm.providerRef} from disk state`
+          : `incus: started ${vm.providerRef}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
         ...(guestHostname ? [`guest-hostname: ${guestHostname}`] : []),
@@ -847,9 +882,28 @@ export class IncusProvider implements DesktopProvider {
     };
   }
 
+  async pauseVm(vm: VmInstance): Promise<ProviderMutation> {
+    this.assertAvailable();
+    await this.ensureStatefulSupportAsync(vm.providerRef, vm.resources.ramMb);
+    await this.pauseInstanceAsync(vm.providerRef);
+
+    return {
+      lastAction: "Workspace paused",
+      activity: [
+        `incus: paused ${vm.providerRef}`,
+        `state: RAM checkpoint stored in ${formatStateVolumeSize(vm.resources.ramMb)}`,
+      ],
+      activeWindow: "logs",
+      session: null,
+    };
+  }
+
   async stopVm(vm: VmInstance): Promise<ProviderMutation> {
     this.assertAvailable();
     await this.stopInstanceAsync(vm.providerRef);
+    await this.ensureStatefulSupportAsync(vm.providerRef, vm.resources.ramMb, {
+      allowMissingWhileRunning: true,
+    });
 
     return {
       lastAction: "Workspace stopped",
@@ -899,6 +953,10 @@ export class IncusProvider implements DesktopProvider {
       await this.setRootDiskSizeAsync(vm.providerRef, resources.diskGb);
       changedResources.push(`disk=${nextDiskSize}`);
     }
+
+    await this.ensureStatefulSupportAsync(vm.providerRef, resources.ramMb, {
+      allowMissingWhileRunning: true,
+    });
 
     if (changedResources.length === 0) {
       return {
@@ -1000,15 +1058,33 @@ export class IncusProvider implements DesktopProvider {
     ]);
   }
 
-  async snapshotVm(vm: VmInstance, label: string): Promise<ProviderSnapshot> {
+  async snapshotVm(
+    vm: VmInstance,
+    label: string,
+    options?: ProviderSnapshotOptions,
+  ): Promise<ProviderSnapshot> {
     this.assertAvailable();
     const snapshotName = buildSnapshotName(label);
+    const stateful = options?.stateful === true;
 
-    await this.runAsync(["snapshot", "create", vm.providerRef, snapshotName]);
+    if (stateful) {
+      await this.ensureStatefulSupportAsync(vm.providerRef, vm.resources.ramMb);
+    }
+
+    await this.runAsync([
+      "snapshot",
+      "create",
+      vm.providerRef,
+      snapshotName,
+      ...(stateful ? ["--stateful"] : []),
+    ]);
 
     return {
       providerRef: `${vm.providerRef}/${snapshotName}`,
-      summary: `Snapshot ${label} captured from ${vm.name}.`,
+      summary: stateful
+        ? `Stateful snapshot ${label} captured from ${vm.name}.`
+        : `Snapshot ${label} captured from ${vm.name}.`,
+      stateful,
     };
   }
 
@@ -1034,6 +1110,10 @@ export class IncusProvider implements DesktopProvider {
       targetVm.providerRef,
     ];
 
+    if (snapshot.stateful) {
+      copyArgs.push("--stateless");
+    }
+
     if (this.storagePool) {
       copyArgs.push("-s", this.storagePool);
     }
@@ -1049,6 +1129,7 @@ export class IncusProvider implements DesktopProvider {
     await this.runAsync(copyArgs);
     emitProgress("Configuring snapshot launch", SNAPSHOT_LAUNCH_CONFIGURE_PERCENT);
     await this.setRootDiskSizeAsync(targetVm.providerRef, targetVm.resources.diskGb);
+    await this.ensureStatefulSupportAsync(targetVm.providerRef, targetVm.resources.ramMb);
     await this.ensureAgentDeviceAsync(targetVm.providerRef);
     emitProgress("Applying network", SNAPSHOT_LAUNCH_NETWORK_PERCENT);
     const networkMode = normalizeVmNetworkMode(targetVm.networkMode);
@@ -1074,6 +1155,11 @@ export class IncusProvider implements DesktopProvider {
       lastAction: `Launched from snapshot ${snapshot.label}`,
       activity: [
         `incus: launched ${targetVm.providerRef} from ${snapshot.providerRef}`,
+        ...(snapshot.stateful
+          ? [
+              "state: launched disk-only because Incus cannot rename a stateful snapshot copy into a new VM",
+            ]
+          : []),
         `template: ${template.name}`,
         networkActivity,
         ...(networkMode === "dmz" ? [describeGuestDnsProfileActivity(networkMode)] : []),
@@ -1099,24 +1185,46 @@ export class IncusProvider implements DesktopProvider {
     this.assertAvailable();
 
     const snapshotName = parseSnapshotName(snapshot.providerRef, vm.providerRef);
+    const restoreStateful = snapshot.stateful;
     const wasRunning = vm.status === "running";
 
     if (wasRunning) {
       await this.stopInstanceAsync(vm.providerRef);
     }
 
-    await this.runAsync(["snapshot", "restore", vm.providerRef, snapshotName]);
+    if (restoreStateful) {
+      await this.ensureStatefulSupportAsync(vm.providerRef, vm.resources.ramMb);
+    }
+
+    await this.runAsync([
+      "snapshot",
+      "restore",
+      vm.providerRef,
+      snapshotName,
+      ...(restoreStateful ? ["--stateful"] : []),
+    ]);
     await this.ensureAgentDeviceAsync(vm.providerRef);
 
     let sessionActivity: string[] = [];
     let readyMs: number | null = null;
     let session: VmSession | null = null;
     const networkMode = normalizeVmNetworkMode(vm.networkMode);
+    const shouldResumeAfterRestore = restoreStateful || wasRunning;
 
-    if (wasRunning) {
+    if (!restoreStateful && wasRunning) {
       await this.runAsync(["start", vm.providerRef]);
+    }
+
+    if (shouldResumeAfterRestore) {
       ({ activity: sessionActivity, readyMs, session } = await this.resolveSession(vm, undefined, {
         guestWallpaperName: resolveGuestWallpaperName(vm),
+        ...(restoreStateful
+          ? {
+              requireBootstrapRepairBeforeReady: true,
+              bootstrapRepairProfile: "aggressive" as const,
+              bootstrapRepairRetryMs: REUSED_DISK_GUEST_DESKTOP_BOOTSTRAP_RETRY_MS,
+            }
+          : {}),
       }));
       const guestHostname = await this.syncVmHostname(vm);
       if (guestHostname) {
@@ -1130,15 +1238,17 @@ export class IncusProvider implements DesktopProvider {
     return {
       lastAction: `Restored ${vm.name} to ${snapshot.label}`,
       activity: [
-        `incus: restored ${vm.providerRef} to ${snapshotName}`,
-        ...(wasRunning && networkMode === "dmz"
+        restoreStateful
+          ? `incus: restored ${vm.providerRef} to ${snapshotName} with RAM state`
+          : `incus: restored ${vm.providerRef} to ${snapshotName}`,
+        ...(shouldResumeAfterRestore && networkMode === "dmz"
           ? [describeGuestDnsProfileActivity(networkMode)]
           : []),
-        ...(wasRunning ? sessionActivity : []),
-        wasRunning
+        ...(shouldResumeAfterRestore ? sessionActivity : []),
+        shouldResumeAfterRestore
           ? this.describeSessionActivity(session, desktopTransport)
           : "workspace remains stopped after restore",
-        ...(wasRunning && readyMs !== null
+        ...(shouldResumeAfterRestore && readyMs !== null
           ? [`desktop-ready: ${desktopTransport} in ${formatReadyMs(readyMs)}`]
           : []),
       ],
@@ -1286,6 +1396,7 @@ export class IncusProvider implements DesktopProvider {
     return {
       providerRef: `${vm.providerRef}/${snapshotName}`,
       summary: `Template ${target.name} published as ${alias}.`,
+      stateful: false,
       launchSource: alias,
     };
   }
@@ -2086,6 +2197,15 @@ export class IncusProvider implements DesktopProvider {
     }
   }
 
+  private async pauseInstanceAsync(instanceName: string): Promise<void> {
+    const pauseArgs = ["stop", instanceName, "--timeout", "30", "--stateful"];
+    const pauseResult = await this.executeAsync(pauseArgs);
+
+    if (pauseResult.status !== 0 && !this.instanceMatchesPausedState(instanceName)) {
+      throw new Error(formatCommandFailure(pauseArgs, pauseResult));
+    }
+  }
+
   private async resolveSession(
     vm: Pick<VmInstance, "id" | "providerRef" | "desktopTransport">,
     report?: ProviderProgressReporter,
@@ -2595,11 +2715,7 @@ export class IncusProvider implements DesktopProvider {
   private async inspectInstanceExpandedDevicesAsync(
     instanceName: string,
   ): Promise<Record<string, IncusInstanceDevice>> {
-    const result = await this.runAsync([
-      "query",
-      `/1.0/instances/${encodeURIComponent(instanceName)}`,
-    ]);
-    const instance = parseJson<IncusListInstance>(result.stdout);
+    const instance = await this.inspectInstanceDetailsAsync(instanceName);
     const devices = instance.expanded_devices ?? instance.devices ?? null;
 
     if (!devices || Object.keys(devices).length === 0) {
@@ -2607,6 +2723,14 @@ export class IncusProvider implements DesktopProvider {
     }
 
     return devices;
+  }
+
+  private async inspectInstanceDetailsAsync(instanceName: string): Promise<IncusListInstance> {
+    const result = await this.runAsync([
+      "query",
+      `/1.0/instances/${encodeURIComponent(instanceName)}`,
+    ]);
+    return parseJson<IncusListInstance>(result.stdout);
   }
 
   private async resolveRootDiskDeviceNameAsync(instanceName: string): Promise<string> {
@@ -2623,15 +2747,27 @@ export class IncusProvider implements DesktopProvider {
   }
 
   private async setRootDiskSizeAsync(instanceName: string, diskGb: number): Promise<void> {
+    await this.setRootDiskDeviceValuesAsync(instanceName, [`size=${formatDiskSize(diskGb)}`]);
+  }
+
+  private async setRootDiskStateSizeAsync(instanceName: string, ramMb: number): Promise<void> {
+    await this.setRootDiskDeviceValuesAsync(instanceName, [
+      `size.state=${formatStateVolumeSize(ramMb)}`,
+    ]);
+  }
+
+  private async setRootDiskDeviceValuesAsync(
+    instanceName: string,
+    values: string[],
+  ): Promise<void> {
     const rootDeviceName = await this.resolveRootDiskDeviceNameAsync(instanceName);
-    const sizeArg = `size=${formatDiskSize(diskGb)}`;
     const overrideArgs = [
       "config",
       "device",
       "override",
       instanceName,
       rootDeviceName,
-      sizeArg,
+      ...values,
     ];
     const result = await this.executeAsync(overrideArgs);
 
@@ -2651,8 +2787,36 @@ export class IncusProvider implements DesktopProvider {
       "set",
       instanceName,
       rootDeviceName,
-      sizeArg,
+      ...values,
     ]);
+  }
+
+  private async ensureStatefulSupportAsync(
+    instanceName: string,
+    ramMb: number,
+    options?: {
+      allowMissingWhileRunning?: boolean;
+    },
+  ): Promise<void> {
+    const instance = await this.inspectInstanceDetailsAsync(instanceName);
+    const migrationStatefulEnabled = instance.config?.["migration.stateful"] === "true";
+    const running = normalizeStatus(instance.status ?? instance.state?.status) === "running";
+
+    if (!migrationStatefulEnabled) {
+      if (running) {
+        if (options?.allowMissingWhileRunning) {
+          return;
+        }
+
+        throw new Error(
+          `${instanceName} is still running without stateful suspend enabled. Do one full stop, start it again, and then retry the RAM snapshot or pause action. New VMs are already prepared automatically.`,
+        );
+      }
+
+      await this.runAsync(["config", "set", instanceName, "migration.stateful=true"]);
+    }
+
+    await this.setRootDiskStateSizeAsync(instanceName, ramMb);
   }
 
   private getTelemetryInstanceInfo(instanceName: string): IncusListInstance | null {
@@ -2737,6 +2901,11 @@ export class IncusProvider implements DesktopProvider {
   ): boolean {
     const info = this.inspectInstanceSafe(instanceName);
     return normalizeStatus(info?.status ?? info?.state?.status) === expectedStatus;
+  }
+
+  private instanceMatchesPausedState(instanceName: string): boolean {
+    const info = this.inspectInstanceSafe(instanceName);
+    return normalizeStatus(info?.status ?? info?.state?.status) === "stopped" && info?.stateful === true;
   }
 
   private run(args: string[]): CommandResult {

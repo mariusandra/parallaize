@@ -61,6 +61,7 @@ import {
   validateForwardedPorts,
   validateResources,
   validateSnapshotCreateResources,
+  validateSnapshotRestoreResources,
   validateTemplateCreateResources,
   validateVmCloneResources,
   type DesktopManagerRuntime,
@@ -276,6 +277,7 @@ export function cloneVm(
   let createdJob: ActionJob | null = null;
   const requestedResources = input.resources ?? null;
   const shutdownSourceBeforeClone = input.shutdownSourceBeforeClone === true;
+  const stateful = input.stateful === true;
 
   runtime.store.update((draft) => {
     const source = runtime.requireVm(draft, input.sourceVmId);
@@ -283,7 +285,20 @@ export function cloneVm(
     const template = requireTemplate(draft, source.templateId);
     const cloneResources = requestedResources ?? source.resources;
     validateResources(cloneResources);
-    validateVmCloneResources(source, cloneResources);
+    validateVmCloneResources(source, cloneResources, { stateful });
+
+    if (stateful) {
+      if (shutdownSourceBeforeClone) {
+        throw new Error(
+          "Clone with RAM requires the source VM to remain running. Turn off shutdown-before-clone or clone without RAM.",
+        );
+      }
+
+      if (source.status !== "running") {
+        throw new Error("Clone with RAM is only available while the source VM is running.");
+      }
+    }
+
     const cloneName =
       input.name?.trim() ||
       `${source.name}-clone-${String(draft.sequence).padStart(2, "0")}`;
@@ -347,7 +362,13 @@ export function cloneVm(
         runtime.markVmStopped(source.id, stopMutation);
       }
 
-      const mutation = await runtime.provider.cloneVm(source, target, template, report);
+      if (stateful && source.status !== "running") {
+        throw new Error("Clone with RAM is only available while the source VM is running.");
+      }
+
+      const mutation = await runtime.provider.cloneVm(source, target, template, report, {
+        stateful,
+      });
 
       runtime.store.update((draft) => {
         const vm = runtime.requireVm(draft, vmRecord.id);
@@ -376,7 +397,7 @@ export function startVm(runtime: DesktopManagerRuntime, vmId: string): void {
 
     report("Preparing boot", 24);
     await sleep(350);
-    report("Starting VM", 58);
+    report(vm.status === "paused" ? "Resuming VM" : "Starting VM", 58);
     const mutation = await runtime.provider.startVm(vm);
     report("Waiting for desktop", 88);
     runtime.markVmRunning(vmId, mutation);
@@ -385,10 +406,37 @@ export function startVm(runtime: DesktopManagerRuntime, vmId: string): void {
   });
 }
 
+export function pauseVm(runtime: DesktopManagerRuntime, vmId: string): void {
+  queueVmAction(runtime, vmId, "pause", async (vm) => {
+    if (vm.status === "paused") {
+      return `${vm.name} is already paused`;
+    }
+
+    if (vm.status !== "running") {
+      throw new Error(`${vm.name} must be running before it can be paused.`);
+    }
+
+    const mutation = await runtime.provider.pauseVm(vm);
+    runtime.store.update((draft) => {
+      const current = runtime.requireVm(draft, vmId);
+      current.status = "paused";
+      current.liveSince = null;
+      applyProviderMutation(current, mutation);
+    });
+    runtime.publish();
+
+    return `${vm.name} paused`;
+  });
+}
+
 export function stopVm(runtime: DesktopManagerRuntime, vmId: string): void {
   queueVmAction(runtime, vmId, "stop", async (vm) => {
     if (vm.status === "stopped") {
       return `${vm.name} is already stopped`;
+    }
+
+    if (vm.status === "paused") {
+      throw new Error(`${vm.name} is paused. Resume it before doing a full stop.`);
     }
 
     const mutation = await runtime.provider.stopVm(vm);
@@ -400,7 +448,8 @@ export function stopVm(runtime: DesktopManagerRuntime, vmId: string): void {
 
 export function restartVm(runtime: DesktopManagerRuntime, vmId: string): void {
   queueVmAction(runtime, vmId, "restart", async (vm, report) => {
-    const wasRunning = vm.status !== "stopped";
+    const wasRunning = vm.status === "running";
+    const wasPaused = vm.status === "paused";
 
     if (wasRunning) {
       report("Stopping workspace", 24);
@@ -411,12 +460,12 @@ export function restartVm(runtime: DesktopManagerRuntime, vmId: string): void {
     const currentVm = runtime.getVmDetail(vmId).vm;
     report("Preparing boot", wasRunning ? 42 : 24);
     await sleep(350);
-    report("Starting VM", wasRunning ? 66 : 58);
+    report(wasPaused ? "Resuming VM" : "Starting VM", wasRunning ? 66 : 58);
     const startMutation = await runtime.provider.startVm(currentVm);
     report("Waiting for desktop", 92);
     runtime.markVmRunning(vmId, startMutation);
 
-    return wasRunning ? `${vm.name} restarted` : `${vm.name} started`;
+    return wasRunning ? `${vm.name} restarted` : wasPaused ? `${vm.name} resumed` : `${vm.name} started`;
   });
 }
 
@@ -498,8 +547,16 @@ export function snapshotVm(
 ): void {
   queueVmAction(runtime, vmId, "snapshot", async (vm) => {
     const label = input.label?.trim() || `Snapshot ${new Date().toLocaleTimeString("en-US")}`;
+    const stateful = input.stateful ?? vm.status === "running";
+
+    if (stateful && vm.status !== "running") {
+      throw new Error(`${vm.name} must be running to capture RAM state.`);
+    }
+
     await sleep(400);
-    const snapshotData = await runtime.provider.snapshotVm(vm, label);
+    const snapshotData = await runtime.provider.snapshotVm(vm, label, {
+      stateful,
+    });
 
     runtime.store.update((draft) => {
       const current = runtime.requireVm(draft, vmId);
@@ -509,6 +566,7 @@ export function snapshotVm(
         label,
         snapshotData.providerRef,
         snapshotData.summary,
+        snapshotData.stateful,
       );
       const template = requireTemplate(draft, current.templateId);
 
@@ -638,6 +696,7 @@ export function restoreVmSnapshot(
 ): void {
   queueVmAction(runtime, vmId, "restore-snapshot", async (vm, report) => {
     const snapshot = requireVmSnapshot(runtime.store.load(), vmId, snapshotId);
+    validateSnapshotRestoreResources(vm, snapshot);
 
     report("Preparing snapshot restore", 22);
     await sleep(250);
@@ -646,7 +705,7 @@ export function restoreVmSnapshot(
 
     runtime.store.update((draft) => {
       const current = runtime.requireVm(draft, vmId);
-      current.status = vm.status === "running" ? "running" : "stopped";
+      current.status = snapshot.stateful || vm.status === "running" ? "running" : "stopped";
       current.liveSince = current.status === "running" ? nowIso() : null;
       applyProviderMutation(current, mutation);
     });
@@ -792,6 +851,7 @@ export function captureTemplate(
         `Template capture: ${captureName}`,
         providerSnapshot.providerRef,
         providerSnapshot.summary,
+        providerSnapshot.stateful,
         reservedTemplateId,
       );
       const captureNotes = buildCaptureNotes(current, existingTemplate?.notes ?? []);

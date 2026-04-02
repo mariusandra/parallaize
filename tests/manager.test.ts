@@ -522,6 +522,62 @@ test("clone can stop the source VM first and keep requested resource overrides",
   assert.equal(cloneDetail.vm.networkMode, "dmz");
 });
 
+test("clone can request RAM from a running source", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-clone-with-ram-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const cloneVm = provider.cloneVm.bind(provider);
+  let requestedStateful = false;
+
+  provider.cloneVm = async (sourceVm, targetVm, template, report, options) => {
+    requestedStateful = options?.stateful === true;
+    return await cloneVm(sourceVm, targetVm, template, report, options);
+  };
+
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const clone = manager.cloneVm({
+    sourceVmId: "vm-0001",
+    name: "alpha-live-fork",
+    stateful: true,
+  });
+
+  await wait(800);
+
+  assert.equal(requestedStateful, true);
+  assert.equal(manager.getVmDetail(clone.id).vm.status, "running");
+});
+
+test("clone with RAM rejects shutdown-before-clone", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-clone-with-ram-invalid-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  assert.throws(
+    () =>
+      manager.cloneVm({
+        sourceVmId: "vm-0001",
+        name: "alpha-live-fork-invalid",
+        shutdownSourceBeforeClone: true,
+        stateful: true,
+      }),
+    /Clone with RAM requires the source VM to remain running/,
+  );
+});
+
 test("manager marks a running VM stopped after the provider reports an external shutdown", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-external-stop-"));
   context.after(() => {
@@ -768,6 +824,10 @@ test("manager treats an already-running incus start as a successful resume", asy
           };
         }
 
+        if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+          return expandedRootDevice(args);
+        }
+
         return ok("", args);
       },
     },
@@ -870,6 +930,10 @@ test("incus provider reapplies the guest hostname on start", async () => {
         );
       }
 
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args);
+      }
+
       return ok("", args);
     },
   };
@@ -970,6 +1034,52 @@ test("restart runs as a single queued action that stops before booting again", a
   assert.equal(detail.recentJobs[0]?.message, "restart-lab restarted");
   assert.ok(detail.vm.activityLog.includes("stop: VM state checkpoint saved"));
   assert.ok(detail.vm.activityLog.includes("resume: desktop compositor restarted"));
+});
+
+test("pause and resume keep VM status in sync and running snapshots capture RAM by default", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-pause-resume-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  manager.pauseVm("vm-0001");
+  await wait(250);
+
+  let detail = manager.getVmDetail("vm-0001");
+  assert.equal(detail.vm.status, "paused");
+  assert.equal(detail.vm.lastAction, "Workspace paused");
+  assert.equal(detail.vm.liveSince, null);
+
+  manager.startVm("vm-0001");
+  await wait(550);
+
+  detail = manager.getVmDetail("vm-0001");
+  assert.equal(detail.vm.status, "running");
+  assert.equal(detail.vm.lastAction, "Workspace resumed");
+
+  manager.snapshotVm("vm-0001", { label: "warm-checkpoint" });
+  await wait(550);
+
+  const warmSnapshot = manager
+    .getVmDetail("vm-0001")
+    .snapshots.find((entry) => entry.label === "warm-checkpoint");
+  assert.equal(warmSnapshot?.stateful, true);
+
+  manager.stopVm("vm-0001");
+  await wait(300);
+  manager.snapshotVm("vm-0001", { label: "cold-checkpoint" });
+  await wait(550);
+
+  const coldSnapshot = manager
+    .getVmDetail("vm-0001")
+    .snapshots.find((entry) => entry.label === "cold-checkpoint");
+  assert.equal(coldSnapshot?.stateful, false);
 });
 
 test("template capture jobs expose staged publish progress", async (context) => {
@@ -1224,6 +1334,9 @@ test("manager falls back to the newest compatible template snapshot when a captu
     async startVm() {
       throw new Error("not implemented");
     },
+    async pauseVm() {
+      throw new Error("not implemented");
+    },
     async stopVm() {
       throw new Error("not implemented");
     },
@@ -1311,6 +1424,7 @@ test("manager falls back to the newest compatible template snapshot when a captu
         label: "compatible recovery point",
         summary: "Newest snapshot that still fits the requested disk size.",
         providerRef: "parallaize-vm-old/parallaize-snap-old",
+        stateful: false,
         resources: { ...template.defaultResources },
         createdAt: new Date(now.getTime() - 60_000).toISOString(),
       },
@@ -1321,6 +1435,7 @@ test("manager falls back to the newest compatible template snapshot when a captu
         label: "oversized recovery point",
         summary: "Newest captured snapshot, but it needs a larger disk.",
         providerRef: "parallaize-vm-new/parallaize-snap-new",
+        stateful: false,
         resources: {
           ...template.defaultResources,
           diskGb: 100,
@@ -2433,6 +2548,9 @@ test("manager recovers interrupted create jobs when the VM is already running af
       throw new Error("not implemented");
     },
     async startVm() {
+      throw new Error("not implemented");
+    },
+    async pauseVm() {
       throw new Error("not implemented");
     },
     async stopVm() {
@@ -3802,6 +3920,10 @@ test("incus provider applies guest display resolution through xrandr", async () 
         return ok("[]", args);
       }
 
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args, "disk0");
+      }
+
       return ok("", args);
     },
   };
@@ -3965,6 +4087,10 @@ test("incus provider applies guest display resolution through the Selkies bootst
         return ok("[]", args);
       }
 
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args, "disk0");
+      }
+
       return ok("", args);
     },
   };
@@ -4047,9 +4173,10 @@ test("incus provider applies guest display resolution through the Selkies bootst
   assert.match(execCall?.[5] ?? "", /SELKIES_STATE_DIR="\$DESKTOP_HOME\/\.cache\/parallaize-selkies"/);
   assert.match(execCall?.[5] ?? "", /SELKIES_JSON_CONFIG="\$SELKIES_STATE_DIR\/selkies_config\.json"/);
   assert.match(execCall?.[5] ?? "", /SELKIES_RTC_CONFIG_JSON="\$SELKIES_STATE_DIR\/rtc\.json"/);
-  assert.match(execCall?.[5] ?? "", /XDG_RUNTIME_DIR="\$DESKTOP_RUNTIME_DIR"/);
+  assert.match(execCall?.[5] ?? "", /DESKTOP_RUNTIME_DIR="\/run\/user\/\$DESKTOP_UID"/);
+  assert.match(execCall?.[5] ?? "", /export XDG_RUNTIME_DIR="\/run\/user\/\$DESKTOP_UID"/);
   assert.match(execCall?.[5] ?? "", /install -d -m 700 -o "\$DESKTOP_UID" -g "\$DESKTOP_GID" "\$SELKIES_STATE_DIR"/);
-  assert.match(execCall?.[5] ?? "", /runuser -u ubuntu --preserve-environment -- "\$SELKIES_RUNNER"/);
+  assert.match(execCall?.[5] ?? "", /exec runuser --preserve-environment -u "\$DESKTOP_USER" -- env DISPLAY="\$DISPLAY" XAUTHORITY="\$XAUTHORITY" "\$SELKIES_RUNNER"/);
   assert.doesNotMatch(execCall?.[5] ?? "", /parallaize-x11vnc\.service/);
 });
 
@@ -4710,6 +4837,10 @@ test("incus provider resource resize only updates changed limits and preserves t
         return ok("[]", args);
       }
 
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args, "disk0");
+      }
+
       return ok("", args);
     },
   };
@@ -4765,11 +4896,28 @@ test("incus provider resource resize only updates changed limits and preserves t
     diskGb: 60,
   });
 
-  const configSetCall = calls.find(
+  const cpuSetCall = calls.find(
     (args) =>
       args[0] === "config" &&
       args[1] === "set" &&
-      args[2] === instanceName,
+      args[2] === instanceName &&
+      args[3] === "limits.cpu=8",
+  );
+  const statefulSetCall = calls.find(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "set" &&
+      args[2] === instanceName &&
+      args[3] === "migration.stateful=true",
+  );
+  const deviceOverrideCall = calls.find(
+    (args) =>
+      args[0] === "config" &&
+      args[1] === "device" &&
+      args[2] === "override" &&
+      args[3] === instanceName &&
+      args[4] === "disk0" &&
+      args[5] === "size.state=9012MiB",
   );
   const deviceSetCall = calls.find(
     (args) =>
@@ -4779,11 +4927,25 @@ test("incus provider resource resize only updates changed limits and preserves t
       args[3] === instanceName,
   );
 
-  assert.deepEqual(configSetCall, [
+  assert.deepEqual(cpuSetCall, [
     "config",
     "set",
     instanceName,
     "limits.cpu=8",
+  ]);
+  assert.deepEqual(statefulSetCall, [
+    "config",
+    "set",
+    instanceName,
+    "migration.stateful=true",
+  ]);
+  assert.deepEqual(deviceOverrideCall, [
+    "config",
+    "device",
+    "override",
+    instanceName,
+    "disk0",
+    "size.state=9012MiB",
   ]);
   assert.equal(deviceSetCall, undefined);
   assert.equal(probed, false);
@@ -4897,10 +5059,12 @@ test("incus provider targets the configured storage pool for creates and copies"
   const sourceInstanceName = "parallaize-vm-0200-storage-origin";
   const targetInstanceName = "parallaize-vm-0201-storage-clone";
   const snapshotTargetInstanceName = "parallaize-vm-0202-storage-snapshot";
+  const statefulCloneInstanceName = "parallaize-vm-0203-storage-clone-live";
   const instanceAddresses = new Map<string, string>([
     [sourceInstanceName, "10.55.1.20"],
     [targetInstanceName, "10.55.1.21"],
     [snapshotTargetInstanceName, "10.55.1.22"],
+    [statefulCloneInstanceName, "10.55.1.23"],
   ]);
   const runner = {
     execute(args: string[]) {
@@ -4942,12 +5106,21 @@ test("incus provider targets the configured storage pool for creates and copies"
         );
       }
 
+      if (args[0] === "query" && args[1] === `/1.0/instances/${sourceInstanceName}`) {
+        return expandedRootDevice(args, "root", {
+          config: {
+            "migration.stateful": "true",
+          },
+          status: "Running",
+        });
+      }
+
       if (
         args[0] === "query" &&
         [
-          `/1.0/instances/${sourceInstanceName}`,
           `/1.0/instances/${targetInstanceName}`,
           `/1.0/instances/${snapshotTargetInstanceName}`,
+          `/1.0/instances/${statefulCloneInstanceName}`,
         ].includes(args[1])
       ) {
         return expandedRootDevice(args);
@@ -5032,6 +5205,14 @@ test("incus provider targets the configured storage pool for creates and copies"
     session: null,
   };
 
+  const statefulTargetVm: VmInstance = {
+    ...sourceVm,
+    id: "vm-0203",
+    name: "storage-clone-live",
+    providerRef: statefulCloneInstanceName,
+    session: null,
+  };
+
   await provider.createVm(
     {
       ...sourceVm,
@@ -5042,6 +5223,9 @@ test("incus provider targets the configured storage pool for creates and copies"
     template,
   );
   await provider.cloneVm(sourceVm, targetVm, template);
+  await provider.cloneVm(sourceVm, statefulTargetVm, template, undefined, {
+    stateful: true,
+  });
   await provider.launchVmFromSnapshot(
     {
       id: "snap-0200",
@@ -5050,6 +5234,7 @@ test("incus provider targets the configured storage pool for creates and copies"
       label: "checkpoint",
       summary: "Snapshot checkpoint captured from storage-origin.",
       providerRef: `${sourceInstanceName}/parallaize-snap-checkpoint`,
+      stateful: false,
       resources: template.defaultResources,
       createdAt: new Date().toISOString(),
     },
@@ -5074,7 +5259,19 @@ test("incus provider targets the configured storage pool for creates and copies"
         args[1] === sourceInstanceName &&
         args[2] === targetInstanceName &&
         args.includes("-s") &&
-        args.includes("fastpool"),
+        args.includes("fastpool") &&
+        args.includes("--stateless"),
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "copy" &&
+        args[1] === sourceInstanceName &&
+        args[2] === statefulCloneInstanceName &&
+        args.includes("-s") &&
+        args.includes("fastpool") &&
+        !args.includes("--stateless"),
     ),
   );
   assert.ok(
@@ -5123,11 +5320,13 @@ test("incus provider launches and restores snapshots with VM commands", async ()
   const calls: string[][] = [];
   const sourceInstanceName = "parallaize-vm-0109-snap-origin";
   const targetInstanceName = "parallaize-vm-0110-snap-launch";
+  const statefulTargetInstanceName = "parallaize-vm-0111-snap-launch-live";
   let bootstrapScript = "";
   const addAttempts = new Map<string, number>();
   const instanceAddresses = new Map<string, string>([
     [sourceInstanceName, "10.55.0.21"],
     [targetInstanceName, "10.55.0.22"],
+    [statefulTargetInstanceName, "10.55.0.23"],
   ]);
   const runner = {
     execute(args: string[], options?: { input?: Buffer | string }) {
@@ -5170,13 +5369,22 @@ test("incus provider launches and restores snapshots with VM commands", async ()
         );
       }
 
-      if (args[0] === "query" && args[1] === `/1.0/instances/${targetInstanceName}`) {
+      if (
+        args[0] === "query" &&
+        [
+          `/1.0/instances/${sourceInstanceName}`,
+          `/1.0/instances/${targetInstanceName}`,
+          `/1.0/instances/${statefulTargetInstanceName}`,
+        ].includes(
+          args[1],
+        )
+      ) {
         return expandedRootDevice(args, "disk0");
       }
 
       if (
         args[0] === "exec" &&
-        args[1] === targetInstanceName &&
+        [targetInstanceName, statefulTargetInstanceName].includes(args[1]) &&
         input.includes('BOOTSTRAP_FILE="/usr/local/bin/parallaize-desktop-bootstrap"')
       ) {
         bootstrapScript = input;
@@ -5295,9 +5503,24 @@ test("incus provider launches and restores snapshots with VM commands", async ()
     label: "checkpoint",
     summary: "Snapshot checkpoint captured from snap-origin.",
     providerRef: `${sourceInstanceName}/parallaize-snap-checkpoint`,
+    stateful: false,
     resources: template.defaultResources,
     createdAt: new Date().toISOString(),
   };
+
+  const statefulSnapshot = await provider.snapshotVm(sourceVm, "checkpoint-live", {
+    stateful: true,
+  });
+  assert.equal(statefulSnapshot.stateful, true);
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "snapshot" &&
+        args[1] === "create" &&
+        args[2] === sourceInstanceName &&
+        args.includes("--stateful"),
+    ),
+  );
 
   const launchMutation = await provider.launchVmFromSnapshot(snapshot, targetVm, template);
   assert.equal(launchMutation.session?.display, "10.55.0.22:5901");
@@ -5314,6 +5537,39 @@ test("incus provider launches and restores snapshots with VM commands", async ()
   assert.match(bootstrapScript, /DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=15/);
   assert.ok(copyCall);
   assert.ok(!copyCall?.includes("--instance-only"));
+
+  const statefulLaunchCallIndex = calls.length;
+  const statefulLaunchMutation = await provider.launchVmFromSnapshot(
+    {
+      ...snapshot,
+      id: "snap-0111",
+      label: "checkpoint-live",
+      providerRef: statefulSnapshot.providerRef,
+      summary: statefulSnapshot.summary,
+      stateful: true,
+    },
+    {
+      ...targetVm,
+      id: "vm-0111",
+      providerRef: statefulTargetInstanceName,
+      name: "snapshot-launch-live",
+    },
+    template,
+  );
+  const statefulLaunchCalls = calls.slice(statefulLaunchCallIndex);
+  const statefulLaunchCopyCall = statefulLaunchCalls.find(
+    (args) =>
+      args[0] === "copy" &&
+      args[1] === statefulSnapshot.providerRef &&
+      args[2] === statefulTargetInstanceName,
+  );
+  assert.equal(statefulLaunchMutation.session?.display, "10.55.0.23:5901");
+  assert.ok(statefulLaunchCopyCall?.includes("--stateless"));
+  assert.ok(
+    statefulLaunchMutation.activity.some((entry) =>
+      entry.includes("Incus cannot rename a stateful snapshot copy"),
+    ),
+  );
   assert.ok(
     calls.some(
       (args) =>
@@ -5346,6 +5602,43 @@ test("incus provider launches and restores snapshots with VM commands", async ()
         args[3] === sourceInstanceName &&
         args[4] === "agent",
     ),
+  );
+
+  const statefulRestoreCallIndex = calls.length;
+  const statefulSnapshotName = statefulSnapshot.providerRef.split("/").at(-1);
+  const statefulRestoreMutation = await provider.restoreVmToSnapshot(
+    {
+      ...sourceVm,
+      status: "stopped",
+      liveSince: null,
+      session: null,
+    },
+    {
+      ...snapshot,
+      id: "snap-0110",
+      label: "checkpoint-live",
+      providerRef: statefulSnapshot.providerRef,
+      summary: statefulSnapshot.summary,
+      stateful: true,
+    },
+  );
+  const statefulRestoreCalls = calls.slice(statefulRestoreCallIndex);
+  assert.equal(statefulRestoreMutation.session?.display, "10.55.0.21:5901");
+  assert.ok(
+    statefulRestoreCalls.some(
+      (args) =>
+        args[0] === "snapshot" &&
+        args[1] === "restore" &&
+        args[2] === sourceInstanceName &&
+        args[3] === statefulSnapshotName &&
+        args.includes("--stateful"),
+    ),
+  );
+  assert.equal(
+    statefulRestoreCalls.some(
+      (args) => args[0] === "start" && args[1] === sourceInstanceName,
+    ),
+    false,
   );
 });
 
@@ -5599,6 +5892,10 @@ test("incus provider treats a timed-out stop as success once the VM is stopped",
         return ok("[]", args);
       }
 
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args, "disk0");
+      }
+
       if (args[0] === "stop" && args[1] === instanceName) {
         return {
           args,
@@ -5622,6 +5919,10 @@ test("incus provider treats a timed-out stop as success once the VM is stopped",
           ]),
           args,
         );
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args);
       }
 
       return ok("", args);
@@ -5870,6 +6171,7 @@ test("manager derives browser VNC and forwarded service routes for incus VMs", a
         );
       }
 
+
       return ok("", args);
     },
   };
@@ -5958,12 +6260,16 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
         return ok("[]", args);
       }
 
-      if (
-        args[0] === "query" &&
-        [sourceInstanceName, cloneInstanceName].some(
-          (instanceName) => args[1] === `/1.0/instances/${instanceName}`,
-        )
-      ) {
+      if (args[0] === "query" && args[1] === `/1.0/instances/${sourceInstanceName}`) {
+        return expandedRootDevice(args, "root", {
+          config: {
+            "migration.stateful": "true",
+          },
+          status: "Running",
+        });
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${cloneInstanceName}`) {
         return expandedRootDevice(args);
       }
 
@@ -6098,6 +6404,7 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
   const clone = manager.cloneVm({
     sourceVmId: "vm-0055",
     name: "origin-clone",
+    stateful: true,
     wallpaperName: "silver-falcon",
   });
 
@@ -6123,7 +6430,8 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
       (args) =>
         args[0] === "copy" &&
         args[1] === sourceInstanceName &&
-        args[2] === cloneInstanceName,
+        args[2] === cloneInstanceName &&
+        !args.includes("--stateless"),
     ),
   );
   assert.ok(
@@ -6197,6 +6505,10 @@ test("incus provider refreshes an existing agent device before resuming a VM", a
           ]),
           args,
         );
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args);
       }
 
       return ok("", args);
@@ -6329,6 +6641,10 @@ test("incus provider triggers guest desktop bootstrap while waiting for VNC", as
         return ok("", args);
       }
 
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args);
+      }
+
       return ok("", args);
     },
   };
@@ -6422,6 +6738,10 @@ test("incus provider treats an already-running instance as a successful resume",
             `Error: The instance is already running ` +
             `Try \`incus info --show-log ${instanceName}\` for more info`,
         };
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args);
       }
 
       return ok("", args);
@@ -6530,6 +6850,10 @@ test("incus provider retries guest DNS sync until the guest agent is ready", asy
             stderr: "Error: VM agent isn't currently running",
           };
         }
+      }
+
+      if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+        return expandedRootDevice(args);
       }
 
       return ok("", args);
@@ -6725,6 +7049,9 @@ test("manager periodically refreshes reachable Selkies sessions for maintenance"
       throw new Error("not implemented");
     },
     async startVm() {
+      throw new Error("not implemented");
+    },
+    async pauseVm() {
       throw new Error("not implemented");
     },
     async stopVm() {
@@ -6931,6 +7258,9 @@ test("manager keeps refreshing newly created VMs while guest VNC is still pendin
       throw new Error("not implemented");
     },
     async startVm() {
+      throw new Error("not implemented");
+    },
+    async pauseVm() {
       throw new Error("not implemented");
     },
     async stopVm() {
@@ -7421,9 +7751,18 @@ function ok(stdout: string, args: string[]) {
   };
 }
 
-function expandedRootDevice(args: string[], deviceName = "root") {
+function expandedRootDevice(
+  args: string[],
+  deviceName = "root",
+  options?: {
+    config?: Record<string, string>;
+    stateful?: boolean;
+    status?: string;
+  },
+) {
   return ok(
     JSON.stringify({
+      config: options?.config,
       expanded_devices: {
         [deviceName]: {
           type: "disk",
@@ -7431,6 +7770,13 @@ function expandedRootDevice(args: string[], deviceName = "root") {
           pool: "default",
         },
       },
+      state: options?.status
+        ? {
+            status: options.status,
+          }
+        : undefined,
+      stateful: options?.stateful,
+      status: options?.status,
     }),
     args,
   );

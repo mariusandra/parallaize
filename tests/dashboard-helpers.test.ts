@@ -83,8 +83,54 @@ test("buildCreateLaunchValidationError blocks shrinking snapshot disks", () => {
   const selection = buildCreateSourceGroups([template], [snapshot], [vm])[1]?.options[0] ?? null;
 
   assert.equal(
-    buildCreateLaunchValidationError(selection, "40"),
+    buildCreateLaunchValidationError(selection, "4", "40"),
     "Snapshot Release candidate needs at least 80 GB disk because shrinking a saved filesystem is not supported.",
+  );
+});
+
+test("buildCreateLaunchValidationError allows launching a new VM from a stateful snapshot without matching RAM", () => {
+  const template = buildTemplate("template-1");
+  const vm = buildVm("vm-1", {
+    name: "Alpha",
+    templateId: template.id,
+  });
+  const snapshot = buildSnapshot("snap-2", {
+    label: "Live checkpoint",
+    stateful: true,
+    templateId: template.id,
+    vmId: vm.id,
+    resources: {
+      cpu: 2,
+      ramMb: 8192,
+      diskGb: 80,
+    },
+  });
+
+  const selection = buildCreateSourceGroups([template], [snapshot], [vm])[1]?.options[0] ?? null;
+
+  assert.equal(buildCreateLaunchValidationError(selection, "4", "80"), null);
+});
+
+test("buildCreateLaunchValidationError blocks cloning live RAM state below the source RAM", () => {
+  const template = buildTemplate("template-1");
+  const vm = buildVm("vm-1", {
+    name: "Alpha",
+    status: "running",
+    templateId: template.id,
+    resources: {
+      cpu: 2,
+      ramMb: 8192,
+      diskGb: 40,
+    },
+  });
+
+  const selection = buildCreateSourceGroups([template], [], [vm])[1]?.options[0] ?? null;
+
+  assert.equal(
+    buildCreateLaunchValidationError(selection, "4", "40", {
+      statefulClone: true,
+    }),
+    "Alpha needs at least 8192 MB RAM for a clone that includes saved memory state.",
   );
 });
 
@@ -105,7 +151,7 @@ test("buildCreateLaunchValidationError blocks launching captured templates below
   const selection = buildCreateSourceGroups([template], [], [])[0]?.options[0] ?? null;
 
   assert.equal(
-    buildCreateLaunchValidationError(selection, "32"),
+    buildCreateLaunchValidationError(selection, "4", "32"),
     "Captured Template was captured from a 64 GB workspace and needs at least 64 GB disk to launch cleanly.",
   );
 });
@@ -135,6 +181,18 @@ test("clone drafts preserve the source VM desktop transport", () => {
   const draft = buildCreateDraftFromVm(sourceVm, template);
 
   assert.equal(draft.desktopTransport, "vnc");
+});
+
+test("running clone drafts default to a cold clone until RAM is requested", () => {
+  const template = buildTemplate("template-1");
+  const sourceVm = buildVm("vm-1", {
+    status: "running",
+    templateId: template.id,
+  });
+  const draft = buildCreateDraftFromVm(sourceVm, template);
+
+  assert.equal(draft.shutdownSourceBeforeClone, true);
+  assert.equal(draft.statefulClone, false);
 });
 
 test("normalizeActiveCpuThreshold clamps and rounds to two decimals", () => {
@@ -329,6 +387,7 @@ function buildSnapshot(
     label: `Snapshot ${id}`,
     summary: "Snapshot summary",
     providerRef: `snapshot-${id}`,
+    stateful: false,
     resources: {
       cpu: 2,
       ramMb: 4096,

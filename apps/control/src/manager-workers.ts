@@ -10,6 +10,7 @@ import {
   emptyResourceTelemetry,
   hasReachableVncSession,
   isInterruptedBootJobFailure,
+  markVmPausedOutsideControlPlane,
   markVmRunningOutsideControlPlane,
   markVmStoppedOutsideControlPlane,
   mergeVmSessionRefreshMode,
@@ -342,13 +343,32 @@ export function syncProviderState(runtime: DesktopManagerRuntime): boolean {
       const observedPowerState = runtime.provider.observeVmPowerState(vm);
 
       if (vm.status === "running") {
-        if (observedPowerState?.status !== "stopped") {
+        if (observedPowerState?.status !== "stopped" && observedPowerState?.status !== "paused") {
           continue;
         }
 
-        markVmStoppedOutsideControlPlane(vm);
+        if (observedPowerState.status === "paused") {
+          markVmPausedOutsideControlPlane(vm);
+        } else {
+          markVmStoppedOutsideControlPlane(vm);
+        }
         runtime.vmTelemetry.delete(vm.id);
         dirty = true;
+        continue;
+      }
+
+      if (vm.status === "paused") {
+        if (observedPowerState?.status === "running") {
+          markVmRunningOutsideControlPlane(vm);
+          dirty = true;
+          continue;
+        }
+
+        if (observedPowerState?.status === "stopped") {
+          markVmStoppedOutsideControlPlane(vm);
+          dirty = true;
+        }
+
         continue;
       }
 
