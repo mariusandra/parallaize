@@ -703,16 +703,12 @@ function resolveLiveTemplate(
   }
 
   const template =
-    templates.find(
-      (entry) =>
-        entry.defaultDesktopTransport === "selkies" &&
-        entry.provenance?.kind === "seed",
-    ) ??
-    templates.find((entry) => entry.defaultDesktopTransport === "selkies");
+    templates.find((entry) => entry.provenance?.kind === "seed") ??
+    templates[0];
 
   if (!template) {
     throw new Error(
-      "No Selkies-capable template is available. Set PARALLAIZE_E2E_TEMPLATE_ID or PARALLAIZE_E2E_TEMPLATE_NAME explicitly.",
+      "No template is available. Set PARALLAIZE_E2E_TEMPLATE_ID or PARALLAIZE_E2E_TEMPLATE_NAME explicitly.",
     );
   }
 

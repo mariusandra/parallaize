@@ -156,7 +156,7 @@ test("buildCreateLaunchValidationError blocks launching captured templates below
   );
 });
 
-test("system template launches default to Selkies and expose the transport choice", () => {
+test("system template launches default to VNC and expose the transport choice", () => {
   const template = buildTemplate("template-seed", {
     provenance: {
       kind: "seed",
@@ -166,7 +166,7 @@ test("system template launches default to Selkies and expose the transport choic
   const selection = buildCreateSourceGroups([template], [], [])[0]?.options[0] ?? null;
   const draft = buildCreateDraftFromTemplate(template);
 
-  assert.equal(draft.desktopTransport, "selkies");
+  assert.equal(draft.desktopTransport, "vnc");
   assert.equal(createSourceSupportsDesktopTransportChoice(selection), true);
 });
 

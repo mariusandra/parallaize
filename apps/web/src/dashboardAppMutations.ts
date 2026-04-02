@@ -1567,5 +1567,5 @@ function normalizeActiveVmNetworkMode(value: string): CreateDraft["networkMode"]
 }
 
 function normalizeActiveVmDesktopTransport(value: string): CreateDraft["desktopTransport"] {
-  return value === "vnc" || value === "guacamole" ? value : "selkies";
+  return value === "selkies" || value === "guacamole" ? value : "vnc";
 }

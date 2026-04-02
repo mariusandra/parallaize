@@ -20,7 +20,7 @@ export function normalizeTemplateDesktopTransport(
 ): VmDesktopTransport {
   return transport === "vnc" || transport === "guacamole"
     ? transport
-    : "selkies";
+    : "vnc";
 }
 
 export function normalizeVmDesktopTransport(

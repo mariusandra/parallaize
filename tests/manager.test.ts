@@ -324,6 +324,24 @@ test("manager reconciles the seeded template launch source to the configured def
   );
 });
 
+test("seeded templates default new VM launches to VNC", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-default-transport-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const template = manager.getSummary().templates.find((entry) => entry.id === "tpl-0001");
+
+  assert.ok(template);
+  assert.equal(template?.defaultDesktopTransport, "vnc");
+});
+
 test("manager preserves a persisted seeded template launch source without an env pin", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-source-preserve-"));
   context.after(() => {

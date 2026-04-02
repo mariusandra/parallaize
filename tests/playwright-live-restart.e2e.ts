@@ -1127,15 +1127,11 @@ async function buildAuthHeaders(page: Page, baseUrl: string): Promise<Headers> {
 
 function resolveLiveTemplate(templates: EnvironmentTemplate[]): EnvironmentTemplate {
   const template =
-    templates.find(
-      (entry) =>
-        entry.defaultDesktopTransport === "selkies" &&
-        entry.provenance?.kind === "seed",
-    ) ??
-    templates.find((entry) => entry.defaultDesktopTransport === "selkies");
+    templates.find((entry) => entry.provenance?.kind === "seed") ??
+    templates[0];
 
   if (!template) {
-    throw new Error("No Selkies-capable template is available for the live restart suite.");
+    throw new Error("No template is available for the live restart suite.");
   }
 
   return template;

@@ -608,7 +608,7 @@ export function buildOrphanedSnapshotTemplate(
     launchSource: defaultTemplateLaunchSource,
     defaultResources: { ...snapshot.resources },
     defaultForwardedPorts: [],
-    defaultDesktopTransport: "selkies",
+    defaultDesktopTransport: "vnc",
     initCommands: [],
     tags: ["orphaned"],
     notes: ["Recovered from snapshot metadata after template deletion."],

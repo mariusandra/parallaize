@@ -418,7 +418,7 @@ const emptyCreateDraft: CreateDraft = {
   cpu: "",
   ramGb: "",
   diskGb: "",
-  desktopTransport: "selkies",
+  desktopTransport: "vnc",
   networkMode: "default",
   initCommands: "",
   statefulClone: false,

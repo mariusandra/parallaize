@@ -34,7 +34,7 @@ export function createSeedState(
         diskGb: 80,
       },
       defaultForwardedPorts: [],
-      defaultDesktopTransport: "selkies",
+      defaultDesktopTransport: "vnc",
       defaultNetworkMode: "default",
       initCommands: [],
       tags: ["coding", "agents", "ubuntu"],
