@@ -788,6 +788,9 @@ export function CloneVmDialog({
   onSubmit,
 }: CloneVmDialogProps): JSX.Element {
   const normalizedDraft = draft.trim();
+  const cloneCopy = dialog.canCaptureRam
+    ? "Create a new workspace from the current VM without leaving the dashboard UI. Keep RAM enabled when you want the fork to resume open apps and terminals."
+    : "Create a new workspace from the current VM without leaving the dashboard UI.";
 
   return (
     <div
@@ -803,10 +806,7 @@ export function CloneVmDialog({
           <div>
             <p className="workspace-shell__eyebrow">Clone workspace</p>
             <h2 className="dialog-panel__title">Clone {dialog.sourceVmName}</h2>
-            <p className="dialog-panel__copy">
-              Create a new workspace from the current VM without leaving the dashboard UI.
-              Keep RAM enabled when you want the fork to resume open apps and terminals.
-            </p>
+            <p className="dialog-panel__copy">{cloneCopy}</p>
           </div>
           <button
             className="button button--ghost"
@@ -831,23 +831,23 @@ export function CloneVmDialog({
             />
           </label>
 
-          <label className="snapshot-dialog__toggle">
-            <input
-              checked={dialog.stateful}
-              className="snapshot-dialog__toggle-input"
-              disabled={busy || !dialog.canCaptureRam}
-              onChange={(event) => onStatefulChange(event.target.checked)}
-              type="checkbox"
-            />
-            <div className="snapshot-dialog__toggle-copy">
-              <strong>Include RAM for instant resume</strong>
-              <p>
-                {dialog.canCaptureRam
-                  ? `Recommended for running workspaces. This carries open apps and ${formatRam(dialog.ramMb)} of saved memory state into the clone.`
-                  : "RAM cloning is only available while the source workspace is running. This clone will be disk-only."}
-              </p>
-            </div>
-          </label>
+          {dialog.canCaptureRam ? (
+            <label className="snapshot-dialog__toggle">
+              <input
+                checked={dialog.stateful}
+                className="snapshot-dialog__toggle-input"
+                disabled={busy}
+                onChange={(event) => onStatefulChange(event.target.checked)}
+                type="checkbox"
+              />
+              <div className="snapshot-dialog__toggle-copy">
+                <strong>Include RAM for instant resume</strong>
+                <p>
+                  {`Recommended for running workspaces. This carries open apps and ${formatRam(dialog.ramMb)} of saved memory state into the clone.`}
+                </p>
+              </div>
+            </label>
+          ) : null}
 
           {dialog.stateful ? (
             <InlineWarningNote title="Live RAM clone">{liveCloneWarningCopy}</InlineWarningNote>
