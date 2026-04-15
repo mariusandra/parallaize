@@ -145,8 +145,11 @@ Useful validation commands:
 ```bash
 flox activate -d . -- pnpm typecheck
 flox activate -d . -- pnpm test
+flox activate -d . -- pnpm test:e2e:mock
 flox activate -d . -- pnpm smoke:incus
 ```
+
+`pnpm test` keeps the default suite on the fast unit and server-side integration path. `pnpm test:e2e:mock` runs the heavier self-contained Chromium dashboard coverage against the mock provider.
 
 `pnpm smoke:incus` is the live end-to-end path. It expects the control plane to be running in Incus mode and Caddy to be serving HTTPS on `:8080`.
 It builds the current tree first, launches from the seeded Ubuntu 24.04 desktop source by default, and waits for both a working VNC bridge and a non-black guest framebuffer before passing.
