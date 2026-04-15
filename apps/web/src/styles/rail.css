@@ -212,6 +212,135 @@
   padding: 0.2rem 1rem 0.1rem;
 }
 
+.workspace-project {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.workspace-project__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0 0.05rem;
+}
+
+.workspace-project__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.workspace-project__chevron {
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.15rem;
+  color: var(--ink-faint);
+  transition: transform 140ms ease;
+}
+
+.workspace-project__chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+.workspace-project__copy {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.workspace-project__title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.workspace-project__title {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 0.84rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.workspace-project__count {
+  color: var(--ink-faint);
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-project__subtitle,
+.workspace-project__github {
+  color: var(--ink-faint);
+  font-size: 0.68rem;
+  text-decoration: none;
+}
+
+.workspace-project__github:hover,
+.workspace-project__github:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+
+.workspace-project__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  flex: 0 0 auto;
+}
+
+.workspace-project__create-button {
+  min-height: 1.9rem;
+  padding: 0.3rem 0.68rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-project__menu {
+  display: inline-flex;
+  align-items: center;
+}
+
+.workspace-project__popover {
+  min-width: 10rem;
+}
+
+.workspace-project__vms {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.workspace-project__empty {
+  min-height: 0;
+}
+
+.workspace-project__empty-action {
+  align-self: start;
+  margin-top: 0.35rem;
+}
+
+.workspace-project__empty-compact-action {
+  justify-self: center;
+}
+
+.workspace-project--deleting .workspace-project__title,
+.workspace-project--deleting .workspace-project__subtitle,
+.workspace-project--deleting .workspace-project__github {
+  opacity: 0.72;
+}
+
 .vm-strip {
   display: flex;
   flex-direction: column;
@@ -240,6 +369,51 @@
   align-items: stretch;
   gap: 0.42rem;
   padding: 0 0.25rem 0.6rem;
+}
+
+.workspace-rail--compact .workspace-project {
+  gap: 0.38rem;
+}
+
+.workspace-rail--compact .workspace-project__header {
+  display: grid;
+  justify-items: center;
+  gap: 0.3rem;
+  padding: 0;
+}
+
+.workspace-rail--compact .workspace-project__toggle {
+  justify-content: center;
+}
+
+.workspace-rail--compact .workspace-project__copy {
+  justify-items: center;
+}
+
+.workspace-rail--compact .workspace-project__title-row {
+  justify-content: center;
+}
+
+.workspace-rail--compact .workspace-project__title {
+  max-width: 2.8rem;
+  overflow: hidden;
+  font-size: 0.63rem;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-rail--compact .workspace-project__count {
+  font-size: 0.54rem;
+}
+
+.workspace-rail--compact .workspace-project__actions {
+  display: grid;
+  gap: 0.28rem;
+}
+
+.workspace-rail--compact .workspace-project__vms {
+  gap: 0.42rem;
 }
 
 .workspace-rail__compact-actions {

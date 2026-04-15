@@ -12,6 +12,7 @@ import type {
   ActionJob,
   CaptureTemplateInput,
   CloneVmInput,
+  CreateProjectInput,
   CreateTemplateInput,
   CreateVmInput,
   DashboardSummary,
@@ -22,12 +23,14 @@ import type {
   SetVmResolutionInput,
   Snapshot,
   SnapshotInput,
+  UpdateProjectInput,
   UpdateTemplateInput,
   UpdateVmForwardedPortsInput,
   UpdateVmInput,
   UpdateVmNetworkInput,
   VmDesktopTransport,
   VmInstance,
+  WorkspaceProject,
 } from "../../../packages/shared/src/types.js";
 import {
   appendActivity,
@@ -45,20 +48,26 @@ import {
   collectTemplateUpdateFieldLabels,
   copyForwardAsTemplatePort,
   copyTemplatePortForward,
+  ensureProjectMutable,
   failMissingCreateTemplateId,
   nextId,
   normalizeTemplateInitCommands,
   normalizeVmNetworkMode,
   nowIso,
+  removeDeletingProjectsWithoutVms,
+  requireWorkspaceProject,
   requireSnapshot,
   requireTemplate,
   requireVm,
   requireVmSnapshot,
+  resolveKnownWorkspaceProjectId,
   resolveTemplateForSnapshot,
   sameStringArray,
   sleep,
   trimJobs,
   validateForwardedPorts,
+  validateProjectGithubUrl,
+  validateProjectName,
   validateResources,
   validateSnapshotCreateResources,
   validateSnapshotRestoreResources,
@@ -102,6 +111,8 @@ export function createVm(
   }
 
   runtime.store.update((draft) => {
+    const projectId = resolveKnownWorkspaceProjectId(draft, input.projectId);
+
     if (requestedSnapshotId) {
       const snapshot = requireSnapshot(draft, requestedSnapshotId);
       const template = resolveTemplateForSnapshot(
@@ -122,6 +133,7 @@ export function createVm(
 
       const vm = buildVmRecord(
         draft,
+        projectId,
         template,
         name,
         wallpaperName,
@@ -171,6 +183,7 @@ export function createVm(
 
     const vm = buildVmRecord(
       draft,
+      projectId,
       template,
       name,
       wallpaperName,
@@ -269,6 +282,60 @@ export function createVm(
   return vmRecord;
 }
 
+export function createProject(
+  runtime: DesktopManagerRuntime,
+  input: CreateProjectInput,
+): WorkspaceProject {
+  let createdProject: WorkspaceProject | null = null;
+
+  runtime.store.update((draft) => {
+    const now = nowIso();
+    const project = {
+      id: nextId(draft, "project"),
+      name: validateProjectName(input.name),
+      githubUrl: validateProjectGithubUrl(input.githubUrl),
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    } satisfies WorkspaceProject;
+
+    draft.projects.push(project);
+    createdProject = project;
+  });
+
+  runtime.publish();
+
+  if (!createdProject) {
+    throw new Error("Failed to create project.");
+  }
+
+  return createdProject;
+}
+
+export function updateProject(
+  runtime: DesktopManagerRuntime,
+  projectId: string,
+  input: UpdateProjectInput,
+): WorkspaceProject {
+  let updatedProject: WorkspaceProject | null = null;
+
+  runtime.store.update((draft) => {
+    const project = requireWorkspaceProject(draft, projectId);
+    project.name = validateProjectName(input.name);
+    project.githubUrl = validateProjectGithubUrl(input.githubUrl);
+    project.updatedAt = nowIso();
+    updatedProject = project;
+  });
+
+  runtime.publish();
+
+  if (!updatedProject) {
+    throw new Error(`Failed to update project ${projectId}.`);
+  }
+
+  return updatedProject;
+}
+
 export function cloneVm(
   runtime: DesktopManagerRuntime,
   input: CloneVmInput,
@@ -282,6 +349,10 @@ export function cloneVm(
   runtime.store.update((draft) => {
     const source = runtime.requireVm(draft, input.sourceVmId);
     runtime.ensureActiveProvider(source);
+    const projectId = resolveKnownWorkspaceProjectId(
+      draft,
+      input.projectId ?? source.projectId,
+    );
     const template = requireTemplate(draft, source.templateId);
     const cloneResources = requestedResources ?? source.resources;
     validateResources(cloneResources);
@@ -306,6 +377,7 @@ export function cloneVm(
 
     const vm = buildVmRecord(
       draft,
+      projectId,
       template,
       cloneName,
       wallpaperName,
@@ -493,6 +565,36 @@ export function reorderVms(
   return runtime.getSummary();
 }
 
+export function startProject(runtime: DesktopManagerRuntime, projectId: string): void {
+  queueProjectAction(runtime, projectId, (vmId) => {
+    startVm(runtime, vmId);
+  });
+}
+
+export function stopProject(runtime: DesktopManagerRuntime, projectId: string): void {
+  queueProjectAction(runtime, projectId, (vmId) => {
+    stopVm(runtime, vmId);
+  });
+}
+
+export function restartProject(runtime: DesktopManagerRuntime, projectId: string): void {
+  queueProjectAction(runtime, projectId, (vmId) => {
+    restartVm(runtime, vmId);
+  });
+}
+
+export function deleteProject(runtime: DesktopManagerRuntime, projectId: string): void {
+  const vmIds = markProjectDeleting(runtime, projectId);
+
+  if (vmIds.length === 0) {
+    return;
+  }
+
+  for (const vmId of vmIds) {
+    deleteVm(runtime, vmId);
+  }
+}
+
 export function deleteVm(runtime: DesktopManagerRuntime, vmId: string): void {
   let deletedName = "";
 
@@ -511,6 +613,7 @@ export function deleteVm(runtime: DesktopManagerRuntime, vmId: string): void {
 
     runtime.store.update((draft) => {
       draft.vms = draft.vms.filter((entry) => entry.id !== vmId);
+      removeDeletingProjectsWithoutVms(draft);
     });
     runtime.publish();
 
@@ -597,6 +700,10 @@ export function launchVmFromSnapshot(
   runtime.store.update((draft) => {
     const source = runtime.requireVm(draft, vmId);
     runtime.ensureActiveProvider(source);
+    const projectId = resolveKnownWorkspaceProjectId(
+      draft,
+      input.projectId ?? source.projectId,
+    );
     const snapshot = requireVmSnapshot(draft, vmId, snapshotId);
     const template = resolveTemplateForSnapshot(
       draft,
@@ -610,6 +717,7 @@ export function launchVmFromSnapshot(
 
     const vm = buildVmRecord(
       draft,
+      projectId,
       template,
       name,
       wallpaperName,
@@ -1067,29 +1175,36 @@ export async function updateVm(
 ): Promise<VmInstance> {
   const hasRequestedName = input.name !== undefined;
   const hasRequestedDesktopTransport = input.desktopTransport !== undefined;
+  const hasRequestedProjectId = input.projectId !== undefined;
 
-  if (!hasRequestedName && !hasRequestedDesktopTransport) {
+  if (!hasRequestedName && !hasRequestedDesktopTransport && !hasRequestedProjectId) {
     throw new Error("At least one VM setting is required.");
   }
 
   const currentVm = runtime.getVmDetail(vmId).vm;
+  const currentState = runtime.store.load();
   const nextName = hasRequestedName ? input.name?.trim() ?? "" : currentVm.name;
 
   if (hasRequestedName && !nextName) {
     throw new Error("VM name is required.");
   }
 
+  const currentProjectId = resolveKnownWorkspaceProjectId(currentState, currentVm.projectId);
+  const nextProjectId = hasRequestedProjectId
+    ? resolveKnownWorkspaceProjectId(currentState, input.projectId)
+    : currentProjectId;
   const currentDesktopTransport = normalizeVmDesktopTransport(currentVm.desktopTransport);
   const nextDesktopTransport = hasRequestedDesktopTransport
     ? normalizeVmDesktopTransport(input.desktopTransport)
     : currentDesktopTransport;
   const nameChanged = currentVm.name !== nextName;
+  const projectChanged = currentProjectId !== nextProjectId;
   const desktopTransportChanged = currentDesktopTransport !== nextDesktopTransport;
   const desktopRuntimeChanged =
     resolveDesktopTransportRuntime(currentDesktopTransport) !==
     resolveDesktopTransportRuntime(nextDesktopTransport);
 
-  if (!nameChanged && !desktopTransportChanged) {
+  if (!nameChanged && !desktopTransportChanged && !projectChanged) {
     return currentVm;
   }
 
@@ -1140,17 +1255,23 @@ export async function updateVm(
   runtime.store.update((draft) => {
     const vm = requireVm(draft, vmId);
     const previousName = vm.name;
+    const previousProjectId = resolveKnownWorkspaceProjectId(draft, vm.projectId);
     const previousDesktopTransport = normalizeVmDesktopTransport(vm.desktopTransport);
     const draftNameChanged = vm.name !== nextName;
+    const draftProjectChanged = previousProjectId !== nextProjectId;
     const draftDesktopTransportChanged = previousDesktopTransport !== nextDesktopTransport;
 
-    if (!draftNameChanged && !draftDesktopTransportChanged) {
+    if (!draftNameChanged && !draftDesktopTransportChanged && !draftProjectChanged) {
       updatedVm = vm;
       return false;
     }
 
     if (draftNameChanged) {
       vm.name = nextName;
+    }
+
+    if (draftProjectChanged) {
+      vm.projectId = nextProjectId;
     }
 
     if (draftDesktopTransportChanged) {
@@ -1171,12 +1292,19 @@ export async function updateVm(
           ...desktopBridgeRepair.activity,
         ],
         lastAction: draftNameChanged
-          ? `Renamed workspace to ${nextName} and switched desktop to ${nextDesktopTransportLabel}`
-          : `Desktop transport switched to ${nextDesktopTransportLabel}`,
+          ? draftProjectChanged
+            ? `Renamed workspace to ${nextName}, switched desktop to ${nextDesktopTransportLabel}, and moved projects`
+            : `Renamed workspace to ${nextName} and switched desktop to ${nextDesktopTransportLabel}`
+          : draftProjectChanged
+            ? `Desktop transport switched to ${nextDesktopTransportLabel} and moved projects`
+            : `Desktop transport switched to ${nextDesktopTransportLabel}`,
       });
 
       if (draftNameChanged) {
         appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+      }
+      if (draftProjectChanged) {
+        appendActivity(vm, `project: ${previousProjectId} -> ${nextProjectId}`);
       }
     } else {
       vm.updatedAt = nowIso();
@@ -1185,7 +1313,17 @@ export async function updateVm(
         vm.session = rebindVmSessionTransport(vm.id, vm.session, nextDesktopTransport);
       }
 
-      if (draftNameChanged && draftDesktopTransportChanged) {
+      if (draftNameChanged && draftDesktopTransportChanged && draftProjectChanged) {
+        vm.lastAction =
+          `Renamed workspace to ${nextName}, set desktop to ` +
+          `${formatDesktopTransportActionLabel(nextDesktopTransport)}, and moved projects`;
+        appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+        appendActivity(
+          vm,
+          `desktop-transport: ${previousDesktopTransport} -> ${nextDesktopTransport}`,
+        );
+        appendActivity(vm, `project: ${previousProjectId} -> ${nextProjectId}`);
+      } else if (draftNameChanged && draftDesktopTransportChanged) {
         vm.lastAction =
           `Renamed workspace to ${nextName} and set desktop to ` +
           formatDesktopTransportActionLabel(nextDesktopTransport);
@@ -1194,9 +1332,24 @@ export async function updateVm(
           vm,
           `desktop-transport: ${previousDesktopTransport} -> ${nextDesktopTransport}`,
         );
+      } else if (draftNameChanged && draftProjectChanged) {
+        vm.lastAction = `Renamed workspace to ${nextName} and moved projects`;
+        appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+        appendActivity(vm, `project: ${previousProjectId} -> ${nextProjectId}`);
       } else if (draftNameChanged) {
         vm.lastAction = `Renamed workspace to ${nextName}`;
         appendActivity(vm, `rename: ${previousName} -> ${nextName}`);
+      } else if (draftDesktopTransportChanged && draftProjectChanged) {
+        vm.lastAction =
+          `Desktop transport set to ${formatDesktopTransportActionLabel(nextDesktopTransport)} and moved projects`;
+        appendActivity(
+          vm,
+          `desktop-transport: ${previousDesktopTransport} -> ${nextDesktopTransport}`,
+        );
+        appendActivity(vm, `project: ${previousProjectId} -> ${nextProjectId}`);
+      } else if (draftProjectChanged) {
+        vm.lastAction = "Workspace moved to a different project";
+        appendActivity(vm, `project: ${previousProjectId} -> ${nextProjectId}`);
       } else if (draftDesktopTransportChanged) {
         vm.lastAction = `Desktop transport set to ${formatDesktopTransportActionLabel(nextDesktopTransport)}`;
         appendActivity(
@@ -1401,4 +1554,46 @@ function queueVmAction(
     runtime.ensureActiveProvider(vm);
     return runner(vm, report);
   });
+}
+
+function queueProjectAction(
+  runtime: DesktopManagerRuntime,
+  projectId: string,
+  action: (vmId: string) => void,
+): void {
+  const state = runtime.store.load();
+  const project = requireWorkspaceProject(state, projectId);
+
+  if (project.status === "deleting") {
+    return;
+  }
+
+  const vmIds = state.vms
+    .filter((vm) => resolveKnownWorkspaceProjectId(state, vm.projectId) === projectId)
+    .map((vm) => vm.id);
+
+  for (const vmId of vmIds) {
+    action(vmId);
+  }
+}
+
+function markProjectDeleting(
+  runtime: DesktopManagerRuntime,
+  projectId: string,
+): string[] {
+  let vmIds: string[] = [];
+
+  runtime.store.update((draft) => {
+    const project = requireWorkspaceProject(draft, projectId);
+    ensureProjectMutable(project);
+    project.status = "deleting";
+    project.updatedAt = nowIso();
+    vmIds = draft.vms
+      .filter((vm) => resolveKnownWorkspaceProjectId(draft, vm.projectId) === projectId)
+      .map((vm) => vm.id);
+    removeDeletingProjectsWithoutVms(draft);
+  });
+
+  runtime.publish();
+  return vmIds;
 }

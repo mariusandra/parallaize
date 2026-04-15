@@ -26,6 +26,7 @@ export type VmSessionKind = "synthetic" | "vnc" | "selkies" | "guacamole";
 export type VmForwardProtocol = "http";
 export type VmPowerAction = "start" | "pause" | "stop" | "restart";
 export type VmNetworkMode = "default" | "dmz";
+export type WorkspaceProjectStatus = "active" | "deleting";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -63,6 +64,15 @@ export interface ProviderState {
   project: string | null;
   desktopTransport: ProviderDesktopTransport;
   nextSteps: string[];
+}
+
+export interface WorkspaceProject {
+  id: string;
+  name: string;
+  githubUrl: string;
+  status: WorkspaceProjectStatus;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface VmSession {
@@ -155,6 +165,7 @@ export interface EnvironmentTemplate {
 export interface VmInstance {
   id: string;
   name: string;
+  projectId?: string;
   wallpaperName?: string;
   templateId: string;
   provider: ProviderKind;
@@ -208,6 +219,7 @@ export interface ActionJob {
 export interface AppState {
   sequence: number;
   provider: ProviderState;
+  projects: WorkspaceProject[];
   templates: EnvironmentTemplate[];
   vms: VmInstance[];
   snapshots: Snapshot[];
@@ -271,6 +283,7 @@ export interface DashboardMetrics {
 export interface DashboardSummary {
   hostTelemetry: ResourceTelemetry;
   provider: ProviderState;
+  projects: WorkspaceProject[];
   templates: EnvironmentTemplate[];
   vms: VmInstance[];
   snapshots: Snapshot[];
@@ -372,6 +385,7 @@ export interface VmDiskUsageSnapshot {
 export interface CreateVmInput {
   templateId?: string;
   snapshotId?: string;
+  projectId?: string;
   name: string;
   wallpaperName?: string;
   resources: ResourceSpec;
@@ -383,6 +397,7 @@ export interface CreateVmInput {
 
 export interface CloneVmInput {
   sourceVmId: string;
+  projectId?: string;
   name?: string;
   wallpaperName?: string;
   resources?: ResourceSpec;
@@ -447,10 +462,21 @@ export interface UpdateTemplateInput {
 export interface UpdateVmInput {
   name?: string;
   desktopTransport?: VmDesktopTransport;
+  projectId?: string;
 }
 
 export interface ReorderVmsInput {
   vmIds: string[];
+}
+
+export interface CreateProjectInput {
+  name: string;
+  githubUrl: string;
+}
+
+export interface UpdateProjectInput {
+  name: string;
+  githubUrl: string;
 }
 
 export interface InjectCommandInput {

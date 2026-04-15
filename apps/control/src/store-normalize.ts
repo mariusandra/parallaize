@@ -1,7 +1,12 @@
 import {
+  buildDefaultWorkspaceProject,
+  DEFAULT_WORKSPACE_PROJECT_ID,
+  DEFAULT_WORKSPACE_PROJECT_NAME,
+  normalizeGithubUrl,
   normalizeTemplateDesktopTransport,
   normalizeVmDesktopTransport,
   normalizeVmNetworkMode,
+  resolveWorkspaceProjectId,
   slugify,
 } from "../../../packages/shared/src/helpers.js";
 import { formatDesktopTransportLabel } from "../../../packages/shared/src/desktopTransport.js";
@@ -22,6 +27,7 @@ import type {
   VmNetworkMode,
   VmSession,
   VmPortForward,
+  WorkspaceProject,
 } from "../../../packages/shared/src/types.js";
 import {
   buildSelkiesBrowserPath,
@@ -41,12 +47,14 @@ type LegacyTemplate = Partial<EnvironmentTemplate> & {
 
 type LegacyVm = Partial<VmInstance>;
 type LegacyProviderState = Partial<ProviderState>;
+type LegacyWorkspaceProject = Partial<WorkspaceProject>;
 type LegacySnapshot = Partial<Snapshot>;
 type LegacyJob = Partial<ActionJob>;
 type LegacyAdminSession = Partial<AdminSessionRecord>;
 
 type LegacyAppState = Partial<Omit<AppState, "provider" | "templates" | "vms">> & {
   provider?: LegacyProviderState;
+  projects?: LegacyWorkspaceProject[];
   templates?: LegacyTemplate[];
   vms?: LegacyVm[];
   snapshots?: LegacySnapshot[];
@@ -76,18 +84,23 @@ function normalizeState(
   rawState: LegacyAppState,
   defaultTemplateLaunchSource = FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
 ): AppState {
+  const projects = normalizeWorkspaceProjects(rawState.projects);
+
   return {
     sequence:
       typeof rawState.sequence === "number" && Number.isFinite(rawState.sequence)
         ? Math.max(1, Math.trunc(rawState.sequence))
         : 1,
     provider: normalizeProviderState(rawState.provider),
+    projects,
     templates: Array.isArray(rawState.templates)
       ? rawState.templates.map((template) =>
           normalizeTemplate(template, defaultTemplateLaunchSource),
         )
       : [],
-    vms: Array.isArray(rawState.vms) ? rawState.vms.map(normalizeVm) : [],
+    vms: Array.isArray(rawState.vms)
+      ? rawState.vms.map((vm) => normalizeVm(vm, projects))
+      : [],
     snapshots: Array.isArray(rawState.snapshots)
       ? rawState.snapshots
           .map(normalizeSnapshot)
@@ -108,6 +121,26 @@ function normalizeState(
         ? rawState.lastUpdated
         : nowIso(),
   };
+}
+
+function normalizeWorkspaceProjects(
+  projects: LegacyWorkspaceProject[] | undefined,
+): WorkspaceProject[] {
+  const defaultProject = buildDefaultWorkspaceProject();
+  const normalized = Array.isArray(projects)
+    ? projects
+        .map(normalizeWorkspaceProject)
+        .filter((project, index, entries) =>
+          entries.findIndex((entry) => entry.id === project.id) === index,
+        )
+    : [];
+  const explicitDefault =
+    normalized.find((project) => project.id === DEFAULT_WORKSPACE_PROJECT_ID) ?? null;
+
+  return [
+    explicitDefault ?? defaultProject,
+    ...normalized.filter((project) => project.id !== DEFAULT_WORKSPACE_PROJECT_ID),
+  ];
 }
 
 function normalizeProviderState(
@@ -195,7 +228,31 @@ function normalizeTemplate(
   };
 }
 
-function normalizeVm(vm: LegacyVm): VmInstance {
+function normalizeWorkspaceProject(project: LegacyWorkspaceProject): WorkspaceProject {
+  const createdAt = project.createdAt ?? nowIso();
+  const updatedAt = project.updatedAt ?? createdAt;
+  const normalizedName =
+    typeof project.name === "string" && project.name.trim().length > 0
+      ? project.name.trim()
+      : project.id === DEFAULT_WORKSPACE_PROJECT_ID
+        ? DEFAULT_WORKSPACE_PROJECT_NAME
+        : "Recovered project";
+
+  return {
+    id:
+      typeof project.id === "string" && project.id.trim().length > 0
+        ? project.id.trim()
+        : DEFAULT_WORKSPACE_PROJECT_ID,
+    name: normalizedName,
+    githubUrl:
+      typeof project.githubUrl === "string" ? normalizeGithubUrl(project.githubUrl) : "",
+    status: project.status === "deleting" ? "deleting" : "active",
+    createdAt,
+    updatedAt,
+  };
+}
+
+function normalizeVm(vm: LegacyVm, projects: WorkspaceProject[]): VmInstance {
   const provider = normalizeProviderKind(vm.provider);
   const name = vm.name ?? "recovered-vm";
   const workspacePath =
@@ -208,6 +265,7 @@ function normalizeVm(vm: LegacyVm): VmInstance {
   return {
     id: vm.id ?? "vm-missing",
     name,
+    projectId: resolveWorkspaceProjectId(projects, vm.projectId),
     wallpaperName:
       typeof vm.wallpaperName === "string" && vm.wallpaperName.trim()
         ? vm.wallpaperName.trim()

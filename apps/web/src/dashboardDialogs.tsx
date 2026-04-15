@@ -16,6 +16,7 @@ import {
   liveCaptureWarningCopy,
   liveCloneWarningCopy,
   type CloneVmDialogState,
+  type ProjectDraft,
   type SnapshotDialogState,
 } from "./dashboardShell.js";
 import { InlineWarningNote, NumberField } from "./dashboardPrimitives.js";
@@ -24,6 +25,7 @@ import { VmLogOutput } from "./dashboardUi.js";
 interface CreateVmDialogProps {
   busy: boolean;
   createDraft: CreateDraft;
+  projectName: string;
   selectedSource: CreateSourceSelection | null;
   sourceGroups: CreateSourceGroup[];
   validationError: string | null;
@@ -34,6 +36,16 @@ interface CreateVmDialogProps {
   onRandomizeName: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSourceChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+}
+
+interface CreateProjectDialogProps {
+  busy: boolean;
+  draft: ProjectDraft;
+  mode: "create" | "edit";
+  currentProject: ProjectDraft | null;
+  onClose: () => void;
+  onFieldChange: (field: keyof ProjectDraft, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
 }
 
 interface TemplateCloneDialogProps {
@@ -165,6 +177,93 @@ export function RenameDialog({
             disabled={busy || unchanged}
           >
             Save name
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+export function CreateProjectDialog({
+  busy,
+  draft,
+  mode,
+  currentProject,
+  onClose,
+  onFieldChange,
+  onSubmit,
+}: CreateProjectDialogProps): JSX.Element {
+  const normalizedName = draft.name.trim();
+  const normalizedGithubUrl = draft.githubUrl.trim();
+  const unchanged =
+    mode === "edit" &&
+    currentProject !== null &&
+    normalizedName === currentProject.name.trim() &&
+    normalizedGithubUrl === currentProject.githubUrl.trim();
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onClick={() => {
+        if (!busy) {
+          onClose();
+        }
+      }}
+    >
+      <section className="dialog-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="dialog-panel__header">
+          <div>
+            <p className="workspace-shell__eyebrow">Workspace project</p>
+            <h2 className="dialog-panel__title">
+              {mode === "edit" ? "Edit project" : "Create project"}
+            </h2>
+            <p className="dialog-panel__copy">
+              {mode === "edit"
+                ? "Update the project name or linked GitHub URL used in the workspace rail."
+                : "Group related VMs together so bulk actions and navigation stay scoped."}
+            </p>
+          </div>
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Close
+          </button>
+        </div>
+
+        <form className="dialog-panel__form" onSubmit={onSubmit}>
+          <label className="field-shell">
+            <span>Name</span>
+            <input
+              className="field-input"
+              value={draft.name}
+              onChange={(event) => onFieldChange("name", event.target.value)}
+              placeholder="Agent Forge"
+              disabled={busy}
+              autoFocus
+            />
+          </label>
+
+          <label className="field-shell">
+            <span>GitHub URL (optional)</span>
+            <input
+              className="field-input"
+              type="url"
+              value={draft.githubUrl}
+              onChange={(event) => onFieldChange("githubUrl", event.target.value)}
+              placeholder="https://github.com/org/repo"
+              disabled={busy}
+            />
+          </label>
+
+          <button
+            className="button button--primary button--full"
+            type="submit"
+            disabled={busy || normalizedName.length === 0 || unchanged}
+          >
+            {mode === "edit" ? "Save project" : "Create project"}
           </button>
         </form>
       </section>
@@ -350,6 +449,7 @@ export function SnapshotDialog({
 export function CreateVmDialog({
   busy,
   createDraft,
+  projectName,
   selectedSource,
   sourceGroups,
   validationError,
@@ -389,8 +489,8 @@ export function CreateVmDialog({
             <p className="workspace-shell__eyebrow">Create workspace</p>
             <h2 className="dialog-panel__title">Launch a VM</h2>
             <p className="dialog-panel__copy">
-              Keep the rail lean. Launch from a template, saved snapshot, or existing VM here,
-              then manage the rest in the sidepanel.
+              Launch into {projectName}. Use a template, saved snapshot, or existing VM as
+              the starting point.
             </p>
           </div>
           <button className="button button--ghost" type="button" onClick={onClose}>

@@ -4,8 +4,14 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { CloneVmDialog } from "../apps/web/src/dashboardDialogs.js";
-import type { CloneVmDialogState } from "../apps/web/src/dashboardShell.js";
+import {
+  CloneVmDialog,
+  CreateProjectDialog,
+} from "../apps/web/src/dashboardDialogs.js";
+import type {
+  CloneVmDialogState,
+  ProjectDraft,
+} from "../apps/web/src/dashboardShell.js";
 
 function buildCloneDialogState(overrides: Partial<CloneVmDialogState> = {}): CloneVmDialogState {
   return {
@@ -56,4 +62,49 @@ test("CloneVmDialog shows RAM copy for running VMs", () => {
 
   assert.match(html, /Include RAM for instant resume/);
   assert.match(html, /Keep RAM enabled when you want the fork to resume open apps and terminals\./);
+});
+
+test("CreateProjectDialog asks for a name and GitHub URL", () => {
+  const draft: ProjectDraft = {
+    name: "Client Alpha",
+    githubUrl: "",
+  };
+  const html = renderToStaticMarkup(
+    createElement(CreateProjectDialog, {
+      busy: false,
+      currentProject: null,
+      draft,
+      mode: "create",
+      onClose: () => {},
+      onFieldChange: () => {},
+      onSubmit: async () => {},
+    }),
+  );
+
+  assert.match(html, /Create project/);
+  assert.match(html, /GitHub URL \(optional\)/);
+  assert.match(html, /https:\/\/github\.com\/org\/repo/);
+  assert.doesNotMatch(html, /<button[^>]*disabled[^>]*>Create project<\/button>/);
+});
+
+test("CreateProjectDialog disables save when editing without changes", () => {
+  const draft: ProjectDraft = {
+    name: "Client Alpha",
+    githubUrl: "https://github.com/openai/openai",
+  };
+  const html = renderToStaticMarkup(
+    createElement(CreateProjectDialog, {
+      busy: false,
+      currentProject: draft,
+      draft,
+      mode: "edit",
+      onClose: () => {},
+      onFieldChange: () => {},
+      onSubmit: async () => {},
+    }),
+  );
+
+  assert.match(html, /Edit project/);
+  assert.match(html, /Save project/);
+  assert.match(html, /<button[^>]*disabled[^>]*>Save project<\/button>/);
 });

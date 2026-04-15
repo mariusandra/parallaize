@@ -4,6 +4,7 @@ import type { DashboardSummary, EnvironmentTemplate } from "../../../packages/sh
 
 import {
   CloneVmDialog,
+  CreateProjectDialog,
   CreateVmDialog,
   RenameDialog,
   SnapshotDialog,
@@ -21,6 +22,7 @@ import {
 } from "./dashboardHelpers.js";
 import type {
   CloneVmDialogState,
+  ProjectDraft,
   RenameDialogState,
   SnapshotDialogState,
   VmLogsDialogState,
@@ -31,9 +33,13 @@ interface DashboardDialogsHostProps {
   cloneVmDialog: CloneVmDialogState | null;
   cloneVmDraft: string;
   createDraft: CreateDraft;
+  createProjectDraft: ProjectDraft;
+  editingProjectId: string | null;
+  createProjectId: string;
   displayedTemplates: EnvironmentTemplate[];
   renameDialog: RenameDialogState | null;
   renameDraft: string;
+  showCreateProjectDialog: boolean;
   showCreateDialog: boolean;
   snapshotDialog: SnapshotDialogState | null;
   summary: DashboardSummary;
@@ -44,6 +50,7 @@ interface DashboardDialogsHostProps {
   onCloneStatefulChange: (checked: boolean) => void;
   onCloseCloneVmDialog: () => void;
   onCloseCreateDialog: () => void;
+  onCloseCreateProjectDialog: () => void;
   onCloseRenameDialog: () => void;
   onCloseSnapshotDialog: () => void;
   onCloseTemplateCloneDialog: () => void;
@@ -51,9 +58,11 @@ interface DashboardDialogsHostProps {
   onCloseVmLogsDialog: () => void;
   onCloneVmSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onCreateFieldChange: (field: keyof CreateDraft, value: string) => void;
+  onCreateProjectFieldChange: (field: keyof ProjectDraft, value: string) => void;
   onCreateShutdownBeforeCloneChange: (checked: boolean) => void;
   onCreateStatefulCloneChange: (checked: boolean) => void;
   onCreateRandomizeName: () => void;
+  onCreateProjectSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onCreateSourceChange: (event: React.ChangeEvent<HTMLSelectElement>) => void;
   onCreateSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onRefreshVmLogsDialog: () => void;
@@ -79,9 +88,13 @@ export function DashboardDialogsHost({
   cloneVmDialog,
   cloneVmDraft,
   createDraft,
+  createProjectDraft,
+  editingProjectId,
+  createProjectId,
   displayedTemplates,
   renameDialog,
   renameDraft,
+  showCreateProjectDialog,
   showCreateDialog,
   snapshotDialog,
   summary,
@@ -92,6 +105,7 @@ export function DashboardDialogsHost({
   onCloneStatefulChange,
   onCloseCloneVmDialog,
   onCloseCreateDialog,
+  onCloseCreateProjectDialog,
   onCloseRenameDialog,
   onCloseSnapshotDialog,
   onCloseTemplateCloneDialog,
@@ -99,9 +113,11 @@ export function DashboardDialogsHost({
   onCloseVmLogsDialog,
   onCloneVmSubmit,
   onCreateFieldChange,
+  onCreateProjectFieldChange,
   onCreateShutdownBeforeCloneChange,
   onCreateStatefulCloneChange,
   onCreateRandomizeName,
+  onCreateProjectSubmit,
   onCreateSourceChange,
   onCreateSubmit,
   onRefreshVmLogsDialog,
@@ -115,12 +131,36 @@ export function DashboardDialogsHost({
   onTemplateEditFieldChange,
   onTemplateEditSubmit,
 }: DashboardDialogsHostProps): JSX.Element {
+  const createProject =
+    summary.projects.find((project) => project.id === createProjectId) ?? summary.projects[0];
+  const editingProject =
+    summary.projects.find((project) => project.id === editingProjectId) ?? null;
+
   return (
     <>
+      {showCreateProjectDialog ? (
+        <CreateProjectDialog
+          busy={busy}
+          currentProject={
+            editingProject
+              ? {
+                  githubUrl: editingProject.githubUrl,
+                  name: editingProject.name,
+                }
+              : null
+          }
+          draft={createProjectDraft}
+          mode={editingProject ? "edit" : "create"}
+          onClose={onCloseCreateProjectDialog}
+          onFieldChange={onCreateProjectFieldChange}
+          onSubmit={onCreateProjectSubmit}
+        />
+      ) : null}
       {showCreateDialog ? (
         <CreateVmDialog
           busy={busy}
           createDraft={createDraft}
+          projectName={createProject?.name ?? "Default"}
           selectedSource={resolveCreateSourceSelection(
             summary.templates,
             summary.snapshots,

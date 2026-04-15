@@ -11,6 +11,7 @@ import type {
   EnvironmentTemplate,
   VmInstance,
 } from "../packages/shared/src/types.js";
+import { buildDefaultWorkspaceProject } from "../packages/shared/src/helpers.js";
 import { DesktopManager } from "../apps/control/src/manager.js";
 import type { DesktopProvider } from "../apps/control/src/providers.js";
 import { createProvider } from "../apps/control/src/providers.js";
@@ -72,6 +73,118 @@ test("mock provider supports create, snapshot, and template capture flows", asyn
   assert.equal(capturedTemplate?.launchSource, "mock://templates/captured-test-template");
   assert.equal(summary.snapshots[0]?.templateId, capturedTemplate?.id);
   assert.ok(summary.jobs.some((job) => job.kind === "capture-template" && job.status === "succeeded"));
+});
+
+test("projects can own VMs and deleting a project removes its VMs", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-projects-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const project = manager.createProject({
+    name: "Client Alpha",
+    githubUrl: "https://github.com/openai/openai",
+  });
+  const vm = manager.createVm({
+    projectId: project.id,
+    templateId: "tpl-0001",
+    name: "client-alpha-lab",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  await wait(750);
+
+  const beforeDelete = manager.getSummary();
+  assert.equal(beforeDelete.vms.find((entry) => entry.id === vm.id)?.projectId, project.id);
+  assert.ok(beforeDelete.projects.some((entry) => entry.id === project.id));
+
+  manager.deleteProject(project.id);
+  await wait(750);
+
+  const afterDelete = manager.getSummary();
+  assert.ok(!afterDelete.vms.some((entry) => entry.id === vm.id));
+  assert.ok(!afterDelete.projects.some((entry) => entry.id === project.id));
+});
+
+test("projects accept blank GitHub URLs and can be edited later", (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-project-edit-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const project = manager.createProject({
+    name: "Client Beta",
+    githubUrl: "",
+  });
+  assert.equal(project.githubUrl, "");
+
+  const updatedProject = manager.updateProject(project.id, {
+    name: "Client Beta Prime",
+    githubUrl: "https://github.com/openai/openai",
+  });
+  assert.equal(updatedProject.name, "Client Beta Prime");
+  assert.equal(updatedProject.githubUrl, "https://github.com/openai/openai");
+
+  const clearedProject = manager.updateProject(project.id, {
+    name: "Client Beta Prime",
+    githubUrl: "",
+  });
+  assert.equal(clearedProject.githubUrl, "");
+
+  const summaryProject = manager.getSummary().projects.find((entry) => entry.id === project.id);
+  assert.equal(summaryProject?.name, "Client Beta Prime");
+  assert.equal(summaryProject?.githubUrl, "");
+});
+
+test("vms can be moved between projects", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-vm-project-move-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+  const project = manager.createProject({
+    name: "Client Gamma",
+    githubUrl: "",
+  });
+  const vm = manager.createVm({
+    templateId: "tpl-0001",
+    name: "move-me",
+    resources: {
+      cpu: 4,
+      ramMb: 8192,
+      diskGb: 60,
+    },
+  });
+
+  await wait(750);
+
+  const updated = await manager.updateVm(vm.id, {
+    projectId: project.id,
+  });
+
+  assert.equal(updated.projectId, project.id);
+  assert.equal(manager.getVmDetail(vm.id).vm.projectId, project.id);
 });
 
 test("create jobs expose staged progress while the desktop boots", async (context) => {
@@ -2630,6 +2743,7 @@ test("manager recovers interrupted create jobs when the VM is already running af
   const state: AppState = {
     sequence: 2,
     provider: provider.state,
+    projects: [buildDefaultWorkspaceProject(now)],
     templates: [
       {
         id: "tpl-0001",
@@ -6369,6 +6483,7 @@ test("incus clones do not reuse the source VM VNC identity", async (context) => 
   const state: AppState = {
     sequence: 56,
     provider: provider.state,
+    projects: [buildDefaultWorkspaceProject(now)],
     templates: [template],
     vms: [
       {
@@ -7131,6 +7246,7 @@ test("manager periodically refreshes reachable Selkies sessions for maintenance"
   const state: AppState = {
     sequence: 2,
     provider: provider.state,
+    projects: [buildDefaultWorkspaceProject(now)],
     templates: [
       {
         id: "tpl-0001",

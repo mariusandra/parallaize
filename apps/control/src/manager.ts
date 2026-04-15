@@ -4,6 +4,7 @@ import type {
   ActionJob,
   CaptureTemplateInput,
   CloneVmInput,
+  CreateProjectInput,
   CreateTemplateInput,
   CreateVmInput,
   DashboardSummary,
@@ -14,6 +15,7 @@ import type {
   ResourceTelemetry,
   SetVmResolutionInput,
   SnapshotInput,
+  UpdateProjectInput,
   UpdateTemplateInput,
   VmDesktopBridgeVersion,
   UpdateVmForwardedPortsInput,
@@ -25,6 +27,7 @@ import type {
   VmInstance,
   VmLogsSnapshot,
   VmTouchedFilesSnapshot,
+  WorkspaceProject,
 } from "../../../packages/shared/src/types.js";
 import type {
   DesktopProvider,
@@ -53,14 +56,17 @@ import {
 import {
   captureTemplate,
   cloneVm,
+  createProject,
   createTemplate,
   createVm,
+  deleteProject,
   deleteTemplate,
   deleteVm,
   deleteVmSnapshot,
   injectCommand,
   launchVmFromSnapshot,
   reorderVms,
+  restartProject,
   pauseVm,
   resizeVm,
   restartVm,
@@ -68,8 +74,11 @@ import {
   setVmNetworkMode,
   setVmResolution,
   snapshotVm,
+  startProject,
   startVm,
+  stopProject,
   stopVm,
+  updateProject,
   updateTemplate,
   updateVm,
   updateVmForwardedPorts,
@@ -358,6 +367,14 @@ export class DesktopManager {
     return createVm(this.runtime, input);
   }
 
+  createProject(input: CreateProjectInput): WorkspaceProject {
+    return createProject(this.runtime, input);
+  }
+
+  updateProject(projectId: string, input: UpdateProjectInput): WorkspaceProject {
+    return updateProject(this.runtime, projectId, input);
+  }
+
   cloneVm(input: CloneVmInput): VmInstance {
     return cloneVm(this.runtime, input);
   }
@@ -380,6 +397,22 @@ export class DesktopManager {
 
   reorderVms(input: ReorderVmsInput): DashboardSummary {
     return reorderVms(this.runtime, input);
+  }
+
+  startProject(projectId: string): void {
+    startProject(this.runtime, projectId);
+  }
+
+  stopProject(projectId: string): void {
+    stopProject(this.runtime, projectId);
+  }
+
+  restartProject(projectId: string): void {
+    restartProject(this.runtime, projectId);
+  }
+
+  deleteProject(projectId: string): void {
+    deleteProject(this.runtime, projectId);
   }
 
   deleteVm(vmId: string): void {

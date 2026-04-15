@@ -10,6 +10,7 @@ export const resolutionControlClientIdStorageKey =
   "parallaize.resolution-control-client-id";
 export const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 export const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
+export const collapsedProjectsStorageKey = "parallaize.collapsed-projects";
 export const homepageWallpaperStorageKey = "parallaize.homepage-wallpaper";
 
 export type ThemeModePreference = "light" | "dark";
@@ -122,6 +123,26 @@ export function readSidepanelCollapsedByVm(): Record<string, true> {
     return Object.fromEntries(
       Object.entries(parsed).filter(
         ([vmId, collapsed]) => vmId.length > 0 && collapsed === true,
+      ),
+    ) as Record<string, true>;
+  } catch {
+    return {};
+  }
+}
+
+export function readCollapsedProjects(): Record<string, true> {
+  const stored = readStoredString(collapsedProjectsStorageKey);
+
+  if (!stored) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([projectId, collapsed]) => projectId.length > 0 && collapsed === true,
       ),
     ) as Record<string, true>;
   } catch {

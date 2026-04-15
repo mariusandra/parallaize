@@ -1,4 +1,5 @@
 import {
+  resolveWorkspaceProjectId,
   formatTimestamp,
   minimumCreateDiskGb,
   normalizeTemplateDesktopTransport,
@@ -24,6 +25,7 @@ import type {
   VmPortForward,
   VmTouchedFile,
   VmTouchedFilesSnapshot,
+  WorkspaceProject,
 } from "../../../packages/shared/src/types.js";
 import {
   vmNameAdjectives,
@@ -70,6 +72,12 @@ export interface CreateSourceSelection {
 export interface CreateSourceGroup {
   label: string;
   options: CreateSourceSelection[];
+}
+
+export interface WorkspaceProjectGroup {
+  project: WorkspaceProject;
+  runningVmCount: number;
+  vms: VmInstance[];
 }
 
 export interface CaptureDraft {
@@ -382,10 +390,13 @@ export function parseRamDraftValue(ramGb: string): number {
     : Number.NaN;
 }
 
+export type VmRailDropPosition = "before" | "after";
+
 export function reorderVmIds(
   currentVmIds: string[],
   draggedVmId: string,
   targetVmId: string,
+  dropPosition: VmRailDropPosition = "before",
 ): string[] {
   if (draggedVmId === targetVmId) {
     return currentVmIds;
@@ -398,13 +409,89 @@ export function reorderVmIds(
     return currentVmIds;
   }
 
-  nextVmIds.splice(targetIndex, 0, draggedVmId);
+  nextVmIds.splice(targetIndex + (dropPosition === "after" ? 1 : 0), 0, draggedVmId);
+  return nextVmIds;
+}
+
+export function reorderProjectVmIds(
+  currentVmIds: string[],
+  projectVmIds: string[],
+  nextProjectVmIds: string[],
+): string[] {
+  const projectVmIdSet = new Set(projectVmIds);
+  let projectIndex = 0;
+
+  return currentVmIds.map((vmId) =>
+    projectVmIdSet.has(vmId) ? nextProjectVmIds[projectIndex++] ?? vmId : vmId,
+  );
+}
+
+export function moveVmIdBetweenProjects(
+  currentVmIds: string[],
+  draggedVmId: string,
+  targetProjectVmIds: string[],
+  targetVmId?: string,
+  dropPosition: VmRailDropPosition = "before",
+): string[] {
+  const nextVmIds = currentVmIds.filter((vmId) => vmId !== draggedVmId);
+
+  if (targetVmId) {
+    const targetIndex = nextVmIds.indexOf(targetVmId);
+
+    if (targetIndex !== -1) {
+      nextVmIds.splice(targetIndex + (dropPosition === "after" ? 1 : 0), 0, draggedVmId);
+      return nextVmIds;
+    }
+  }
+
+  const targetProjectIds = targetProjectVmIds.filter((vmId) => vmId !== draggedVmId);
+  const lastTargetProjectVmId = targetProjectIds[targetProjectIds.length - 1];
+
+  if (!lastTargetProjectVmId) {
+    return [...nextVmIds, draggedVmId];
+  }
+
+  const targetProjectIndex = nextVmIds.indexOf(lastTargetProjectVmId);
+
+  if (targetProjectIndex === -1) {
+    return [...nextVmIds, draggedVmId];
+  }
+
+  nextVmIds.splice(targetProjectIndex + 1, 0, draggedVmId);
   return nextVmIds;
 }
 
 export function sameIdOrder(left: string[], right: string[]): boolean {
   return left.length === right.length &&
     left.every((id, index) => id === right[index]);
+}
+
+export function buildWorkspaceProjectGroups(
+  projects: WorkspaceProject[],
+  vms: VmInstance[],
+): WorkspaceProjectGroup[] {
+  const vmsByProjectId = new Map<string, VmInstance[]>();
+
+  for (const vm of vms) {
+    const projectId = resolveWorkspaceProjectId(projects, vm.projectId);
+    const existing = vmsByProjectId.get(projectId);
+
+    if (existing) {
+      existing.push(vm);
+    } else {
+      vmsByProjectId.set(projectId, [vm]);
+    }
+  }
+
+  return projects.map((project) => {
+    const projectVms = vmsByProjectId.get(project.id) ?? [];
+
+    return {
+      project,
+      runningVmCount: projectVms.filter((vm) => vm.status === "running").length,
+      vms: projectVms,
+    };
+  });
 }
 
 export function normalizeActiveCpuThreshold(value: number): number {

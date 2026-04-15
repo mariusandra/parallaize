@@ -43,6 +43,11 @@ export interface LoginDraft {
   password: string;
 }
 
+export interface ProjectDraft {
+  githubUrl: string;
+  name: string;
+}
+
 export type ThemeMode = "light" | "dark";
 export type DesktopResolutionMode = "viewport" | "fixed";
 export type ResolutionControlOwner = "none" | "self" | "other";
@@ -119,6 +124,7 @@ export interface VmLogsViewState {
 
 export interface CloneVmDialogState {
   canCaptureRam: boolean;
+  projectId?: string;
   ramMb: number;
   sourceVmId: string;
   sourceVmName: string;

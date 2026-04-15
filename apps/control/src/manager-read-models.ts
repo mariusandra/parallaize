@@ -33,6 +33,7 @@ export function getSummary(runtime: DesktopManagerRuntime): DashboardSummary {
   return {
     hostTelemetry: runtime.hostTelemetry,
     provider: state.provider,
+    projects: state.projects,
     templates: state.templates,
     vms: state.vms.map((vm) => ({
       ...vm,

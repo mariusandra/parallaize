@@ -17,7 +17,11 @@ import {
 
 declare const __PARALLAIZE_VERSION__: string;
 
-import { formatResources, formatTimestamp } from "../../../packages/shared/src/helpers.js";
+import {
+  formatResources,
+  formatTimestamp,
+  resolveWorkspaceProjectId,
+} from "../../../packages/shared/src/helpers.js";
 import type {
   AuthStatus,
   CaptureTemplateInput,
@@ -220,6 +224,7 @@ import type {
   LoginDraft,
   Notice,
   PendingManualResolutionSync,
+  ProjectDraft,
   RenameDialogState,
   ResolutionControlStatus,
   ResolutionDraft,
@@ -237,12 +242,14 @@ import {
 } from "./dashboardFullscreen.js";
 import {
   activeCpuThresholdsByVmStorageKey,
+  collapsedProjectsStorageKey,
   desktopResolutionByVmStorageKey,
   homepageWallpaperStorageKey,
   livePreviewsStorageKey,
   overviewSidepanelCollapsedStorageKey,
   railWidthStorageKey,
   readActiveCpuThresholdsByVm,
+  readCollapsedProjects,
   readDesktopResolutionByVm,
   readDocumentVisible,
   readHomepageWallpaperName,
@@ -425,6 +432,11 @@ const emptyCreateDraft: CreateDraft = {
   shutdownSourceBeforeClone: false,
 };
 
+const emptyProjectDraft: ProjectDraft = {
+  githubUrl: "",
+  name: "",
+};
+
 const emptyResourceDraft: ResourceDraft = {
   cpu: "",
   ramGb: "",
@@ -518,6 +530,9 @@ export function DashboardApp(): JSX.Element {
     Record<string, true>
   >({});
   const [createDraft, setCreateDraft] = useState<CreateDraft>(emptyCreateDraft);
+  const [createProjectDraft, setCreateProjectDraft] = useState<ProjectDraft>(emptyProjectDraft);
+  const [createProjectId, setCreateProjectId] = useState("");
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [createDirty, setCreateDirty] = useState(false);
   const [resourceDraft, setResourceDraft] = useState<ResourceDraft>(emptyResourceDraft);
   const [commandDraft, setCommandDraft] = useState("");
@@ -525,6 +540,7 @@ export function DashboardApp(): JSX.Element {
   const [captureDraft, setCaptureDraft] = useState<CaptureDraft>(emptyCaptureDraft);
   const [templateEditDraft, setTemplateEditDraft] = useState<TemplateEditDraft | null>(null);
   const [templateCloneDraft, setTemplateCloneDraft] = useState<TemplateCloneDraft | null>(null);
+  const [showCreateProjectDialog, setShowCreateProjectDialog] = useState(false);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [cloneVmDialog, setCloneVmDialog] = useState<CloneVmDialogState | null>(null);
   const [cloneVmDraft, setCloneVmDraft] = useState("");
@@ -561,6 +577,10 @@ export function DashboardApp(): JSX.Element {
     ),
   );
   const [openVmMenuId, setOpenVmMenuId] = useState<string | null>(null);
+  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
+  const [collapsedProjects, setCollapsedProjects] = useState<Record<string, true>>(
+    () => readCollapsedProjects(),
+  );
   const [vmRailOrderIds, setVmRailOrderIds] = useState<string[] | null>(null);
   const [draggedVmId, setDraggedVmId] = useState<string | null>(null);
   const [vmReorderBusy, setVmReorderBusy] = useState(false);
@@ -1610,11 +1630,14 @@ export function DashboardApp(): JSX.Element {
     closeTemplateCloneDialog,
     closeTemplateEditDialog,
     closeVmLogsDialog,
+    closeCreateProjectDialog,
     handleClone,
     handleCloneVmSubmit,
     handleCloneStatefulChange,
     handleCreate,
     handleCreateField,
+    handleCreateProjectField,
+    handleCreateProjectSubmit,
     handleCreateShutdownBeforeCloneChange,
     handleCreateStatefulCloneChange,
     handleCreateSourceChange,
@@ -1639,6 +1662,11 @@ export function DashboardApp(): JSX.Element {
     handleTemplateCloneField,
     handleTemplateCloneSubmit,
     handleTemplateEditField,
+    handleProjectAction,
+    handleProjectDragOver,
+    handleProjectDrop,
+    handleProjectVmListDragOver,
+    handleProjectVmListDrop,
     handleVmAction,
     handleVmStripDragOver,
     handleVmStripDrop,
@@ -1648,6 +1676,8 @@ export function DashboardApp(): JSX.Element {
     handleVmTileDrop,
     inspectVm,
     openCreateDialog,
+    openCreateProjectDialog,
+    openEditProjectDialog,
     openCreateDialogForTemplate,
     openHomepage,
     openTemplateCloneDialog,
@@ -1663,15 +1693,22 @@ export function DashboardApp(): JSX.Element {
     runMutation,
     selectVm,
     setCurrentSidepanelCollapsed,
+    setProjectCollapsed,
     setVmDesktopResolutionPreference,
     setVmSidepanelCollapsed,
+    toggleProjectCollapsed,
+    toggleProjectMenu,
     toggleFullscreen,
   } = createDashboardAppMutations({
     summary,
     displayedVms,
     createDraft,
+    createProjectDraft,
+    createProjectId,
+    editingProjectId,
     cloneVmDialog,
     cloneVmDraft,
+    showCreateProjectDialog,
     snapshotDialog,
     renameDialog,
     renameDraft,
@@ -1680,6 +1717,8 @@ export function DashboardApp(): JSX.Element {
     activeCpuThresholdsByVm,
     detail,
     draggedVmId,
+    openProjectMenuId,
+    collapsedProjects,
     vmRailOrderIds,
     vmReorderBusy,
     wideShellLayout,
@@ -1716,6 +1755,10 @@ export function DashboardApp(): JSX.Element {
     setBusyLabel,
     setCreateDirty,
     setCreateDraft,
+    setCreateProjectDraft,
+    setCreateProjectId,
+    setEditingProjectId,
+    setShowCreateProjectDialog,
     setShowCreateDialog,
     setCloneVmDialog,
     setCloneVmDraft,
@@ -1727,9 +1770,11 @@ export function DashboardApp(): JSX.Element {
     setTemplateCloneDraft,
     setTemplateEditDraft,
     setShellMenuOpen,
+    setOpenProjectMenuId,
     setOpenVmMenuId,
     setOpenTemplateMenuId,
     setSelectedVmId,
+    setCollapsedProjects,
     setSidepanelCollapsedByVm,
     setOverviewSidepanelCollapsed,
     setDesktopResolutionByVm,
@@ -2915,12 +2960,55 @@ export function DashboardApp(): JSX.Element {
   }, [summary?.templates, summary?.snapshots, summary?.vms, createDirty]);
 
   useEffect(() => {
+    if (!summary) {
+      return;
+    }
+
+    const nextProjectId = resolveWorkspaceProjectId(summary.projects, createProjectId);
+
+    if (nextProjectId !== createProjectId) {
+      setCreateProjectId(nextProjectId);
+    }
+  }, [summary?.projects, createProjectId]);
+
+  useEffect(() => {
     if (!openTemplateMenuId || summary?.templates.some((template) => template.id === openTemplateMenuId)) {
       return;
     }
 
     setOpenTemplateMenuId(null);
   }, [openTemplateMenuId, summary?.templates]);
+
+  useEffect(() => {
+    if (!openProjectMenuId || summary?.projects.some((project) => project.id === openProjectMenuId)) {
+      return;
+    }
+
+    setOpenProjectMenuId(null);
+  }, [openProjectMenuId, summary?.projects]);
+
+  useEffect(() => {
+    if (!editingProjectId || summary?.projects.some((project) => project.id === editingProjectId)) {
+      return;
+    }
+
+    setShowCreateProjectDialog(false);
+    setEditingProjectId(null);
+  }, [editingProjectId, summary?.projects]);
+
+  useEffect(() => {
+    if (!summary) {
+      return;
+    }
+
+    setCollapsedProjects((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([projectId]) =>
+          summary.projects.some((project) => project.id === projectId),
+        ),
+      ) as Record<string, true>,
+    );
+  }, [summary?.projects]);
 
   useEffect(() => {
     if (!selectedVmId) {
@@ -3491,6 +3579,13 @@ export function DashboardApp(): JSX.Element {
       JSON.stringify(sidepanelCollapsedByVm),
     );
   }, [sidepanelCollapsedByVm]);
+
+  useEffect(() => {
+    writeStoredString(
+      collapsedProjectsStorageKey,
+      JSON.stringify(collapsedProjects),
+    );
+  }, [collapsedProjects]);
 
   useEffect(() => {
     writeStoredString(
@@ -4821,6 +4916,7 @@ export function DashboardApp(): JSX.Element {
       <main
         className="app-shell"
         onClick={() => {
+          setOpenProjectMenuId(null);
           setOpenVmMenuId(null);
           setOpenTemplateMenuId(null);
           setShellMenuOpen(false);
@@ -4863,6 +4959,8 @@ export function DashboardApp(): JSX.Element {
                 : null
             }
             newerReleaseAvailable={newerReleaseAvailable}
+            collapsedProjects={collapsedProjects}
+            openProjectMenuId={openProjectMenuId}
             openVmMenuId={openVmMenuId}
             railRef={railRef}
             railResizeActive={railResizeActive}
@@ -4884,10 +4982,18 @@ export function DashboardApp(): JSX.Element {
               void handleLogout();
             }}
             onOpenCreateDialog={openCreateDialog}
+            onOpenCreateProjectDialog={openCreateProjectDialog}
+            onEditProject={openEditProjectDialog}
             onOpenHomepage={openHomepage}
             onOpenLogs={openVmLogsDialog}
             onPasteLocal={requestVmLocalPaste}
             onInspectVm={inspectVm}
+            onProjectAction={handleProjectAction}
+            onProjectDragOver={handleProjectDragOver}
+            onProjectDrop={handleProjectDrop}
+            onProjectVmListDragOver={handleProjectVmListDragOver}
+            onProjectVmListDrop={handleProjectVmListDrop}
+            onProjectMenuToggle={toggleProjectMenu}
             onRename={handleRenameVm}
             onResizeKeyDown={handleRailResizeKeyDown}
             onResizePointerDown={handleRailResizeStart}
@@ -4904,6 +5010,7 @@ export function DashboardApp(): JSX.Element {
               setShellMenuOpen(false);
             }}
             onToggleShellMenu={() => {
+              setOpenProjectMenuId(null);
               setOpenVmMenuId(null);
               setOpenTemplateMenuId(null);
               setShellMenuOpen((current) => !current);
@@ -4915,9 +5022,11 @@ export function DashboardApp(): JSX.Element {
             }}
             onVmMenuToggle={(vmId) => {
               setShellMenuOpen(false);
+              setOpenProjectMenuId(null);
               setOpenTemplateMenuId(null);
               setOpenVmMenuId((current) => (current === vmId ? null : vmId));
             }}
+            onToggleProjectCollapsed={toggleProjectCollapsed}
             onPowerAction={handleVmAction}
             onVmTileDragEnd={handleVmTileDragEnd}
             onVmTileDragOver={handleVmTileDragOver}
@@ -5091,9 +5200,13 @@ export function DashboardApp(): JSX.Element {
         cloneVmDialog={cloneVmDialog}
         cloneVmDraft={cloneVmDraft}
         createDraft={createDraft}
+        createProjectDraft={createProjectDraft}
+        editingProjectId={editingProjectId}
+        createProjectId={createProjectId}
         displayedTemplates={displayedTemplates}
         renameDialog={renameDialog}
         renameDraft={renameDraft}
+        showCreateProjectDialog={showCreateProjectDialog}
         showCreateDialog={showCreateDialog}
         snapshotDialog={snapshotDialog}
         summary={summary}
@@ -5104,6 +5217,7 @@ export function DashboardApp(): JSX.Element {
         onCloneStatefulChange={handleCloneStatefulChange}
         onCloseCloneVmDialog={closeCloneVmDialog}
         onCloseCreateDialog={() => setShowCreateDialog(false)}
+        onCloseCreateProjectDialog={closeCreateProjectDialog}
         onCloseRenameDialog={closeRenameDialog}
         onCloseSnapshotDialog={closeSnapshotDialog}
         onCloseTemplateCloneDialog={closeTemplateCloneDialog}
@@ -5111,9 +5225,11 @@ export function DashboardApp(): JSX.Element {
         onCloseVmLogsDialog={closeVmLogsDialog}
         onCloneVmSubmit={handleCloneVmSubmit}
         onCreateFieldChange={handleCreateField}
+        onCreateProjectFieldChange={handleCreateProjectField}
         onCreateShutdownBeforeCloneChange={handleCreateShutdownBeforeCloneChange}
         onCreateStatefulCloneChange={handleCreateStatefulCloneChange}
         onCreateRandomizeName={randomizeCreateName}
+        onCreateProjectSubmit={handleCreateProjectSubmit}
         onCreateSourceChange={handleCreateSourceChange}
         onCreateSubmit={handleCreate}
         onRefreshVmLogsDialog={refreshVmLogsDialog}

@@ -11,8 +11,10 @@ import {
   type SetStateAction,
 } from "react";
 
+import { resolveWorkspaceProjectId } from "../../../packages/shared/src/helpers.js";
 import type {
   AuthStatus,
+  CreateProjectInput,
   CreateTemplateInput,
   CreateVmInput,
   DashboardSummary,
@@ -20,14 +22,15 @@ import type {
   HealthStatus,
   ReorderVmsInput,
   SnapshotInput,
-  UpdateTemplateInput,
   UpdateVmInput,
+  UpdateTemplateInput,
   VmDetail,
   VmDiskUsageSnapshot,
   VmFileBrowserSnapshot,
   VmInstance,
   VmPowerAction,
   VmTouchedFilesSnapshot,
+  WorkspaceProject,
 } from "../../../packages/shared/src/types.js";
 import { buildRandomVmName } from "./vmNames.js";
 import {
@@ -40,15 +43,18 @@ import {
   buildTemplateCloneDraft,
   buildTemplateEditDraft,
   firstCreateSourceSelection,
+  moveVmIdBetweenProjects,
   normalizeActiveCpuThreshold,
   parseInitCommandsDraft,
   parseRamDraftValue,
+  reorderProjectVmIds,
   reorderVmIds,
   resolveCreateSourceSelection,
   sameIdOrder,
   type CreateDraft,
   type TemplateCloneDraft,
   type TemplateEditDraft,
+  type VmRailDropPosition,
 } from "./dashboardHelpers.js";
 import {
   buildDefaultSnapshotLabel,
@@ -71,6 +77,7 @@ import {
   type DesktopResolutionMode,
   type DesktopResolutionPreference,
   type Notice,
+  type ProjectDraft,
   type RenameDialogState,
   type ResolutionDraft,
   type SnapshotDialogState,
@@ -89,8 +96,12 @@ interface DashboardAppMutationsContext {
   summary: DashboardSummary | null;
   displayedVms: VmInstance[];
   createDraft: CreateDraft;
+  createProjectDraft: ProjectDraft;
+  createProjectId: string;
+  editingProjectId: string | null;
   cloneVmDialog: CloneVmDialogState | null;
   cloneVmDraft: string;
+  showCreateProjectDialog: boolean;
   snapshotDialog: SnapshotDialogState | null;
   renameDialog: RenameDialogState | null;
   renameDraft: string;
@@ -99,6 +110,8 @@ interface DashboardAppMutationsContext {
   activeCpuThresholdsByVm: Record<string, number>;
   detail: VmDetail | null;
   draggedVmId: string | null;
+  openProjectMenuId: string | null;
+  collapsedProjects: Record<string, true>;
   vmRailOrderIds: string[] | null;
   vmReorderBusy: boolean;
   wideShellLayout: boolean;
@@ -139,6 +152,10 @@ interface DashboardAppMutationsContext {
   setBusyLabel: SetState<string | null>;
   setCreateDirty: SetState<boolean>;
   setCreateDraft: SetState<CreateDraft>;
+  setCreateProjectDraft: SetState<ProjectDraft>;
+  setCreateProjectId: SetState<string>;
+  setEditingProjectId: SetState<string | null>;
+  setShowCreateProjectDialog: SetState<boolean>;
   setShowCreateDialog: SetState<boolean>;
   setCloneVmDialog: SetState<CloneVmDialogState | null>;
   setCloneVmDraft: SetState<string>;
@@ -150,9 +167,11 @@ interface DashboardAppMutationsContext {
   setTemplateCloneDraft: SetState<TemplateCloneDraft | null>;
   setTemplateEditDraft: SetState<TemplateEditDraft | null>;
   setShellMenuOpen: SetState<boolean>;
+  setOpenProjectMenuId: SetState<string | null>;
   setOpenVmMenuId: SetState<string | null>;
   setOpenTemplateMenuId: SetState<string | null>;
   setSelectedVmId: SetState<string | null>;
+  setCollapsedProjects: SetState<Record<string, true>>;
   setSidepanelCollapsedByVm: SetState<Record<string, true>>;
   setOverviewSidepanelCollapsed: SetState<boolean>;
   setDesktopResolutionByVm: SetState<Record<string, DesktopResolutionPreference>>;
@@ -172,8 +191,12 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     summary,
     displayedVms,
     createDraft,
+    createProjectDraft,
+    createProjectId,
+    editingProjectId,
     cloneVmDialog,
     cloneVmDraft,
+    showCreateProjectDialog,
     snapshotDialog,
     renameDialog,
     renameDraft,
@@ -182,6 +205,8 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     activeCpuThresholdsByVm,
     detail,
     draggedVmId,
+    openProjectMenuId,
+    collapsedProjects,
     vmRailOrderIds,
     vmReorderBusy,
     wideShellLayout,
@@ -218,6 +243,10 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setBusyLabel,
     setCreateDirty,
     setCreateDraft,
+    setCreateProjectDraft,
+    setCreateProjectId,
+    setEditingProjectId,
+    setShowCreateProjectDialog,
     setShowCreateDialog,
     setCloneVmDialog,
     setCloneVmDraft,
@@ -229,9 +258,11 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setTemplateCloneDraft,
     setTemplateEditDraft,
     setShellMenuOpen,
+    setOpenProjectMenuId,
     setOpenVmMenuId,
     setOpenTemplateMenuId,
     setSelectedVmId,
+    setCollapsedProjects,
     setSidepanelCollapsedByVm,
     setOverviewSidepanelCollapsed,
     setDesktopResolutionByVm,
@@ -344,10 +375,12 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setNotice(null);
     setBusyLabel(null);
     setShellMenuOpen(false);
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setVmLogsDialog(null);
     setSnapshotDialog(null);
+    setShowCreateProjectDialog(false);
   }
 
   async function handleLogout(): Promise<void> {
@@ -386,6 +419,38 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     } finally {
       setBusyLabel(null);
     }
+  }
+
+  function currentProjectId(projectId?: string | null): string {
+    return resolveWorkspaceProjectId(summary?.projects ?? [], projectId ?? createProjectId);
+  }
+
+  function currentProject(projectId?: string | null): WorkspaceProject | null {
+    const resolvedProjectId = currentProjectId(projectId);
+    return summary?.projects.find((project) => project.id === resolvedProjectId) ?? null;
+  }
+
+  function setProjectCollapsed(projectId: string, collapsed: boolean): void {
+    setCollapsedProjects((current) => {
+      if (collapsed) {
+        if (current[projectId]) {
+          return current;
+        }
+
+        return {
+          ...current,
+          [projectId]: true,
+        };
+      }
+
+      if (!current[projectId]) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[projectId];
+      return next;
+    });
   }
 
   async function handleCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -431,6 +496,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
       ramMb: parseRamDraftValue(createDraft.ramGb),
       diskGb: Number(createDraft.diskGb),
     };
+    const projectId = currentProjectId();
     const pendingLabel =
       requestedName ||
       (selectedSource.kind === "vm" && selectedSource.sourceVm
@@ -443,6 +509,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
         const createdVm =
           selectedSource.kind === "vm" && selectedSource.sourceVm
             ? await postJson<VmInstance>(`/api/vms/${selectedSource.sourceVm.id}/clone`, {
+                projectId,
                 sourceVmId: selectedSource.sourceVm.id,
                 name: requestedName,
                 wallpaperName: createDraft.wallpaperName.trim() || requestedName,
@@ -453,6 +520,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
                   createDraft.statefulClone && !createDraft.shutdownSourceBeforeClone,
               })
             : await postJson<VmInstance>("/api/vms", {
+                projectId,
                 name: requestedName,
                 wallpaperName: createDraft.wallpaperName.trim() || requestedName,
                 resources: requestedResources,
@@ -466,6 +534,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
                     }),
               } satisfies CreateVmInput);
         setCreateDirty(false);
+        setProjectCollapsed(projectId, false);
         if (selectedSource.kind === "snapshot" && selectedSource.snapshot) {
           setCreateDraft(
             buildCreateDraftFromSnapshot(
@@ -605,7 +674,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     );
   }
 
-  function openCreateDialog(): void {
+  function openCreateDialog(projectId?: string): void {
     const nextSource = summary
       ? resolveCreateSourceSelection(
           summary.templates,
@@ -616,7 +685,12 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
       : null;
 
     setCreateDirty(false);
+    setCreateProjectId(currentProjectId(projectId));
+    if (projectId) {
+      setProjectCollapsed(currentProjectId(projectId), false);
+    }
     setCreateDraft(nextSource ? buildCreateDraftFromSource(nextSource) : emptyCreateDraft);
+    setOpenProjectMenuId(null);
     setOpenTemplateMenuId(null);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
@@ -625,14 +699,58 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
 
   function openCreateDialogForTemplate(template: EnvironmentTemplate): void {
     setCreateDirty(false);
+    setCreateProjectId(currentProjectId());
     setCreateDraft(buildCreateDraftFromTemplate(template));
+    setOpenProjectMenuId(null);
     setOpenTemplateMenuId(null);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
     setShowCreateDialog(true);
   }
 
+  function openCreateProjectDialog(): void {
+    setCreateProjectDraft({
+      githubUrl: "",
+      name: "",
+    });
+    setEditingProjectId(null);
+    setOpenProjectMenuId(null);
+    setOpenTemplateMenuId(null);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+    setShowCreateProjectDialog(true);
+  }
+
+  function openEditProjectDialog(project: WorkspaceProject): void {
+    setCreateProjectDraft({
+      githubUrl: project.githubUrl,
+      name: project.name,
+    });
+    setEditingProjectId(project.id);
+    setOpenProjectMenuId(null);
+    setOpenTemplateMenuId(null);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+    setShowCreateProjectDialog(true);
+  }
+
+  function closeCreateProjectDialog(): void {
+    setShowCreateProjectDialog(false);
+    setEditingProjectId(null);
+  }
+
+  function handleCreateProjectField(
+    field: keyof ProjectDraft,
+    value: string,
+  ): void {
+    setCreateProjectDraft((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }
+
   function openTemplateCloneDialog(template: EnvironmentTemplate): void {
+    setOpenProjectMenuId(null);
     setOpenTemplateMenuId(null);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
@@ -640,6 +758,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   }
 
   function openTemplateEditDialog(template: EnvironmentTemplate): void {
+    setOpenProjectMenuId(null);
     setOpenTemplateMenuId(null);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
@@ -683,6 +802,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   }
 
   function openVmLogsDialog(vm: VmInstance): void {
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
     setVmLogsDialog({
@@ -740,6 +860,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   }
 
   async function handleRenameVm(vm: VmInstance): Promise<void> {
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setShellMenuOpen(false);
     setRenameDialog({
@@ -916,6 +1037,121 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     );
   }
 
+  async function handleCreateProjectSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> {
+    event.preventDefault();
+
+    const payload: CreateProjectInput = {
+      name: createProjectDraft.name.trim(),
+      githubUrl: createProjectDraft.githubUrl.trim(),
+    };
+
+    if (!payload.name) {
+      return;
+    }
+
+    const editingProject =
+      editingProjectId === null
+        ? null
+        : summary?.projects.find((project) => project.id === editingProjectId) ?? null;
+
+    if (editingProjectId !== null && !editingProject) {
+      closeCreateProjectDialog();
+      return;
+    }
+
+    if (
+      editingProject &&
+      payload.name === editingProject.name &&
+      payload.githubUrl === editingProject.githubUrl
+    ) {
+      return;
+    }
+
+    await runMutation(
+      editingProject ? `Saving ${editingProject.name}` : `Creating ${payload.name}`,
+      async () => {
+        const project = editingProject
+          ? await postJson<WorkspaceProject>(
+              `/api/projects/${editingProject.id}/update`,
+              payload,
+            )
+          : await postJson<WorkspaceProject>("/api/projects", payload);
+        closeCreateProjectDialog();
+        setCreateProjectId(project.id);
+        setProjectCollapsed(project.id, false);
+        await refreshSummary();
+      },
+      editingProject ? `Saved project ${payload.name}.` : `Created project ${payload.name}.`,
+    );
+  }
+
+  async function handleProjectAction(
+    project: WorkspaceProject,
+    action: "start" | "stop" | "restart" | "delete",
+  ): Promise<void> {
+    setOpenProjectMenuId(null);
+    setOpenVmMenuId(null);
+    setShellMenuOpen(false);
+
+    const projectVms =
+      summary?.vms.filter(
+        (vm) => resolveWorkspaceProjectId(summary.projects, vm.projectId) === project.id,
+      ) ?? [];
+
+    if (
+      action === "delete" &&
+      !window.confirm(
+        projectVms.length > 0
+          ? `Delete ${project.name} and queue delete for ${projectVms.length} VM${projectVms.length === 1 ? "" : "s"}?`
+          : `Delete empty project ${project.name}?`,
+      )
+    ) {
+      return;
+    }
+
+    const actionLabel =
+      action === "delete"
+        ? "Deleting"
+        : action === "restart"
+          ? "Restarting"
+          : action === "start"
+            ? "Starting"
+            : "Stopping";
+
+    await runMutation(
+      `${actionLabel} ${project.name}`,
+      async () => {
+        await postJson(`/api/projects/${project.id}/${action}`, {});
+        const nextSummary = await refreshSummary();
+        const selectedVmId = selectedVmIdRef.current;
+        if (
+          selectedVmId &&
+          !nextSummary.vms.some((vm) => vm.id === selectedVmId)
+        ) {
+          setSelectedVmId(null);
+          setDetail(null);
+        }
+      },
+      action === "delete"
+        ? `Queued delete for ${project.name}.`
+        : `Queued ${action} for ${project.name}.`,
+    );
+  }
+
+  function toggleProjectCollapsed(projectId: string): void {
+    setProjectCollapsed(projectId, collapsedProjects[projectId] !== true);
+    setOpenProjectMenuId(null);
+  }
+
+  function toggleProjectMenu(projectId: string): void {
+    setOpenVmMenuId(null);
+    setOpenTemplateMenuId(null);
+    setShellMenuOpen(false);
+    setOpenProjectMenuId((current) => (current === projectId ? null : projectId));
+  }
+
   async function handleDeleteTemplate(template: EnvironmentTemplate): Promise<void> {
     setOpenTemplateMenuId(null);
 
@@ -1059,7 +1295,12 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   }
 
   function selectVm(vmId: string): void {
+    const projectId = projectIdForVm(vmId);
+    if (projectId) {
+      setProjectCollapsed(projectId, false);
+    }
     setSelectedVmId(vmId);
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
@@ -1067,6 +1308,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
 
   function openHomepage(): void {
     setSelectedVmId(null);
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
@@ -1088,8 +1330,13 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   }
 
   function inspectVm(vmId: string): void {
+    const projectId = projectIdForVm(vmId);
+    if (projectId) {
+      setProjectCollapsed(projectId, false);
+    }
     setSelectedVmId(vmId);
     setVmSidepanelCollapsed(vmId, false);
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
@@ -1097,6 +1344,64 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
 
   function currentVmRailIds(): string[] {
     return (summary?.vms ?? displayedVms).map((vm) => vm.id);
+  }
+
+  function projectIdForVm(vmId: string): string | null {
+    const vm = (summary?.vms ?? displayedVms).find((entry) => entry.id === vmId) ?? null;
+    return vm ? resolveWorkspaceProjectId(summary?.projects ?? [], vm.projectId) : null;
+  }
+
+  function projectVmIdsFromOrder(vmIds: string[], projectId: string): string[] {
+    return vmIds.filter((vmId) => projectIdForVm(vmId) === projectId);
+  }
+
+  function resolveVmTileDropPosition(
+    event: ReactDragEvent<HTMLElement>,
+  ): VmRailDropPosition {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return event.clientY >= bounds.top + bounds.height / 2 ? "after" : "before";
+  }
+
+  function shouldAppendToProjectEnd(event: ReactDragEvent<HTMLElement>): boolean {
+    const vmTiles = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(".vm-tile"),
+    );
+    const lastVmTile = vmTiles.at(-1);
+
+    if (!lastVmTile) {
+      return true;
+    }
+
+    const bounds = lastVmTile.getBoundingClientRect();
+    return event.clientY >= bounds.top + bounds.height / 2;
+  }
+
+  function previewVmReorderWithinProject(
+    projectId: string,
+    draggedVmId: string,
+    targetVmId: string,
+    dropPosition: VmRailDropPosition,
+  ): void {
+    setVmRailOrderIds((current) => {
+      const baseOrder = current ?? currentVmRailIds();
+      const projectVmIds = projectVmIdsFromOrder(baseOrder, projectId);
+      return reorderProjectVmIds(
+        baseOrder,
+        projectVmIds,
+        reorderVmIds(projectVmIds, draggedVmId, targetVmId, dropPosition),
+      );
+    });
+  }
+
+  function previewVmAppendToProjectEnd(projectId: string, draggedVmId: string): void {
+    setVmRailOrderIds((current) => {
+      const baseOrder = current ?? currentVmRailIds();
+      return moveVmIdBetweenProjects(
+        baseOrder,
+        draggedVmId,
+        projectVmIdsFromOrder(baseOrder, projectId),
+      );
+    });
   }
 
   async function persistVmRailOrder(vmIds: string[]): Promise<void> {
@@ -1130,6 +1435,48 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     }
   }
 
+  async function persistVmProjectMove(
+    vmId: string,
+    projectId: string,
+    vmIds: string[],
+  ): Promise<void> {
+    setVmReorderBusy(true);
+
+    try {
+      await postJson<VmInstance, UpdateVmInput>(
+        `/api/vms/${vmId}/update`,
+        {
+          projectId,
+        },
+      );
+      const nextSummary = await postJson<DashboardSummary>(
+        "/api/vms/reorder",
+        {
+          vmIds,
+        } satisfies ReorderVmsInput,
+      );
+      startTransition(() => {
+        setSummary(nextSummary);
+      });
+      setProjectCollapsed(projectId, false);
+      setVmRailOrderIds(null);
+    } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        requireLogin();
+        return;
+      }
+
+      setNotice({
+        tone: "error",
+        message: errorMessage(error),
+      });
+      setVmRailOrderIds(null);
+      await refreshSummary();
+    } finally {
+      setVmReorderBusy(false);
+    }
+  }
+
   function handleVmTileDragStart(
     vmId: string,
     event: ReactDragEvent<HTMLElement>,
@@ -1142,6 +1489,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     vmDragDropCommittedRef.current = false;
     setDraggedVmId(vmId);
     setVmRailOrderIds(currentVmRailIds());
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
@@ -1157,11 +1505,62 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
       return;
     }
 
+    const draggedProjectId = projectIdForVm(draggedVmId);
+    const targetProjectId = projectIdForVm(targetVmId);
+
+    if (!draggedProjectId || draggedProjectId !== targetProjectId) {
+      return;
+    }
+
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    setVmRailOrderIds((current) =>
-      reorderVmIds(current ?? currentVmRailIds(), draggedVmId, targetVmId),
+    previewVmReorderWithinProject(
+      draggedProjectId,
+      draggedVmId,
+      targetVmId,
+      resolveVmTileDropPosition(event),
     );
+  }
+
+  function handleProjectDragOver(
+    targetProjectId: string,
+    event: ReactDragEvent<HTMLElement>,
+  ): void {
+    if (!draggedVmId) {
+      return;
+    }
+
+    const draggedProjectId = projectIdForVm(draggedVmId);
+
+    if (!draggedProjectId || draggedProjectId === targetProjectId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+
+  function handleProjectVmListDragOver(
+    targetProjectId: string,
+    event: ReactDragEvent<HTMLElement>,
+  ): void {
+    if (!draggedVmId || !shouldAppendToProjectEnd(event)) {
+      return;
+    }
+
+    const draggedProjectId = projectIdForVm(draggedVmId);
+
+    if (!draggedProjectId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+
+    if (draggedProjectId === targetProjectId) {
+      previewVmAppendToProjectEnd(targetProjectId, draggedVmId);
+    }
   }
 
   function commitVmRailOrder(nextOrder: string[]): void {
@@ -1211,10 +1610,104 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
       return;
     }
 
+    const draggedProjectId = projectIdForVm(draggedVmId);
+    const targetProjectId = projectIdForVm(targetVmId);
+
+    if (!draggedProjectId || !targetProjectId) {
+      return;
+    }
+
     event.preventDefault();
-    const nextOrder = reorderVmIds(vmRailOrderIds ?? currentVmRailIds(), draggedVmId, targetVmId);
     event.stopPropagation();
-    commitVmRailOrder(nextOrder);
+    const dropPosition = resolveVmTileDropPosition(event);
+
+    if (draggedProjectId === targetProjectId) {
+      const baseOrder = vmRailOrderIds ?? currentVmRailIds();
+      const projectVmIds = projectVmIdsFromOrder(baseOrder, draggedProjectId);
+      const nextOrder = reorderProjectVmIds(
+        baseOrder,
+        projectVmIds,
+        reorderVmIds(projectVmIds, draggedVmId, targetVmId, dropPosition),
+      );
+      commitVmRailOrder(nextOrder);
+      return;
+    }
+
+    vmDragDropCommittedRef.current = true;
+    setDraggedVmId(null);
+    const baseOrder = vmRailOrderIds ?? currentVmRailIds();
+    const nextOrder = moveVmIdBetweenProjects(
+      baseOrder,
+      draggedVmId,
+      projectVmIdsFromOrder(baseOrder, targetProjectId),
+      targetVmId,
+      dropPosition,
+    );
+    setVmRailOrderIds(nextOrder);
+    void persistVmProjectMove(draggedVmId, targetProjectId, nextOrder);
+  }
+
+  function handleProjectDrop(
+    targetProjectId: string,
+    event: ReactDragEvent<HTMLElement>,
+  ): void {
+    if (!draggedVmId) {
+      return;
+    }
+
+    const draggedProjectId = projectIdForVm(draggedVmId);
+
+    if (!draggedProjectId || draggedProjectId === targetProjectId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    vmDragDropCommittedRef.current = true;
+    setDraggedVmId(null);
+    const baseOrder = vmRailOrderIds ?? currentVmRailIds();
+    const nextOrder = moveVmIdBetweenProjects(
+      baseOrder,
+      draggedVmId,
+      projectVmIdsFromOrder(baseOrder, targetProjectId),
+    );
+    setVmRailOrderIds(nextOrder);
+    void persistVmProjectMove(draggedVmId, targetProjectId, nextOrder);
+  }
+
+  function handleProjectVmListDrop(
+    targetProjectId: string,
+    event: ReactDragEvent<HTMLElement>,
+  ): void {
+    if (!draggedVmId || !shouldAppendToProjectEnd(event)) {
+      return;
+    }
+
+    const draggedProjectId = projectIdForVm(draggedVmId);
+
+    if (!draggedProjectId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const baseOrder = vmRailOrderIds ?? currentVmRailIds();
+    const nextOrder = moveVmIdBetweenProjects(
+      baseOrder,
+      draggedVmId,
+      projectVmIdsFromOrder(baseOrder, targetProjectId),
+    );
+
+    if (draggedProjectId === targetProjectId) {
+      commitVmRailOrder(nextOrder);
+      return;
+    }
+
+    vmDragDropCommittedRef.current = true;
+    setDraggedVmId(null);
+    setVmRailOrderIds(nextOrder);
+    void persistVmProjectMove(draggedVmId, targetProjectId, nextOrder);
   }
 
   function handleRailResizeStart(): void {
@@ -1356,6 +1849,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     action: VmPowerAction,
   ): Promise<void> {
     const vmName = summary?.vms.find((vm) => vm.id === vmId)?.name ?? vmId;
+    setOpenProjectMenuId(null);
 
     await runMutation(
       `${action} ${vmName}`,
@@ -1371,12 +1865,14 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   }
 
   async function handleClone(vm: VmInstance): Promise<void> {
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
     const wallpaperName = buildRandomVmName();
     setCloneVmDialog({
       canCaptureRam: vm.status === "running",
+      projectId: vm.projectId,
       ramMb: vm.resources.ramMb,
       sourceVmId: vm.id,
       sourceVmName: vm.name,
@@ -1416,11 +1912,15 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
       async () => {
         const clone = await postJson<VmInstance>(`/api/vms/${cloneVmDialog.sourceVmId}/clone`, {
           sourceVmId: cloneVmDialog.sourceVmId,
+          projectId: cloneVmDialog.projectId,
           name,
           wallpaperName: cloneVmDialog.wallpaperName,
           stateful: cloneVmDialog.canCaptureRam ? cloneVmDialog.stateful : false,
         });
         closeCloneVmDialog();
+        if (clone.projectId) {
+          setProjectCollapsed(clone.projectId, false);
+        }
         setVmSidepanelCollapsed(clone.id, false);
         setSelectedVmId(clone.id);
         await refreshSummary();
@@ -1431,6 +1931,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
   }
 
   async function handleSnapshot(vm: VmInstance): Promise<void> {
+    setOpenProjectMenuId(null);
     setOpenVmMenuId(null);
     setOpenTemplateMenuId(null);
     setShellMenuOpen(false);
@@ -1496,6 +1997,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     applyResolutionMode,
     applyViewportScalePreference,
     closeCloneVmDialog,
+    closeCreateProjectDialog,
     closeRenameDialog,
     closeSnapshotDialog,
     closeTemplateCloneDialog,
@@ -1508,6 +2010,8 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     handleCloneStatefulChange,
     handleCreate,
     handleCreateField,
+    handleCreateProjectField,
+    handleCreateProjectSubmit,
     handleCreateShutdownBeforeCloneChange,
     handleCreateStatefulCloneChange,
     handleCreateSourceChange,
@@ -1533,14 +2037,21 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     handleTemplateCloneSubmit,
     handleTemplateEditField,
     handleVmAction,
+    handleProjectAction,
     handleVmStripDragOver,
     handleVmStripDrop,
     handleVmTileDragEnd,
     handleVmTileDragOver,
     handleVmTileDragStart,
     handleVmTileDrop,
+    handleProjectDragOver,
+    handleProjectDrop,
+    handleProjectVmListDragOver,
+    handleProjectVmListDrop,
     inspectVm,
     openCreateDialog,
+    openCreateProjectDialog,
+    openEditProjectDialog,
     openCreateDialogForTemplate,
     openHomepage,
     openTemplateCloneDialog,
@@ -1556,8 +2067,11 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     runMutation,
     selectVm,
     setCurrentSidepanelCollapsed,
+    setProjectCollapsed,
     setVmDesktopResolutionPreference,
     setVmSidepanelCollapsed,
+    toggleProjectCollapsed,
+    toggleProjectMenu,
     toggleFullscreen,
   };
 }

@@ -2,11 +2,14 @@ import { statfsSync } from "node:fs";
 import { posix as pathPosix } from "node:path";
 
 import {
+  DEFAULT_WORKSPACE_PROJECT_ID,
   describeVmNetworkMode,
   minimumCreateDiskGb,
+  normalizeGithubUrl,
   normalizeTemplateDesktopTransport,
   normalizeVmDesktopTransport,
   normalizeVmNetworkMode,
+  resolveWorkspaceProjectId,
   slugify,
 } from "../../../packages/shared/src/helpers.js";
 import type {
@@ -28,6 +31,7 @@ import type {
   VmInstance,
   VmNetworkMode,
   VmPortForward,
+  WorkspaceProject,
 } from "../../../packages/shared/src/types.js";
 import type {
   DesktopProvider,
@@ -110,6 +114,7 @@ export interface DesktopManagerRuntime {
 
 export function buildVmRecord(
   state: AppState,
+  projectId: string,
   template: EnvironmentTemplate,
   name: string,
   wallpaperName: string,
@@ -134,6 +139,7 @@ export function buildVmRecord(
   return {
     id,
     name,
+    projectId,
     wallpaperName,
     templateId: template.id,
     provider,
@@ -542,6 +548,62 @@ export function requireTemplate(
   }
 
   return template;
+}
+
+export function requireWorkspaceProject(
+  state: AppState,
+  projectId: string,
+): WorkspaceProject {
+  const project = state.projects.find((entry) => entry.id === projectId);
+
+  if (!project) {
+    throw new Error(`Project ${projectId} was not found.`);
+  }
+
+  return project;
+}
+
+export function validateProjectName(name: string): string {
+  const normalized = name.trim();
+
+  if (!normalized) {
+    throw new Error("Project name is required.");
+  }
+
+  return normalized;
+}
+
+export function validateProjectGithubUrl(url: string): string {
+  const normalized = normalizeGithubUrl(url);
+
+  if (url.trim().length > 0 && !normalized) {
+    throw new Error("Project GitHub URL must be a valid github.com link.");
+  }
+
+  return normalized;
+}
+
+export function resolveKnownWorkspaceProjectId(
+  state: AppState,
+  projectId: string | null | undefined,
+): string {
+  return resolveWorkspaceProjectId(state.projects, projectId);
+}
+
+export function ensureProjectMutable(project: WorkspaceProject): void {
+  if (project.id === DEFAULT_WORKSPACE_PROJECT_ID) {
+    throw new Error("The default project cannot be deleted.");
+  }
+}
+
+export function removeDeletingProjectsWithoutVms(state: AppState): void {
+  const activeProjectIds = new Set(
+    state.vms.map((vm) => resolveWorkspaceProjectId(state.projects, vm.projectId)),
+  );
+
+  state.projects = state.projects.filter(
+    (project) => project.status !== "deleting" || activeProjectIds.has(project.id),
+  );
 }
 
 export function resolveTemplateForSnapshot(

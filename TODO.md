@@ -1,6 +1,6 @@
 # Parallaize TODO
 
-Last updated: 2026-04-02
+Last updated: 2026-04-13
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 

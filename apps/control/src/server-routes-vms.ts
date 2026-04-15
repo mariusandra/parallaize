@@ -321,7 +321,9 @@ export async function handleVmRoute({
           ok: true,
           data: manager.cloneVm({
             sourceVmId: vmId,
+            projectId: payload.projectId,
             name: payload.name,
+            wallpaperName: payload.wallpaperName,
             resources: payload.resources,
             networkMode: payload.networkMode,
             shutdownSourceBeforeClone: payload.shutdownSourceBeforeClone,

@@ -11,16 +11,20 @@ import type {
   VmDiskUsageSnapshot,
   VmInstance,
 } from "../packages/shared/src/types.js";
+import { buildDefaultWorkspaceProject } from "../packages/shared/src/helpers.js";
 import {
   buildCreateLaunchValidationError,
   buildCreateDraftFromTemplate,
   buildCreateDraftFromVm,
   buildCreateSourceGroups,
+  buildWorkspaceProjectGroups,
   createSourceSupportsDesktopTransportChoice,
   diskUsageSummaryText,
   findProminentJob,
   getVmDesktopBootState,
+  moveVmIdBetweenProjects,
   normalizeActiveCpuThreshold,
+  reorderVmIds,
   shouldShowWorkspaceLogsSurface,
 } from "../apps/web/src/dashboardHelpers.js";
 
@@ -61,6 +65,101 @@ test("buildCreateSourceGroups keeps system templates ahead of user templates and
   );
   assert.equal(groups[0]?.options[0]?.label, "Ubuntu Seed");
   assert.equal(groups[2]?.options[0]?.label, "Checkpoint - Alpha");
+});
+
+test("buildWorkspaceProjectGroups keeps project order and running counts", () => {
+  const defaultProject = buildDefaultWorkspaceProject("2026-03-29T10:00:00.000Z");
+  const clientProject = {
+    ...buildDefaultWorkspaceProject("2026-03-29T10:00:00.000Z"),
+    id: "project-client",
+    name: "Client Alpha",
+    githubUrl: "https://github.com/openai/openai",
+  };
+  const groups = buildWorkspaceProjectGroups(
+    [defaultProject, clientProject],
+    [
+      buildVm("vm-default", {
+        projectId: defaultProject.id,
+        status: "stopped",
+      }),
+      buildVm("vm-client-1", {
+        projectId: clientProject.id,
+        status: "running",
+      }),
+      buildVm("vm-client-2", {
+        projectId: clientProject.id,
+        status: "stopped",
+      }),
+    ],
+  );
+
+  assert.deepEqual(
+    groups.map((group) => ({
+      id: group.project.id,
+      runningVmCount: group.runningVmCount,
+      vmIds: group.vms.map((vm) => vm.id),
+    })),
+    [
+      {
+        id: defaultProject.id,
+        runningVmCount: 0,
+        vmIds: ["vm-default"],
+      },
+      {
+        id: clientProject.id,
+        runningVmCount: 1,
+        vmIds: ["vm-client-1", "vm-client-2"],
+      },
+    ],
+  );
+});
+
+test("moveVmIdBetweenProjects inserts before a target VM in another project", () => {
+  assert.deepEqual(
+    moveVmIdBetweenProjects(
+      ["vm-a1", "vm-a2", "vm-b1", "vm-b2"],
+      "vm-a2",
+      ["vm-b1", "vm-b2"],
+      "vm-b2",
+    ),
+    ["vm-a1", "vm-b1", "vm-a2", "vm-b2"],
+  );
+});
+
+test("reorderVmIds can insert after the hovered VM", () => {
+  assert.deepEqual(
+    reorderVmIds(
+      ["vm-a1", "vm-a2", "vm-a3", "vm-a4"],
+      "vm-a1",
+      "vm-a3",
+      "after",
+    ),
+    ["vm-a2", "vm-a3", "vm-a1", "vm-a4"],
+  );
+});
+
+test("moveVmIdBetweenProjects can insert after a target VM in another project", () => {
+  assert.deepEqual(
+    moveVmIdBetweenProjects(
+      ["vm-a1", "vm-a2", "vm-b1", "vm-b2"],
+      "vm-a2",
+      ["vm-b1", "vm-b2"],
+      "vm-b1",
+      "after",
+    ),
+    ["vm-a1", "vm-b1", "vm-a2", "vm-b2"],
+  );
+});
+
+test("moveVmIdBetweenProjects appends when the target project has no VMs", () => {
+  assert.deepEqual(
+    moveVmIdBetweenProjects(
+      ["vm-a1", "vm-a2", "vm-b1"],
+      "vm-a2",
+      [],
+    ),
+    ["vm-a1", "vm-b1", "vm-a2"],
+  );
 });
 
 test("buildCreateLaunchValidationError blocks shrinking snapshot disks", () => {
@@ -441,6 +540,7 @@ function buildSummary(
       ramPercent: null,
     },
     provider: buildProvider(),
+    projects: [buildDefaultWorkspaceProject("2026-03-29T10:00:00.000Z")],
     templates: [],
     vms: [],
     snapshots: [],

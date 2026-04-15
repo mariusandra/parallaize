@@ -11,6 +11,7 @@ import { createServerEventStreams } from "./server-events.js";
 import { isBenignConnectionError, writeJson } from "./server-http.js";
 import { createLatestReleaseMetadataCache } from "./server-release.js";
 import { handlePublicRoute } from "./server-routes-public.js";
+import { handleProjectRoute } from "./server-routes-projects.js";
 import { handleSystemRoute } from "./server-routes-system.js";
 import { createVmStreamHealthServer } from "./server-stream-health.js";
 import { handleTemplateRoute } from "./server-routes-templates.js";
@@ -124,6 +125,18 @@ const server = createServer(async (request, response) => {
     }
 
     if (await networkBridge.maybeHandleRequest(request, response, url)) {
+      return;
+    }
+
+    if (
+      await handleProjectRoute({
+        manager,
+        method,
+        request,
+        response,
+        url,
+      })
+    ) {
       return;
     }
 

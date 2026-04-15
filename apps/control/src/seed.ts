@@ -1,10 +1,11 @@
-import {
-  type AppState,
-  type EnvironmentTemplate,
-  type ProviderState,
-  type Snapshot,
-  type VmInstance,
+import type {
+  AppState,
+  EnvironmentTemplate,
+  ProviderState,
+  Snapshot,
+  VmInstance,
 } from "../../../packages/shared/src/types.js";
+import { buildDefaultWorkspaceProject } from "../../../packages/shared/src/helpers.js";
 import {
   buildSeedTemplateSummary,
   type DefaultTemplateLaunchSourceOptions,
@@ -20,6 +21,7 @@ export function createSeedState(
   const defaultLaunchSource = resolveDefaultTemplateLaunchSource(
     options.defaultTemplateLaunchSource,
   );
+  const defaultProject = buildDefaultWorkspaceProject(now);
 
   const templates: EnvironmentTemplate[] = [
     {
@@ -69,6 +71,7 @@ export function createSeedState(
     return {
       sequence: 2,
       provider,
+      projects: [defaultProject],
       templates,
       vms: [],
       snapshots: [],
@@ -86,6 +89,7 @@ export function createSeedState(
     {
       id: "vm-0001",
       name: "alpha-workbench",
+      projectId: defaultProject.id,
       templateId: "tpl-0001",
       provider: provider.kind,
       providerRef: "alpha-workbench",
@@ -147,6 +151,7 @@ export function createSeedState(
   return {
     sequence: 3,
     provider,
+    projects: [defaultProject],
     templates,
     vms,
     snapshots,
