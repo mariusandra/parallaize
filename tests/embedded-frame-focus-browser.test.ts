@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { chromium } from "playwright";
+import { chromium, type Browser } from "playwright";
 
-test("embedded frame focus bridge shifts keyboard targets off a clicked video surface", async () => {
+test("embedded frame focus bridge shifts keyboard targets off a clicked video surface", async (context) => {
+  const executablePath = chromium.executablePath();
+  if (!existsSync(executablePath)) {
+    context.skip(
+      `Playwright Chromium is not installed at ${executablePath}. Run "flox activate -d . -- pnpm playwright:install".`,
+    );
+    return;
+  }
+
   const embeddedFrameFocusModule = readFileSync(
     new URL("../apps/web/src/embeddedFrameFocus.js", import.meta.url),
     "utf8",
@@ -70,22 +78,24 @@ test("embedded frame focus bridge shifts keyboard targets off a clicked video su
     response.end(parentDocument);
   });
 
-  await new Promise<void>((resolve) => {
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
-
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const browser = await chromium.launch({
-    executablePath: chromium.executablePath(),
-    headless: true,
-    args: [
-      "--disable-dev-shm-usage",
-      "--no-sandbox",
-    ],
-  });
+  let browser: Browser | null = null;
 
   try {
+    browser = await chromium.launch({
+      executablePath,
+      headless: true,
+      args: [
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
+      ],
+    });
+
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${address.port}/`, {
       waitUntil: "domcontentloaded",
@@ -104,16 +114,18 @@ test("embedded frame focus bridge shifts keyboard targets off a clicked video su
 
     assert.deepEqual(keyboardTargets, ["BODY", "BODY", "BODY", "BODY", "BODY", "BODY"]);
   } finally {
-    await browser.close();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+    await browser?.close();
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
 
-        resolve();
+          resolve();
+        });
       });
-    });
+    }
   }
 });
