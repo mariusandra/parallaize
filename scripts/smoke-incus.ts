@@ -8,6 +8,7 @@ import {
   type FramebufferVisibilityStats,
   type VncPixelFormat,
 } from "../packages/shared/src/vnc-framebuffer.js";
+import { FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE } from "../apps/control/src/template-defaults.js";
 import { DEFAULT_GUEST_DESKTOP_HEALTH_CHECK } from "../apps/control/src/ubuntu-guest-init.js";
 import WebSocket from "ws";
 
@@ -16,7 +17,7 @@ const PUBLIC_URL = process.env.PARALLAIZE_SMOKE_PUBLIC_URL ?? "https://127.0.0.1
 const PUBLIC_URL_ALLOW_INSECURE_TLS =
   new URL(PUBLIC_URL).protocol === "https:"
   && process.env.PARALLAIZE_SMOKE_PUBLIC_INSECURE !== "0";
-const DEFAULT_TEMPLATE_LAUNCH_SOURCE = "images:ubuntu/noble/desktop";
+const DEFAULT_TEMPLATE_LAUNCH_SOURCE = FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE;
 const TEMPLATE_ID = normalizeOptionalString(process.env.PARALLAIZE_SMOKE_TEMPLATE_ID);
 const TEMPLATE_NAME = normalizeOptionalString(process.env.PARALLAIZE_SMOKE_TEMPLATE_NAME);
 const TEMPLATE_LAUNCH_SOURCE =
@@ -224,7 +225,7 @@ async function resolveSmokeTemplate(): Promise<EnvironmentTemplate> {
   }
 
   logStep(
-    `Selected Ubuntu 24.04 template ${template.id} (${template.name}) from ${template.launchSource}.`,
+    `Selected Ubuntu template ${template.id} (${template.name}) from ${template.launchSource}.`,
   );
   return template;
 }

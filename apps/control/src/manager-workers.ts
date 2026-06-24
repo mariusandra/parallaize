@@ -1,5 +1,6 @@
 import { normalizeVmDesktopTransport } from "../../../packages/shared/src/helpers.js";
 import type {
+  EnvironmentTemplate,
   ProviderState,
   VmInstance,
 } from "../../../packages/shared/src/types.js";
@@ -23,8 +24,14 @@ import {
 } from "./manager-core.js";
 import { enrichVmSession } from "./desktop-session.js";
 import {
+  buildSeedTemplateRecord,
   buildSeedTemplateSummary,
+  buildSystemSeedTemplateDefinitions,
   DEFAULT_TEMPLATE_ID,
+  UBUNTU_24_04_TEMPLATE_LAUNCH_SOURCE,
+  UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE,
+  isAutoSeedTemplateDescription,
+  isAutoSeedTemplateName,
   isAutoSeedTemplateSummary,
 } from "./template-defaults.js";
 
@@ -156,79 +163,199 @@ export function reconcileFailedProvisioningJobs(runtime: DesktopManagerRuntime):
 export function reconcileDefaultTemplateLaunchSource(
   runtime: DesktopManagerRuntime,
 ): void {
-  if (runtime.options.defaultTemplateLaunchSource == null) {
-    return;
+  runtime.store.update((draft) => {
+    let dirty = false;
+    const desiredTemplates = buildSystemSeedTemplateDefinitions(
+      runtime.defaultTemplateLaunchSource,
+    );
+    const desiredTemplateIds = new Set(
+      desiredTemplates.map((template) => template.id),
+    );
+
+    for (const definition of desiredTemplates) {
+      const template = draft.templates.find((entry) => entry.id === definition.id);
+
+      if (!template) {
+        draft.templates.push(buildSeedTemplateRecord(definition, nowIso()));
+        dirty = true;
+        continue;
+      }
+
+      if (
+        !reconcileSeedTemplateRecord(
+          template,
+          definition,
+          runtime.options.defaultTemplateLaunchSource != null,
+        )
+      ) {
+        continue;
+      }
+
+      dirty = true;
+    }
+
+    for (let index = draft.templates.length - 1; index >= 0; index -= 1) {
+      const template = draft.templates[index];
+
+      if (
+        !template ||
+        template.id === DEFAULT_TEMPLATE_ID ||
+        desiredTemplateIds.has(template.id) ||
+        template.provenance?.kind !== "seed" ||
+        !template.id.startsWith("tpl-system-ubuntu-")
+      ) {
+        continue;
+      }
+
+      const hasLinkedVm = draft.vms.some((vm) => vm.templateId === template.id);
+      const hasLinkedSnapshot = draft.snapshots.some(
+        (snapshot) => snapshot.templateId === template.id,
+      );
+
+      if (hasLinkedVm || hasLinkedSnapshot) {
+        continue;
+      }
+
+      draft.templates.splice(index, 1);
+      dirty = true;
+    }
+
+    return dirty;
+  });
+}
+
+function reconcileSeedTemplateRecord(
+  template: EnvironmentTemplate,
+  definition: ReturnType<typeof buildSystemSeedTemplateDefinitions>[number],
+  forcePrimaryLaunchSourceUpdate: boolean,
+): boolean {
+  const provenance = template.provenance ?? {
+    kind: "seed",
+    summary: "",
+    sourceTemplateId: null,
+    sourceTemplateName: null,
+    sourceVmId: null,
+    sourceVmName: null,
+    sourceSnapshotId: null,
+    sourceSnapshotLabel: null,
+  };
+  let dirty = false;
+
+  if (!template.provenance) {
+    template.provenance = provenance;
+    dirty = true;
   }
 
-  runtime.store.update((draft) => {
-    const template = draft.templates.find((entry) => entry.id === DEFAULT_TEMPLATE_ID);
+  if (provenance.kind !== "seed") {
+    return false;
+  }
 
-    if (!template) {
-      return false;
-    }
+  const history = template.history ?? [];
 
-    let dirty = false;
-    const seededSummary = buildSeedTemplateSummary(runtime.defaultTemplateLaunchSource);
-    const provenance = template.provenance ?? {
-      kind: "seed",
-      summary: "",
-      sourceTemplateId: null,
-      sourceTemplateName: null,
-      sourceVmId: null,
-      sourceVmName: null,
-      sourceSnapshotId: null,
-      sourceSnapshotLabel: null,
-    };
+  if (!template.history) {
+    template.history = history;
+    dirty = true;
+  }
 
-    if (!template.provenance) {
-      template.provenance = provenance;
+  const shouldUpdateLaunchSource =
+    template.id !== DEFAULT_TEMPLATE_ID ||
+    forcePrimaryLaunchSourceUpdate ||
+    isAutoManagedSeedLaunchSource(template.launchSource);
+
+  if (shouldUpdateLaunchSource && template.launchSource !== definition.launchSource) {
+    template.launchSource = definition.launchSource;
+    dirty = true;
+  }
+
+  if (isAutoSeedTemplateName(template.name) && template.name !== definition.name) {
+    template.name = definition.name;
+    dirty = true;
+  }
+
+  if (
+    isAutoSeedTemplateDescription(template.description) &&
+    template.description !== definition.description
+  ) {
+    template.description = definition.description;
+    dirty = true;
+  }
+
+  if (
+    sameStringArray(template.tags, definition.tags) === false &&
+    isAutoManagedSeedTags(template.tags)
+  ) {
+    template.tags = [...definition.tags];
+    dirty = true;
+  }
+
+  if (
+    sameStringArray(template.notes, definition.notes) === false &&
+    isAutoManagedSeedNotes(template.notes)
+  ) {
+    template.notes = [...definition.notes];
+    dirty = true;
+  }
+
+  const seededSummary = buildSeedTemplateSummary(definition.launchSource);
+
+  if (isAutoSeedTemplateSummary(provenance.summary)) {
+    if (provenance.summary !== seededSummary) {
+      provenance.summary = seededSummary;
       dirty = true;
     }
+  }
 
-    if (provenance.kind !== "seed") {
-      return false;
-    }
+  const createdHistoryEntry = history.find((entry) => entry.kind === "created");
 
-    const history = template.history ?? [];
+  if (!createdHistoryEntry) {
+    history.unshift(buildTemplateHistoryEntry("created", seededSummary, template.createdAt));
+    dirty = true;
+  }
 
-    if (!template.history) {
-      template.history = history;
+  if (createdHistoryEntry && isAutoSeedTemplateSummary(createdHistoryEntry.summary)) {
+    if (createdHistoryEntry.summary !== seededSummary) {
+      createdHistoryEntry.summary = seededSummary;
       dirty = true;
     }
+  }
 
-    if (template.launchSource !== runtime.defaultTemplateLaunchSource) {
-      template.launchSource = runtime.defaultTemplateLaunchSource;
-      dirty = true;
-    }
+  if (!dirty) {
+    return false;
+  }
 
-    if (isAutoSeedTemplateSummary(provenance.summary)) {
-      if (provenance.summary !== seededSummary) {
-        provenance.summary = seededSummary;
-        dirty = true;
-      }
-    }
+  template.updatedAt = nowIso();
+  return true;
+}
 
-    const createdHistoryEntry = history.find((entry) => entry.kind === "created");
+function isAutoManagedSeedTags(tags: string[]): boolean {
+  return sameStringArray(tags, ["coding", "agents", "ubuntu"]) ||
+    sameStringArray(tags, ["coding", "agents", "ubuntu", "ubuntu-24.04"]) ||
+    sameStringArray(tags, ["coding", "agents", "ubuntu", "ubuntu-26.04"]);
+}
 
-    if (!createdHistoryEntry) {
-      history.unshift(buildTemplateHistoryEntry("created", seededSummary, template.createdAt));
-      dirty = true;
-    }
+function isAutoManagedSeedLaunchSource(launchSource: string): boolean {
+  return launchSource === UBUNTU_24_04_TEMPLATE_LAUNCH_SOURCE ||
+    launchSource === UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE;
+}
 
-    if (createdHistoryEntry && isAutoSeedTemplateSummary(createdHistoryEntry.summary)) {
-      if (createdHistoryEntry.summary !== seededSummary) {
-        createdHistoryEntry.summary = seededSummary;
-        dirty = true;
-      }
-    }
+function isAutoManagedSeedNotes(notes: string[]): boolean {
+  return sameStringArray(notes, [
+    "GNOME desktop with terminal and editor workspace layout.",
+    "Base image is intended for iterative snapshotting during development.",
+  ]) ||
+    sameStringArray(notes, [
+      "GNOME desktop with terminal and editor workspace layout.",
+      "Ubuntu 24.04 base image is intended for iterative snapshotting during development.",
+    ]) ||
+    sameStringArray(notes, [
+      "GNOME desktop with terminal and editor workspace layout.",
+      "Ubuntu 26.04 base image is intended for iterative snapshotting during development.",
+    ]);
+}
 
-    if (!dirty) {
-      return false;
-    }
-
-    template.updatedAt = nowIso();
-    return true;
-  });
+function sameStringArray(left: string[], right: string[]): boolean {
+  return left.length === right.length &&
+    left.every((value, index) => value === right[index]);
 }
 
 export function reconcileInterruptedJobs(runtime: DesktopManagerRuntime): void {

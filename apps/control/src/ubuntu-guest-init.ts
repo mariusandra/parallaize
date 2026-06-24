@@ -86,7 +86,8 @@ function buildGuestGdmCustomConfig(): string {
   return `[daemon]
 AutomaticLoginEnable=true
 AutomaticLogin=${DEFAULT_GUEST_USERNAME}
-WaylandEnable=false`;
+WaylandEnable=false
+XorgEnable=true`;
 }
 
 export function buildEnsureGuestDesktopBootstrapScript(
@@ -294,10 +295,13 @@ guest_desktop_session_ready() {
   if ! id ${DEFAULT_GUEST_USERNAME} >/dev/null 2>&1; then
     return 1
   fi
-  if ! pgrep -u ${DEFAULT_GUEST_USERNAME} -x gnome-shell >/dev/null 2>&1; then
+  if ! pgrep -u ${DEFAULT_GUEST_USERNAME} -x gnome-shell >/dev/null 2>&1 \
+    && ! pgrep -u ${DEFAULT_GUEST_USERNAME} -x gnome-panel >/dev/null 2>&1 \
+    && ! pgrep -u ${DEFAULT_GUEST_USERNAME} -x gnome-flashback >/dev/null 2>&1 \
+    && ! pgrep -u ${DEFAULT_GUEST_USERNAME} -x metacity >/dev/null 2>&1; then
     return 1
   fi
-  if ! ps -u ${DEFAULT_GUEST_USERNAME} -o args= | grep -F "/usr/libexec/gnome-session-binary" >/dev/null 2>&1; then
+  if ! ps -u ${DEFAULT_GUEST_USERNAME} -o args= | grep -E "/usr/libexec/gnome-session-(binary|service|ctl|init-worker)" >/dev/null 2>&1; then
     return 1
   fi
   if command -v loginctl >/dev/null 2>&1; then
@@ -686,7 +690,22 @@ WantedBy=multi-user.target`;
 
 function buildGuestSelkiesInstallScript(): string {
   return `patch_selkies_bundle() {
-  SELKIES_MAIN_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/__main__.py"
+  find_selkies_python_package_dir() {
+    for candidate in "$SELKIES_INSTALL_DIR"/lib/python*/site-packages/selkies_gstreamer; do
+      if [ -d "$candidate" ]; then
+        printf '%s\\n' "$candidate"
+        return 0
+      fi
+    done
+    echo "Unable to locate Selkies Python package directory under $SELKIES_INSTALL_DIR/lib/python*/site-packages." >&2
+    return 1
+  }
+  SELKIES_PYTHON_PACKAGE_DIR="$(find_selkies_python_package_dir)"
+  SELKIES_MAIN_FILE="$SELKIES_PYTHON_PACKAGE_DIR/__main__.py"
+  if [ ! -f "$SELKIES_MAIN_FILE" ]; then
+    echo "Expected Selkies file missing: $SELKIES_MAIN_FILE" >&2
+    return 1
+  fi
   if [ -f "$SELKIES_MAIN_FILE" ]; then
     python3 - "$SELKIES_MAIN_FILE" <<'PY'
 from pathlib import Path
@@ -1569,7 +1588,11 @@ if missing_preview_tokens:
 path.write_text(contents)
 PY
   fi
-  SELKIES_SIGNALING_SERVER_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/signalling_web.py"
+  SELKIES_SIGNALING_SERVER_FILE="$SELKIES_PYTHON_PACKAGE_DIR/signalling_web.py"
+  if [ ! -f "$SELKIES_SIGNALING_SERVER_FILE" ]; then
+    echo "Expected Selkies file missing: $SELKIES_SIGNALING_SERVER_FILE" >&2
+    return 1
+  fi
   if [ -f "$SELKIES_SIGNALING_SERVER_FILE" ]; then
     python3 - "$SELKIES_SIGNALING_SERVER_FILE" <<'PY'
 from pathlib import Path
@@ -1651,7 +1674,11 @@ if missing_tokens:
 path.write_text(contents)
 PY
   fi
-  SELKIES_SIGNALING_CLIENT_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/webrtc_signalling.py"
+  SELKIES_SIGNALING_CLIENT_FILE="$SELKIES_PYTHON_PACKAGE_DIR/webrtc_signalling.py"
+  if [ ! -f "$SELKIES_SIGNALING_CLIENT_FILE" ]; then
+    echo "Expected Selkies file missing: $SELKIES_SIGNALING_CLIENT_FILE" >&2
+    return 1
+  fi
   if [ -f "$SELKIES_SIGNALING_CLIENT_FILE" ]; then
     python3 - "$SELKIES_SIGNALING_CLIENT_FILE" <<'PY'
 from pathlib import Path
@@ -1741,7 +1768,11 @@ if missing_tokens:
 path.write_text(contents)
 PY
   fi
-  SELKIES_GST_APP_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/gstwebrtc_app.py"
+  SELKIES_GST_APP_FILE="$SELKIES_PYTHON_PACKAGE_DIR/gstwebrtc_app.py"
+  if [ ! -f "$SELKIES_GST_APP_FILE" ]; then
+    echo "Expected Selkies file missing: $SELKIES_GST_APP_FILE" >&2
+    return 1
+  fi
   if [ -f "$SELKIES_GST_APP_FILE" ]; then
     python3 - "$SELKIES_GST_APP_FILE" <<'PY'
 from pathlib import Path
@@ -1854,7 +1885,11 @@ contents = contents.replace(
 path.write_text(contents)
 PY
   fi
-  SELKIES_WEBRTC_INPUT_FILE="$SELKIES_INSTALL_DIR/lib/python3.12/site-packages/selkies_gstreamer/webrtc_input.py"
+  SELKIES_WEBRTC_INPUT_FILE="$SELKIES_PYTHON_PACKAGE_DIR/webrtc_input.py"
+  if [ ! -f "$SELKIES_WEBRTC_INPUT_FILE" ]; then
+    echo "Expected Selkies file missing: $SELKIES_WEBRTC_INPUT_FILE" >&2
+    return 1
+  fi
   if [ -f "$SELKIES_WEBRTC_INPUT_FILE" ]; then
     python3 - "$SELKIES_WEBRTC_INPUT_FILE" <<'PY'
 from pathlib import Path
@@ -4092,11 +4127,15 @@ GDM_MONITORS_FILE="/var/lib/gdm3/.config/monitors.xml"
 DESKTOP_HEALTH_GRACE_SECONDS=${repairTimings.healthGraceSeconds}
 DESKTOP_GDM_RESTART_COOLDOWN_SECONDS=${repairTimings.gdmRestartCooldownSeconds}
 NETWORK_WAIT_ONLINE_OVERRIDE_FILE="/etc/systemd/system/systemd-networkd-wait-online.service.d/10-parallaize.conf"
+NETWORK_MANAGER_WAIT_ONLINE_OVERRIDE_FILE="/etc/systemd/system/NetworkManager-wait-online.service.d/10-parallaize.conf"
 PLYMOUTH_QUIT_WAIT_OVERRIDE_FILE="/etc/systemd/system/plymouth-quit-wait.service.d/10-parallaize.conf"
 WELCOME_STATE_DIR="${DEFAULT_GUEST_HOME}/.config"
 WELCOME_DONE_FILE="$WELCOME_STATE_DIR/gnome-initial-setup-done"
 WELCOME_AUTOSTART_DIR="$WELCOME_STATE_DIR/autostart"
 WELCOME_AUTOSTART_FILE="$WELCOME_AUTOSTART_DIR/gnome-initial-setup-first-login.desktop"
+X11_COMPAT_ACCOUNTS_SERVICE_FILE="/var/lib/AccountsService/users/${DEFAULT_GUEST_USERNAME}"
+X11_COMPAT_DMRC_FILE="${DEFAULT_GUEST_HOME}/.dmrc"
+X11_COMPAT_TARGET_SESSION=""
 CURRENT_GDM="$(cat "$GDM_FILE" 2>/dev/null || true)"
 DESIRED_GDM="$(cat <<'CONF'
 ${buildGuestGdmCustomConfig()}
@@ -4147,6 +4186,11 @@ DESIRED_NETWORK_WAIT_ONLINE_OVERRIDE="$(cat <<'CONF'
 ${buildGuestNetworkWaitOnlineOverride()}
 CONF
 )"
+CURRENT_NETWORK_MANAGER_WAIT_ONLINE_OVERRIDE="$(cat "$NETWORK_MANAGER_WAIT_ONLINE_OVERRIDE_FILE" 2>/dev/null || true)"
+DESIRED_NETWORK_MANAGER_WAIT_ONLINE_OVERRIDE="$(cat <<'CONF'
+${buildGuestNetworkWaitOnlineOverride()}
+CONF
+)"
 CURRENT_PLYMOUTH_QUIT_WAIT_OVERRIDE="$(cat "$PLYMOUTH_QUIT_WAIT_OVERRIDE_FILE" 2>/dev/null || true)"
 DESIRED_PLYMOUTH_QUIT_WAIT_OVERRIDE="$(cat <<'CONF'
 ${buildGuestPlymouthQuitWaitOverride()}
@@ -4189,6 +4233,61 @@ enable_stream_health_service() {
   mkdir -p /etc/systemd/system/multi-user.target.wants
   ln -sf "$STREAM_HEALTH_SERVICE_FILE" "/etc/systemd/system/multi-user.target.wants/$STREAM_HEALTH_SERVICE_NAME"
   systemctl daemon-reload
+}
+queue_x11_compatibility_session_packages() {
+  X11_COMPAT_TARGET_SESSION=""
+  if [ ! -f /usr/share/xsessions/ubuntu.desktop ] && [ -f /usr/share/wayland-sessions/ubuntu.desktop ]; then
+    X11_COMPAT_TARGET_SESSION="gnome-flashback-metacity"
+    if [ ! -f "/usr/share/xsessions/$X11_COMPAT_TARGET_SESSION.desktop" ]; then
+      MISSING_PACKAGES="$MISSING_PACKAGES xserver-xorg gnome-session-flashback"
+    fi
+  fi
+}
+apply_x11_compatibility_session_selection() {
+  if [ -z "$X11_COMPAT_TARGET_SESSION" ]; then
+    return 0
+  fi
+  if [ ! -f "/usr/share/xsessions/$X11_COMPAT_TARGET_SESSION.desktop" ]; then
+    echo "Expected X11 desktop session file missing: /usr/share/xsessions/$X11_COMPAT_TARGET_SESSION.desktop" >&2
+    return 1
+  fi
+  CURRENT_X11_COMPAT_ACCOUNTS_SERVICE="$(cat "$X11_COMPAT_ACCOUNTS_SERVICE_FILE" 2>/dev/null || true)"
+  DESIRED_X11_COMPAT_ACCOUNTS_SERVICE="$(cat <<'CONF'
+[User]
+Language=
+XSession=gnome-flashback-metacity
+CONF
+)"
+  if [ "$CURRENT_X11_COMPAT_ACCOUNTS_SERVICE" != "$DESIRED_X11_COMPAT_ACCOUNTS_SERVICE" ]; then
+    mkdir -p /var/lib/AccountsService/users
+    cat > "$X11_COMPAT_ACCOUNTS_SERVICE_FILE" <<'CONF'
+[User]
+Language=
+XSession=gnome-flashback-metacity
+CONF
+    RESTART_GDM=1
+    RESTART_DESKTOP=1
+  fi
+  if id ${DEFAULT_GUEST_USERNAME} >/dev/null 2>&1 && [ -d "${DEFAULT_GUEST_HOME}" ]; then
+    CURRENT_X11_COMPAT_DMRC="$(cat "$X11_COMPAT_DMRC_FILE" 2>/dev/null || true)"
+    DESIRED_X11_COMPAT_DMRC="$(cat <<'CONF'
+[Desktop]
+Session=gnome-flashback-metacity
+Language=
+CONF
+)"
+    if [ "$CURRENT_X11_COMPAT_DMRC" != "$DESIRED_X11_COMPAT_DMRC" ]; then
+      cat > "$X11_COMPAT_DMRC_FILE" <<'CONF'
+[Desktop]
+Session=gnome-flashback-metacity
+Language=
+CONF
+      chown ${DEFAULT_GUEST_USERNAME}:${DEFAULT_GUEST_USERNAME} "$X11_COMPAT_DMRC_FILE" || true
+      chmod 0644 "$X11_COMPAT_DMRC_FILE" || true
+      RESTART_GDM=1
+      RESTART_DESKTOP=1
+    fi
+  fi
 }
 reset_guest_display_state() {
   if [ "$RESET_DISPLAY_STATE_ON_REPAIR" -ne 1 ]; then
@@ -4335,6 +4434,13 @@ ${buildGuestNetworkWaitOnlineOverride()}
 CONF
   RESTART_WAIT_ONLINE=1
 fi
+if [ "$CURRENT_NETWORK_MANAGER_WAIT_ONLINE_OVERRIDE" != "$DESIRED_NETWORK_MANAGER_WAIT_ONLINE_OVERRIDE" ]; then
+  mkdir -p /etc/systemd/system/NetworkManager-wait-online.service.d
+  cat > "$NETWORK_MANAGER_WAIT_ONLINE_OVERRIDE_FILE" <<'CONF'
+${buildGuestNetworkWaitOnlineOverride()}
+CONF
+  RESTART_WAIT_ONLINE=1
+fi
 if [ "$CURRENT_PLYMOUTH_QUIT_WAIT_OVERRIDE" != "$DESIRED_PLYMOUTH_QUIT_WAIT_OVERRIDE" ]; then
   mkdir -p /etc/systemd/system/plymouth-quit-wait.service.d
   cat > "$PLYMOUTH_QUIT_WAIT_OVERRIDE_FILE" <<'CONF'
@@ -4342,6 +4448,7 @@ ${buildGuestPlymouthQuitWaitOverride()}
 CONF
   STOP_PLYMOUTH_QUIT_WAIT=1
 fi
+queue_x11_compatibility_session_packages
 ${desktopPackageChecks}
 if ! dpkg-query -W -f='\${Status}' indicator-multiload 2>/dev/null | grep -q 'install ok installed'; then
   MISSING_PACKAGES="$MISSING_PACKAGES indicator-multiload"
@@ -4353,6 +4460,7 @@ if [ -n "$MISSING_PACKAGES" ]; then
   RESTART_DESKTOP=1
 fi
 ${desktopInstallStep}
+apply_x11_compatibility_session_selection
 reset_guest_display_state
 if [ "$CURRENT_DESKTOP_BRIDGE_VERSION" != "$DESIRED_DESKTOP_BRIDGE_VERSION" ]; then
   mkdir -p "$REPAIR_STATE_DIR"
@@ -4363,9 +4471,10 @@ fi
 systemctl daemon-reload
 if [ "$RESTART_WAIT_ONLINE" -eq 1 ]; then
   systemctl restart systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+  systemctl restart NetworkManager-wait-online.service >/dev/null 2>&1 || true
 fi
 if [ "$STOP_PLYMOUTH_QUIT_WAIT" -eq 1 ]; then
-  systemctl stop --no-block plymouth-quit-wait.service >/dev/null 2>&1 || true
+  systemctl restart plymouth-quit-wait.service >/dev/null 2>&1 || true
 fi
 enable_desktop_service
 enable_stream_health_service
@@ -4415,13 +4524,21 @@ WantedBy=multi-user.target`;
 }
 
 function buildGuestNetworkWaitOnlineOverride(): string {
-  return `[Service]
+  return `[Unit]
+After=
+BindsTo=
+Requires=
+
+[Service]
 ExecStart=
 ExecStart=/bin/true`;
 }
 
 function buildGuestPlymouthQuitWaitOverride(): string {
-  return `[Service]
+  return `[Unit]
+After=
+
+[Service]
 ExecStart=
 ExecStart=/bin/true`;
 }
@@ -4432,13 +4549,18 @@ mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
 cat > /etc/systemd/system/systemd-networkd-wait-online.service.d/10-parallaize.conf <<'CONF'
 ${buildGuestNetworkWaitOnlineOverride()}
 CONF
+mkdir -p /etc/systemd/system/NetworkManager-wait-online.service.d
+cat > /etc/systemd/system/NetworkManager-wait-online.service.d/10-parallaize.conf <<'CONF'
+${buildGuestNetworkWaitOnlineOverride()}
+CONF
 mkdir -p /etc/systemd/system/plymouth-quit-wait.service.d
 cat > /etc/systemd/system/plymouth-quit-wait.service.d/10-parallaize.conf <<'CONF'
 ${buildGuestPlymouthQuitWaitOverride()}
 CONF
 systemctl daemon-reload || true
 systemctl restart systemd-networkd-wait-online.service || true
-systemctl stop --no-block plymouth-quit-wait.service || true`;
+systemctl restart NetworkManager-wait-online.service || true
+systemctl restart plymouth-quit-wait.service || true`;
 }
 
 function buildGuestHostnameSyncScript(): string {
@@ -4582,6 +4704,10 @@ ${indentBlock(buildGuestInotifySysctlConfig(inotifySettings), "      ")}
     permissions: '0644'
     content: |
 ${indentBlock(buildGuestNetworkWaitOnlineOverride(), "      ")}
+  - path: /etc/systemd/system/NetworkManager-wait-online.service.d/10-parallaize.conf
+    permissions: '0644'
+    content: |
+${indentBlock(buildGuestNetworkWaitOnlineOverride(), "      ")}
   - path: /etc/systemd/system/plymouth-quit-wait.service.d/10-parallaize.conf
     permissions: '0644'
     content: |
@@ -4593,7 +4719,8 @@ runcmd:
   - sysctl --load /etc/sysctl.d/60-parallaize-inotify.conf || true
   - systemctl daemon-reload
   - systemctl restart systemd-networkd-wait-online.service || true
-  - systemctl stop --no-block plymouth-quit-wait.service || true
+  - systemctl restart NetworkManager-wait-online.service || true
+  - systemctl restart plymouth-quit-wait.service || true
   - systemctl disable --now gnome-remote-desktop.service || true
   - systemctl mask gnome-remote-desktop.service || true
   - mkdir -p /etc/systemd/user

@@ -17,6 +17,12 @@ import type { DesktopProvider } from "../apps/control/src/providers.js";
 import { createProvider } from "../apps/control/src/providers.js";
 import { createSeedState } from "../apps/control/src/seed.js";
 import { JsonStateStore } from "../apps/control/src/store.js";
+import {
+  SYSTEM_UBUNTU_24_04_TEMPLATE_ID,
+  SYSTEM_UBUNTU_26_04_TEMPLATE_ID,
+  UBUNTU_24_04_TEMPLATE_LAUNCH_SOURCE,
+  UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE,
+} from "../apps/control/src/template-defaults.js";
 
 function readCommandInput(
   options?: { input?: Buffer | string },
@@ -435,6 +441,15 @@ test("manager reconciles the seeded template launch source to the configured def
     template.history[0]?.summary,
     "Seeded from local:ubuntu-noble-desktop-20260320.",
   );
+
+  const compatibilityTemplate = manager.getSummary().templates.find(
+    (entry) => entry.id === SYSTEM_UBUNTU_26_04_TEMPLATE_ID,
+  );
+  assert.ok(compatibilityTemplate);
+  assert.equal(
+    compatibilityTemplate?.launchSource,
+    UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE,
+  );
 });
 
 test("seeded templates default new VM launches to VNC", (context) => {
@@ -455,7 +470,7 @@ test("seeded templates default new VM launches to VNC", (context) => {
   assert.equal(template?.defaultDesktopTransport, "vnc");
 });
 
-test("manager preserves a persisted seeded template launch source without an env pin", (context) => {
+test("manager migrates a legacy 24.04 seed forward without losing the 24.04 option", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-template-source-preserve-"));
   context.after(() => {
     rmSync(tempDir, { recursive: true, force: true });
@@ -467,37 +482,49 @@ test("manager preserves a persisted seeded template launch source without an env
   );
 
   store.update((draft) => {
+    draft.templates = draft.templates.filter((entry) => entry.id === "tpl-0001");
     const template = draft.templates.find((entry) => entry.id === "tpl-0001");
 
     assert.ok(template);
     assert.ok(template.provenance);
     assert.ok(template.history);
 
-    template.launchSource = "local:ubuntu-noble-desktop-20260320";
-    template.provenance.summary = "Seeded from local:ubuntu-noble-desktop-20260320.";
+    template.launchSource = UBUNTU_24_04_TEMPLATE_LAUNCH_SOURCE;
+    template.provenance.summary = `Seeded from ${UBUNTU_24_04_TEMPLATE_LAUNCH_SOURCE}.`;
     template.history[0] = {
       ...template.history[0],
-      summary: "Seeded from local:ubuntu-noble-desktop-20260320.",
+      summary: `Seeded from ${UBUNTU_24_04_TEMPLATE_LAUNCH_SOURCE}.`,
     };
     template.updatedAt = new Date().toISOString();
     return true;
   });
 
   const manager = new DesktopManager(store, provider);
-  const template = manager.getSummary().templates.find((entry) => entry.id === "tpl-0001");
+  const summary = manager.getSummary();
+  const template = summary.templates.find((entry) => entry.id === "tpl-0001");
+  const compatibilityTemplate = summary.templates.find(
+    (entry) => entry.id === SYSTEM_UBUNTU_24_04_TEMPLATE_ID,
+  );
 
   assert.ok(template);
   assert.ok(template.provenance);
   assert.ok(template.history);
-  assert.equal(template.launchSource, "local:ubuntu-noble-desktop-20260320");
+  assert.equal(template.launchSource, UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE);
   assert.equal(
     template.provenance.summary,
-    "Seeded from local:ubuntu-noble-desktop-20260320.",
+    `Seeded from ${UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE}.`,
   );
   assert.equal(
     template.history[0]?.summary,
-    "Seeded from local:ubuntu-noble-desktop-20260320.",
+    `Seeded from ${UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE}.`,
   );
+  assert.equal(template.name, "Ubuntu Agent Forge 26.04");
+  assert.ok(compatibilityTemplate);
+  assert.equal(
+    compatibilityTemplate?.launchSource,
+    UBUNTU_24_04_TEMPLATE_LAUNCH_SOURCE,
+  );
+  assert.equal(compatibilityTemplate?.name, "Ubuntu Agent Forge 24.04");
 });
 
 test("manager hot read paths reuse cached provider state", (context) => {
@@ -1319,7 +1346,7 @@ test("templates can be updated and deleted when no VM still uses them", (context
 
   assert.throws(
     () => manager.deleteTemplate("tpl-0001"),
-    /Template Ubuntu Agent Forge is still attached to VM alpha-workbench\./,
+    /Template Ubuntu Agent Forge 26\.04 is still attached to VM alpha-workbench\./,
   );
 });
 
@@ -1358,11 +1385,14 @@ test("templates can be cloned into new defaults with first-boot init commands", 
     "sudo npm install -g pnpm",
   ]);
   assert.equal(cloned.snapshotIds.length, 0);
-  assert.match(cloned.notes[0] ?? "", /Cloned from template Ubuntu Agent Forge/);
+  assert.match(cloned.notes[0] ?? "", /Cloned from template Ubuntu Agent Forge 26\.04/);
   assert.match(cloned.notes[1] ?? "", /First-boot init script runs 3 commands/);
   assert.equal(cloned.provenance?.kind, "cloned");
   assert.equal(cloned.provenance?.sourceTemplateId, "tpl-0001");
-  assert.match(cloned.provenance?.summary ?? "", /Cloned from template Ubuntu Agent Forge/);
+  assert.match(
+    cloned.provenance?.summary ?? "",
+    /Cloned from template Ubuntu Agent Forge 26\.04/,
+  );
   assert.equal(cloned.history?.[0]?.kind, "cloned");
   assert.match(cloned.history?.[0]?.summary ?? "", /with 3 first-boot init commands/);
 });
@@ -2899,7 +2929,7 @@ test("template capture can refresh an existing template while preserving history
   const template = summary.templates.find((entry) => entry.id === "tpl-0001");
 
   assert.ok(template);
-  assert.equal(summary.templates.length, 1);
+  assert.equal(summary.templates.length, 2);
   assert.equal(template?.description, "Refreshed from alpha-workbench");
   assert.equal(template?.launchSource, "mock://templates/ubuntu-agent-forge");
   assert.equal(template?.snapshotIds.length, 2);
@@ -3016,7 +3046,7 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     id: "tpl-0099",
     name: "Incus Template",
     description: "Backed by a real image alias",
-    launchSource: "images:ubuntu/noble/desktop",
+    launchSource: "images:ubuntu/resolute/desktop",
     defaultResources: {
       cpu: 4,
       ramMb: 8192,
@@ -3109,7 +3139,7 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.equal(createMutation.session?.display, "10.55.0.12:5990");
   assert.deepEqual(initCall, [
     "init",
-    "images:ubuntu/noble/desktop",
+    "images:ubuntu/resolute/desktop",
     instanceName,
     "--vm",
     "-c",
@@ -3146,7 +3176,10 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetInput, /guest_desktop_has_visible_stage\(\)/);
   assert.match(configSetInput, /guest_desktop_session_ready\(\)/);
   assert.match(configSetInput, /pgrep -u ubuntu -x gnome-shell/);
-  assert.match(configSetInput, /\/usr\/libexec\/gnome-session-binary/);
+  assert.match(
+    configSetInput,
+    /\/usr\/libexec\/gnome-session-\(binary\|service\|ctl\|init-worker\)/,
+  );
   assert.match(configSetInput, /xwininfo -root -tree/);
   assert.match(configSetInput, /mutter guard window/);
   assert.match(configSetInput, /loginctl list-sessions --no-legend/);
@@ -3155,6 +3188,21 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
   assert.match(configSetInput, /ps -C Xwayland -o args=/);
   assert.match(configSetInput, /\.mutter-Xwaylandauth\.\*/);
   assert.match(configSetInput, /\/var\/run\/gdm3\/auth-for-\*\/database/);
+  assert.match(
+    configSetInput,
+    /if \[ ! -f \/usr\/share\/xsessions\/ubuntu\.desktop \] && \[ -f \/usr\/share\/wayland-sessions\/ubuntu\.desktop \]; then/,
+  );
+  assert.match(
+    configSetInput,
+    /MISSING_PACKAGES="\$MISSING_PACKAGES xserver-xorg gnome-session-flashback"/,
+  );
+  assert.match(configSetInput, /XSession=gnome-flashback-metacity/);
+  assert.match(configSetInput, /Session=gnome-flashback-metacity/);
+  assert.match(configSetInput, /queue_x11_compatibility_session_packages\(\)/);
+  assert.match(configSetInput, /apply_x11_compatibility_session_selection\(\)/);
+  assert.match(configSetInput, /pgrep -u ubuntu -x gnome-panel/);
+  assert.match(configSetInput, /pgrep -u ubuntu -x gnome-flashback/);
+  assert.match(configSetInput, /pgrep -u ubuntu -x metacity/);
   assert.match(configSetInput, /Acquire::ForceIPv4=true/);
   assert.match(configSetInput, /LIBGL_ALWAYS_SOFTWARE=1/);
   assert.match(configSetInput, /GALLIUM_DRIVER=llvmpipe/);
@@ -4148,7 +4196,10 @@ test("incus provider applies guest display resolution through xrandr", async () 
   assert.match(execCall?.[5] ?? "", /guest_desktop_has_visible_stage\(\)/);
   assert.match(execCall?.[5] ?? "", /guest_desktop_session_ready\(\)/);
   assert.match(execCall?.[5] ?? "", /pgrep -u ubuntu -x gnome-shell/);
-  assert.match(execCall?.[5] ?? "", /\/usr\/libexec\/gnome-session-binary/);
+  assert.match(
+    execCall?.[5] ?? "",
+    /\/usr\/libexec\/gnome-session-\(binary\|service\|ctl\|init-worker\)/,
+  );
   assert.match(execCall?.[5] ?? "", /xwininfo -root -tree/);
   assert.match(execCall?.[5] ?? "", /mutter guard window/);
   assert.match(execCall?.[5] ?? "", /loginctl list-sessions --no-legend/);
@@ -5277,7 +5328,7 @@ test("incus provider targets the configured storage pool for creates and copies"
     id: "tpl-0200",
     name: "Storage Pool Template",
     description: "Verifies Incus storage targeting",
-    launchSource: "images:ubuntu/noble/desktop",
+    launchSource: "images:ubuntu/resolute/desktop",
     defaultResources: {
       cpu: 4,
       ramMb: 8192,

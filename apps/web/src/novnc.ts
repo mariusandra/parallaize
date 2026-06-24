@@ -55,6 +55,14 @@ interface ClipboardShortcutKeyboardEventLike {
   shiftKey?: boolean;
 }
 
+interface ReverseTabKeyboardEventLike {
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  key?: string;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+}
+
 export type RfbViewportMode = "fit" | "remote" | "scale";
 export type ClipboardShortcutAction = "copy" | "paste";
 
@@ -95,6 +103,7 @@ interface RfbInternalLike {
 }
 
 const x11BackspaceKeysym = 0xff08;
+const x11IsoLeftTabKeysym = 0xfe20;
 const x11KeyCKeysym = 0x0063;
 const x11TabKeysym = 0xff09;
 const x11ControlLeftKeysym = 0xffe3;
@@ -216,6 +225,16 @@ export function resolveClipboardShortcutAction(
   }
 
   return null;
+}
+
+export function isReverseTabShortcut(event: ReverseTabKeyboardEventLike): boolean {
+  return (
+    event.key === "Tab" &&
+    Boolean(event.shiftKey) &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey
+  );
 }
 
 export async function readBrowserClipboardText(
@@ -344,6 +363,10 @@ export function sendGuestCopyShortcut(rfb: RfbLike): void {
   rfb.sendKey(x11KeyCKeysym, "KeyC", true);
   rfb.sendKey(x11KeyCKeysym, "KeyC", false);
   rfb.sendKey(x11ControlLeftKeysym, "ControlLeft", false);
+}
+
+export function sendGuestReverseTabShortcut(rfb: RfbLike): void {
+  rfb.sendKey(x11IsoLeftTabKeysym, "");
 }
 
 export function viewportSettingsForMode(mode: RfbViewportMode): RfbViewportSettings {

@@ -65,7 +65,7 @@ Notes:
 
 Fresh VMs need DHCP, DNS, and outbound internet access.
 
-That is important for this repo because the seeded template launches from `images:ubuntu/noble/desktop`, and the app injects cloud-init on first boot to update packages, install `x11vnc`, and enable the Incus agent.
+That is important for this repo because the seeded template launches from `images:ubuntu/resolute/desktop`, and the app injects cloud-init on first boot to update packages, install `x11vnc`, and enable the Incus agent.
 
 If UFW is enabled on the host, allow the Incus bridge traffic:
 
@@ -91,7 +91,7 @@ Because the `start` script hardcodes `PARALLAIZE_DATA_FILE=data/incus-state.json
 mv data/incus-state.json data/incus-state.json.bak
 ```
 
-When the JSON state file is missing, Parallaize will create a fresh state with a seeded template that points at `images:ubuntu/noble/desktop`.
+When the JSON state file is missing, Parallaize will create a fresh state with a seeded template that points at `images:ubuntu/resolute/desktop`.
 
 ## Set explicit guest desktop ports and transport relays
 
@@ -200,7 +200,7 @@ Optional Incus tuning:
 - Set `PARALLAIZE_INCUS_STORAGE_POOL` if you want new VMs and clones to land on a faster `lvm`, `btrfs`, or `zfs` pool instead of a slow `dir` pool.
 - On Hetzner dedicated hosts, the cleanest way to get that `lvm` pool is to create the LVM-backed disk or volume group from the Hetzner rescue system before installing Ubuntu, then initialize Incus against it afterward.
 - Set `PARALLAIZE_INCUS_PROJECT` if you want Parallaize isolated inside a dedicated Incus project.
-- Set `PARALLAIZE_DEFAULT_TEMPLATE_LAUNCH_SOURCE` if you want the seeded Ubuntu template pinned to a known-good local alias, fingerprint, or explicit remote image instead of following the moving `images:ubuntu/noble/desktop` alias. Existing seeded templates are reconciled to that value on restart.
+- Set `PARALLAIZE_DEFAULT_TEMPLATE_LAUNCH_SOURCE` if you want the seeded Ubuntu template pinned to a known-good local alias, fingerprint, or explicit remote image instead of following the moving `images:ubuntu/resolute/desktop` alias. Existing seeded templates are reconciled to that value on restart.
 
 ## Hostname-based forwarded services
 
@@ -302,11 +302,11 @@ curl http://127.0.0.1:3000/api/health
 curl http://127.0.0.1:3000/api/summary
 ```
 
-Then create a VM from the seeded Ubuntu 24.04 template (`tpl-0001`, shown as `Ubuntu Agent Forge`) in the UI.
+Then create a VM from the seeded Ubuntu template (`tpl-0001`, shown as `Ubuntu Agent Forge`) in the UI.
 
 What should happen:
 
-- Incus launches a real VM from `images:ubuntu/noble/desktop` or from a locally captured alias if you later capture templates.
+- Incus launches a real VM from `images:ubuntu/resolute/desktop` or from a locally captured alias if you later capture templates.
 - Parallaize injects cloud-init to install and start `x11vnc`.
 - The guest gets an address on the Incus bridge.
 - The browser VNC path becomes available through the app and through Caddy if Caddy is running.
@@ -320,7 +320,7 @@ Once the control plane is up in Incus mode and Caddy is serving HTTPS on `:8080`
 flox activate -d . -- pnpm smoke:incus
 ```
 
-This smoke test creates a throwaway VM from the seeded Ubuntu 24.04 launch source by default, validates the VNC bridge, waits for a non-black desktop framebuffer, installs a guest HTTP service, verifies Caddy forwarding, and cleans the VM up afterward unless told not to.
+This smoke test creates a throwaway VM from the seeded Ubuntu launch source by default, validates the VNC bridge, waits for a non-black desktop framebuffer, installs a guest HTTP service, verifies Caddy forwarding, and cleans the VM up afterward unless told not to.
 
 Notes from the live PostgreSQL-backed run on March 26, 2026:
 

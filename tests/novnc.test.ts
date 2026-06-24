@@ -5,6 +5,7 @@ import {
   applySafeRfbEncodingPatch,
   buildRfbSocketUrls,
   clipboardPasteShortcutLabel,
+  isReverseTabShortcut,
   primeClipboardPasteCaptureTarget,
   readBrowserClipboardText,
   readClipboardEventText,
@@ -13,6 +14,7 @@ import {
   resolveRfbConstructor,
   resolveClipboardShortcutAction,
   sendGuestCopyShortcut,
+  sendGuestReverseTabShortcut,
   sendGuestText,
   sendGuestPasteShortcut,
   viewportSettingsForMode,
@@ -311,6 +313,37 @@ test("resolveClipboardShortcutAction ignores modified or unsupported shortcuts",
   );
 });
 
+test("isReverseTabShortcut only accepts unmodified Shift+Tab", () => {
+  assert.equal(
+    isReverseTabShortcut({
+      key: "Tab",
+      shiftKey: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isReverseTabShortcut({
+      key: "Tab",
+    }),
+    false,
+  );
+  assert.equal(
+    isReverseTabShortcut({
+      ctrlKey: true,
+      key: "Tab",
+      shiftKey: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isReverseTabShortcut({
+      key: "Enter",
+      shiftKey: true,
+    }),
+    false,
+  );
+});
+
 test("readBrowserClipboardText requires a readable clipboard implementation", async () => {
   await assert.rejects(() => readBrowserClipboardText(null), /clipboard read/i);
 });
@@ -480,6 +513,29 @@ test("sendGuestCopyShortcut emits a Ctrl+C key sequence", () => {
       code: "ControlLeft",
       down: false,
       keysym: 0xffe3,
+    },
+  ]);
+});
+
+test("sendGuestReverseTabShortcut emits X11 reverse-tab", () => {
+  const calls: Array<{ code: string; down: boolean | undefined; keysym: number }> = [];
+  const rfb = {
+    sendKey(keysym: number, code: string, down?: boolean) {
+      calls.push({
+        code,
+        down,
+        keysym,
+      });
+    },
+  } as Pick<FakeRfb, "sendKey"> as Parameters<typeof sendGuestReverseTabShortcut>[0];
+
+  sendGuestReverseTabShortcut(rfb);
+
+  assert.deepEqual(calls, [
+    {
+      code: "",
+      down: undefined,
+      keysym: 0xfe20,
     },
   ]);
 });

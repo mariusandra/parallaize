@@ -231,7 +231,19 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.match(script, /validate_selkies_bundle\(\) \{/);
   assert.match(script, /Selkies patch-level drift detected, reinstalling runtime from a clean archive\./);
   assert.match(script, /Selkies bundle validation failed, reinstalling runtime from a clean archive\./);
+  assert.match(script, /find_selkies_python_package_dir\(\) \{/);
+  assert.match(
+    script,
+    /for candidate in "\$SELKIES_INSTALL_DIR"\/lib\/python\*\/site-packages\/selkies_gstreamer; do/,
+  );
+  assert.match(script, /SELKIES_PYTHON_PACKAGE_DIR="\$\(find_selkies_python_package_dir\)"/);
+  assert.match(script, /Expected Selkies file missing: \$SELKIES_MAIN_FILE/);
+  assert.match(script, /Expected Selkies file missing: \$SELKIES_SIGNALING_SERVER_FILE/);
+  assert.match(script, /Expected Selkies file missing: \$SELKIES_SIGNALING_CLIENT_FILE/);
+  assert.match(script, /Expected Selkies file missing: \$SELKIES_GST_APP_FILE/);
+  assert.match(script, /Expected Selkies file missing: \$SELKIES_WEBRTC_INPUT_FILE/);
   assert.match(script, /except \(subprocess\.SubprocessError, OSError\) as e:/);
+  assert.doesNotMatch(script, /lib\/python3\.12\/site-packages/);
   assert.doesNotMatch(script, /function parallaizeBuildCursorUrl\(curdata\) \{/);
   assert.doesNotMatch(script, /const cursorDevicePixelRatio = parallaizeCursorDevicePixelRatio\(\);/);
   assert.doesNotMatch(script, /parallaizeScaleCursorHotspotCoordinate\(hotspot\.x, cursorDevicePixelRatio\)/);
@@ -275,9 +287,11 @@ test("Selkies bootstrap repair keeps the guest bootstrap script on Selkies", () 
   assert.match(script, /:root\[data-parallaize-stream-pixelated="true"\] \.video \{ image-rendering: crisp-edges; image-rendering: pixelated; \}/);
   assert.match(script, /document\.documentElement\.dataset\.parallaizeStreamPixelated = pixelated \? "true" : "false";/);
   assert.match(script, /NETWORK_WAIT_ONLINE_OVERRIDE_FILE="\/etc\/systemd\/system\/systemd-networkd-wait-online\.service\.d\/10-parallaize\.conf"/);
+  assert.match(script, /NETWORK_MANAGER_WAIT_ONLINE_OVERRIDE_FILE="\/etc\/systemd\/system\/NetworkManager-wait-online\.service\.d\/10-parallaize\.conf"/);
   assert.match(script, /PLYMOUTH_QUIT_WAIT_OVERRIDE_FILE="\/etc\/systemd\/system\/plymouth-quit-wait\.service\.d\/10-parallaize\.conf"/);
   assert.match(script, /ExecStart=\/bin\/true/);
-  assert.match(script, /systemctl stop --no-block plymouth-quit-wait\.service >\/dev\/null 2>&1 \|\| true/);
+  assert.match(script, /systemctl restart NetworkManager-wait-online\.service >\/dev\/null 2>&1 \|\| true/);
+  assert.match(script, /systemctl restart plymouth-quit-wait\.service >\/dev\/null 2>&1 \|\| true/);
   assert.doesNotMatch(script, /network-online\.target/);
   assert.doesNotMatch(script, /After=display-manager\.service parallaize-desktop-bootstrap\.service/);
   assert.doesNotMatch(script, /DESKTOP_SERVICE_NAME="parallaize-x11vnc\.service"/);
@@ -720,13 +734,30 @@ test("Selkies cloud-init seeds early wait-online and plymouth overrides before f
     cloudInit,
     /path: \/etc\/systemd\/system\/systemd-networkd-wait-online\.service\.d\/10-parallaize\.conf/,
   );
+  assert.match(
+    cloudInit,
+    /path: \/etc\/systemd\/system\/NetworkManager-wait-online\.service\.d\/10-parallaize\.conf/,
+  );
   assert.match(cloudInit, /ExecStart=\/bin\/true/);
   assert.match(
     cloudInit,
     /path: \/etc\/systemd\/system\/plymouth-quit-wait\.service\.d\/10-parallaize\.conf/,
   );
   assert.match(cloudInit, /bootcmd:\n  - \|/);
-  assert.match(cloudInit, /systemctl stop --no-block plymouth-quit-wait\.service \|\| true/);
+  assert.match(
+    cloudInit,
+    /if \[ ! -f \/usr\/share\/xsessions\/ubuntu\.desktop \] && \[ -f \/usr\/share\/wayland-sessions\/ubuntu\.desktop \]; then/,
+  );
+  assert.match(
+    cloudInit,
+    /MISSING_PACKAGES="\$MISSING_PACKAGES xserver-xorg gnome-session-flashback"/,
+  );
+  assert.match(cloudInit, /XSession=gnome-flashback-metacity/);
+  assert.match(cloudInit, /Session=gnome-flashback-metacity/);
+  assert.match(cloudInit, /queue_x11_compatibility_session_packages\(\)/);
+  assert.match(cloudInit, /apply_x11_compatibility_session_selection\(\)/);
+  assert.match(cloudInit, /systemctl restart NetworkManager-wait-online\.service \|\| true/);
+  assert.match(cloudInit, /systemctl restart plymouth-quit-wait\.service \|\| true/);
   assert.match(cloudInit, /systemctl restart systemd-networkd-wait-online\.service \|\| true/);
   assert.match(cloudInit, /export SELKIES_STUN_HOST="stun\.example\.com"/);
   assert.match(cloudInit, /export SELKIES_STUN_PORT="3478"/);
@@ -1160,7 +1191,7 @@ test("Selkies create launches directly from the selected source image", async (c
   const calls: string[][] = [];
   const commandInputs = new Map<string[], string>();
   const instanceName = "parallaize-vm-8888-selkies-direct";
-  const templateLaunchSource = "images:ubuntu/noble/desktop";
+  const templateLaunchSource = "images:ubuntu/resolute/desktop";
 
   const provider = createProvider("incus", "incus", {
     guestSelkiesPort: address.port,

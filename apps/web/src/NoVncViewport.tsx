@@ -5,6 +5,7 @@ import {
   buildRfbSocketUrls,
   clipboardPasteShortcutLabel,
   copyTextWithSelection,
+  isReverseTabShortcut,
   primeClipboardPasteCaptureTarget,
   readBrowserClipboardText,
   readClipboardEventText,
@@ -13,6 +14,7 @@ import {
   resolveRfbConstructor,
   resolveClipboardShortcutAction,
   sendGuestCopyShortcut,
+  sendGuestReverseTabShortcut,
   sendGuestText,
   viewportSettingsForMode,
   writeBrowserClipboardText,
@@ -413,6 +415,20 @@ export const NoVncViewport = memo(function NoVncViewport({
         return;
       }
 
+      if (isReverseTabShortcut(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const rfb = rfbRef.current;
+
+        if (rfb && connectionState === "connected") {
+          sendGuestReverseTabShortcut(rfb);
+          focusRemoteDesktop();
+        }
+
+        return;
+      }
+
       const action = resolveClipboardShortcutAction(
         event,
         globalThis.navigator?.platform,
@@ -445,11 +461,11 @@ export const NoVncViewport = memo(function NoVncViewport({
     }
 
     mountNode.addEventListener("paste", handlePaste);
-    mountNode.addEventListener("keydown", handleKeyDown);
+    mountNode.addEventListener("keydown", handleKeyDown, true);
 
     return () => {
       mountNode.removeEventListener("paste", handlePaste);
-      mountNode.removeEventListener("keydown", handleKeyDown);
+      mountNode.removeEventListener("keydown", handleKeyDown, true);
     };
   }, [clipboardEnabled, connectionState]);
 

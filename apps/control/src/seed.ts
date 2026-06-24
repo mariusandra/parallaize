@@ -7,9 +7,10 @@ import type {
 } from "../../../packages/shared/src/types.js";
 import { buildDefaultWorkspaceProject } from "../../../packages/shared/src/helpers.js";
 import {
-  buildSeedTemplateSummary,
+  buildSeedTemplateRecord,
+  buildSystemSeedTemplateDefinitions,
+  DEFAULT_TEMPLATE_ID,
   type DefaultTemplateLaunchSourceOptions,
-  resolveDefaultTemplateLaunchSource,
 } from "./template-defaults.js";
 import { buildMockDesktopSession } from "./mock-selkies.js";
 
@@ -18,54 +19,18 @@ export function createSeedState(
   options: DefaultTemplateLaunchSourceOptions = {},
 ): AppState {
   const now = new Date().toISOString();
-  const defaultLaunchSource = resolveDefaultTemplateLaunchSource(
-    options.defaultTemplateLaunchSource,
-  );
   const defaultProject = buildDefaultWorkspaceProject(now);
-
-  const templates: EnvironmentTemplate[] = [
-    {
-      id: "tpl-0001",
-      name: "Ubuntu Agent Forge",
-      description:
-        "Balanced Ubuntu desktop for coding agents, shell tasks, and browser-based reviews.",
-      launchSource: defaultLaunchSource,
-      defaultResources: {
-        cpu: 6,
-        ramMb: 12288,
-        diskGb: 80,
-      },
-      defaultForwardedPorts: [],
-      defaultDesktopTransport: "vnc",
-      defaultNetworkMode: "default",
-      initCommands: [],
-      tags: ["coding", "agents", "ubuntu"],
-      notes: [
-        "GNOME desktop with terminal and editor workspace layout.",
-        "Base image is intended for iterative snapshotting during development.",
-      ],
-      snapshotIds: provider.kind === "mock" ? ["snap-0001"] : [],
-      provenance: {
-        kind: "seed",
-        summary: buildSeedTemplateSummary(defaultLaunchSource),
-        sourceTemplateId: null,
-        sourceTemplateName: null,
-        sourceVmId: null,
-        sourceVmName: null,
-        sourceSnapshotId: null,
-        sourceSnapshotLabel: null,
-      },
-      history: [
-        {
-          kind: "created",
-          summary: buildSeedTemplateSummary(defaultLaunchSource),
-          createdAt: now,
-        },
-      ],
-      createdAt: now,
-      updatedAt: now,
-    },
-  ];
+  const templates: EnvironmentTemplate[] = buildSystemSeedTemplateDefinitions(
+    options.defaultTemplateLaunchSource,
+  ).map((definition) =>
+    buildSeedTemplateRecord(
+      definition,
+      now,
+      provider.kind === "mock" && definition.id === DEFAULT_TEMPLATE_ID
+        ? ["snap-0001"]
+        : [],
+    )
+  );
 
   if (provider.kind === "incus") {
     return {
@@ -102,7 +67,7 @@ export function createSeedState(
       createdAt: now,
       updatedAt: now,
       liveSince: now,
-      lastAction: "Booted from Ubuntu Agent Forge",
+      lastAction: `Booted from ${templates[0]?.name ?? "Ubuntu Agent Forge"}`,
       snapshotIds: ["snap-0002"],
       frameRevision: 1,
       screenSeed: 38,
@@ -127,10 +92,10 @@ export function createSeedState(
     {
       id: "snap-0001",
       vmId: "seed-template-agent-forge",
-      templateId: "tpl-0001",
+      templateId: DEFAULT_TEMPLATE_ID,
       label: "Base agent forge image",
-      summary: "Initial Ubuntu Agent Forge template snapshot.",
-      providerRef: "seed://tpl-0001/base",
+      summary: `Initial ${templates[0]?.name ?? "Ubuntu Agent Forge"} template snapshot.`,
+      providerRef: `seed://${DEFAULT_TEMPLATE_ID}/base`,
       stateful: false,
       resources: templates[0].defaultResources,
       createdAt: now,

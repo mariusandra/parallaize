@@ -54,7 +54,7 @@ test("json persistence admin helpers normalize legacy state and write canonical 
   assert.equal(state.sequence, 1);
   assert.equal(state.provider.kind, "incus");
   assert.equal(state.provider.desktopTransport, "novnc");
-  assert.equal(state.templates[0]?.launchSource, "images:ubuntu/noble/desktop");
+  assert.equal(state.templates[0]?.launchSource, "images:ubuntu/resolute/desktop");
   assert.equal(state.vms[0]?.workspacePath, "/root");
 
   writeStateToJsonFile(targetPath, state);
