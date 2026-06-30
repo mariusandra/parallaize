@@ -18,7 +18,7 @@ export const vmDesktopTransports = [
 export function normalizeTemplateDesktopTransport(
   transport: VmDesktopTransport | null | undefined,
 ): VmDesktopTransport {
-  return transport === "vnc" || transport === "guacamole"
+  return transport === "vnc" || transport === "selkies" || transport === "guacamole"
     ? transport
     : "vnc";
 }

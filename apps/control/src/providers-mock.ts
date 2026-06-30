@@ -48,6 +48,10 @@ import {
   buildMockDesktopSession,
   type MockDesktopTransport,
 } from "./mock-selkies.js";
+import {
+  formatTemplateScriptRunsActivity,
+  resolveStructuredTemplateScripts,
+} from "./template-scripts.js";
 
 export class MockProvider implements DesktopProvider {
   state: ProviderState;
@@ -103,6 +107,16 @@ export class MockProvider implements DesktopProvider {
     report?.("Starting workspace", VM_CREATE_BOOT_START_PERCENT);
     await sleep(40);
     report?.("Waiting for desktop", VM_CREATE_READY_PERCENT);
+    const templateScripts = resolveStructuredTemplateScripts(template);
+    const templateScriptRuns = templateScripts.map((script) => ({
+      scriptId: script.id,
+      name: script.name,
+      status: "succeeded" as const,
+      exitCode: 0,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      log: "mock provider did not execute template scripts",
+    }));
 
     return {
       lastAction: `Provisioned from ${template.name}`,
@@ -110,7 +124,8 @@ export class MockProvider implements DesktopProvider {
         `boot: ubuntu desktop launched from ${template.launchSource}`,
         `provider ref: ${vm.providerRef}`,
         `resources: ${vm.resources.cpu} CPU / ${vm.resources.ramMb} MB / ${vm.resources.diskGb} GB`,
-        ...(template.initCommands.length > 0
+        ...formatTemplateScriptRunsActivity(templateScriptRuns),
+        ...(templateScripts.length === 0 && template.initCommands.length > 0
           ? [
               `init: ${template.initCommands.length} first-boot command${template.initCommands.length === 1 ? "" : "s"} completed`,
               `init-log: ${DEFAULT_GUEST_INIT_LOG_PATH}`,
@@ -122,6 +137,8 @@ export class MockProvider implements DesktopProvider {
       activeWindow: "editor",
       workspacePath: `/srv/workspaces/${slugify(vm.name)}`,
       session: this.buildSession(vm.id),
+      templateScriptRuns:
+        templateScriptRuns.length > 0 ? templateScriptRuns : undefined,
     };
   }
 

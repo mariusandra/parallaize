@@ -11,6 +11,7 @@ import type {
   VmLogsSnapshot,
   VmNetworkMode,
   VmSession,
+  VmTemplateScriptRun,
   VmTouchedFile,
   VmTouchedFileReason,
   VmTouchedFilesSnapshot,
@@ -217,6 +218,7 @@ export interface ProviderMutation {
   desktopReadyAt?: string | null;
   desktopReadyMs?: number | null;
   commandResult?: ProviderCommandResult;
+  templateScriptRuns?: VmTemplateScriptRun[];
 }
 
 export interface ProviderCloneOptions {

@@ -158,6 +158,7 @@ const server = createServer(async (request, response) => {
 
     if (
       await handleTemplateRoute({
+        config,
         manager,
         method,
         request,

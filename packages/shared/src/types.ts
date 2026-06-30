@@ -143,6 +143,21 @@ export interface TemplateHistoryEntry {
   createdAt: string;
 }
 
+export interface TemplateEnvVar {
+  name: string;
+  value: string;
+}
+
+export type TemplateScriptRunMode = "after-previous" | "parallel";
+
+export interface TemplateScript {
+  id: string;
+  name: string;
+  content: string;
+  dependsOn: string[];
+  runMode: TemplateScriptRunMode;
+}
+
 export interface EnvironmentTemplate {
   id: string;
   name: string;
@@ -153,6 +168,8 @@ export interface EnvironmentTemplate {
   defaultDesktopTransport?: VmDesktopTransport;
   defaultNetworkMode?: VmNetworkMode;
   initCommands: string[];
+  envVars?: TemplateEnvVar[];
+  scripts?: TemplateScript[];
   tags: string[];
   notes: string[];
   snapshotIds: string[];
@@ -188,8 +205,21 @@ export interface VmInstance {
   desktopReadyMs?: number | null;
   forwardedPorts: VmPortForward[];
   activityLog: string[];
+  templateScriptRuns?: VmTemplateScriptRun[];
   commandHistory?: VmCommandResult[];
   telemetry?: ResourceTelemetry;
+}
+
+export type VmTemplateScriptRunStatus = "succeeded" | "failed" | "skipped";
+
+export interface VmTemplateScriptRun {
+  scriptId: string;
+  name: string;
+  status: VmTemplateScriptRunStatus;
+  exitCode: number | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  log: string;
 }
 
 export interface Snapshot {
@@ -447,16 +477,45 @@ export interface CaptureTemplateInput {
 }
 
 export interface CreateTemplateInput {
-  sourceTemplateId: string;
+  sourceTemplateId?: string;
+  launchSource?: string;
   name: string;
   description: string;
+  resources?: ResourceSpec;
+  defaultDesktopTransport?: VmDesktopTransport;
+  defaultNetworkMode?: VmNetworkMode;
   initCommands?: string[];
+  envVars?: TemplateEnvVar[];
+  scripts?: TemplateScript[];
 }
 
 export interface UpdateTemplateInput {
   name: string;
   description?: string;
+  launchSource?: string;
+  resources?: ResourceSpec;
+  defaultDesktopTransport?: VmDesktopTransport;
+  defaultNetworkMode?: VmNetworkMode;
   initCommands?: string[];
+  envVars?: TemplateEnvVar[];
+  scripts?: TemplateScript[];
+}
+
+export interface GenerateTemplateScriptsInput {
+  prompt: string;
+  templateName?: string;
+  templateDescription?: string;
+  launchSource?: string;
+  resources?: ResourceSpec;
+  envVars?: TemplateEnvVar[];
+  scripts?: TemplateScript[];
+  targetScriptId?: string | null;
+}
+
+export interface GenerateTemplateScriptsResult {
+  summary: string;
+  envVars: TemplateEnvVar[];
+  scripts: TemplateScript[];
 }
 
 export interface UpdateVmInput {

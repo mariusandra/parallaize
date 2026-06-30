@@ -19,6 +19,8 @@ import type {
   CreateVmInput,
   DashboardSummary,
   EnvironmentTemplate,
+  GenerateTemplateScriptsInput,
+  GenerateTemplateScriptsResult,
   HealthStatus,
   ReorderVmsInput,
   SnapshotInput,
@@ -42,11 +44,17 @@ import {
   buildCreateLaunchValidationError,
   buildTemplateCloneDraft,
   buildTemplateEditDraft,
+  buildBlankTemplateEnvDraft,
+  buildBlankTemplateScriptDraft,
+  applyGeneratedTemplateScriptsToDraft,
   firstCreateSourceSelection,
   moveVmIdBetweenProjects,
   normalizeActiveCpuThreshold,
   parseInitCommandsDraft,
   parseRamDraftValue,
+  parseTemplateDraftResources,
+  parseTemplateEnvDrafts,
+  parseTemplateScriptDrafts,
   reorderProjectVmIds,
   reorderVmIds,
   resolveCreateSourceSelection,
@@ -54,6 +62,8 @@ import {
   type CreateDraft,
   type TemplateCloneDraft,
   type TemplateEditDraft,
+  type TemplateEnvDraft,
+  type TemplateScriptDraft,
   type VmRailDropPosition,
 } from "./dashboardHelpers.js";
 import {
@@ -785,6 +795,119 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     );
   }
 
+  function handleTemplateEditAddEnvVar(): void {
+    setTemplateEditDraft((current) =>
+      current
+        ? {
+            ...current,
+            envVars: [...current.envVars, buildBlankTemplateEnvDraft(current.envVars.length)],
+          }
+        : current,
+    );
+  }
+
+  function handleTemplateEditRemoveEnvVar(envVarId: string): void {
+    setTemplateEditDraft((current) =>
+      current
+        ? {
+            ...current,
+            envVars: current.envVars.filter((envVar) => envVar.id !== envVarId),
+          }
+        : current,
+    );
+  }
+
+  function handleTemplateEditEnvVarChange(
+    envVarId: string,
+    field: keyof TemplateEnvDraft,
+    value: string,
+  ): void {
+    if (field === "id") {
+      return;
+    }
+
+    setTemplateEditDraft((current) =>
+      current
+        ? {
+            ...current,
+            envVars: current.envVars.map((envVar) =>
+              envVar.id === envVarId
+                ? {
+                    ...envVar,
+                    [field]: value,
+                  }
+                : envVar,
+            ),
+          }
+        : current,
+    );
+  }
+
+  function handleTemplateEditAddScript(): void {
+    setTemplateEditDraft((current) =>
+      current
+        ? {
+            ...current,
+            scripts: [
+              ...current.scripts,
+              buildBlankTemplateScriptDraft(current.scripts.length),
+            ],
+          }
+        : current,
+    );
+  }
+
+  function handleTemplateEditRemoveScript(scriptId: string): void {
+    setTemplateEditDraft((current) => {
+      if (!current || current.scripts.length <= 1) {
+        return current;
+      }
+
+      return {
+        ...current,
+        scripts: current.scripts.filter((script) => script.id !== scriptId),
+        generatorTargetScriptId:
+          current.generatorTargetScriptId === scriptId ? "" : current.generatorTargetScriptId,
+      };
+    });
+  }
+
+  function handleTemplateEditScriptChange(
+    scriptId: string,
+    field: keyof TemplateScriptDraft,
+    value: string,
+  ): void {
+    if (field === "id") {
+      return;
+    }
+
+    setTemplateEditDraft((current) =>
+      current
+        ? {
+            ...current,
+            scripts: current.scripts.map((script) =>
+              script.id === scriptId
+                ? {
+                    ...script,
+                    [field]: field === "runMode" && value === "parallel" ? "parallel" : value,
+                  }
+                : script,
+            ),
+          }
+        : current,
+    );
+  }
+
+  async function handleTemplateEditGenerateScripts(): Promise<void> {
+    const draft = templateEditDraft;
+
+    if (!draft) {
+      return;
+    }
+
+    await generateTemplateScriptsForDraft("edit", draft);
+  }
+
   function closeTemplateCloneDialog(): void {
     setTemplateCloneDraft(null);
   }
@@ -801,6 +924,119 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
           }
         : current,
     );
+  }
+
+  function handleTemplateCloneAddEnvVar(): void {
+    setTemplateCloneDraft((current) =>
+      current
+        ? {
+            ...current,
+            envVars: [...current.envVars, buildBlankTemplateEnvDraft(current.envVars.length)],
+          }
+        : current,
+    );
+  }
+
+  function handleTemplateCloneRemoveEnvVar(envVarId: string): void {
+    setTemplateCloneDraft((current) =>
+      current
+        ? {
+            ...current,
+            envVars: current.envVars.filter((envVar) => envVar.id !== envVarId),
+          }
+        : current,
+    );
+  }
+
+  function handleTemplateCloneEnvVarChange(
+    envVarId: string,
+    field: keyof TemplateEnvDraft,
+    value: string,
+  ): void {
+    if (field === "id") {
+      return;
+    }
+
+    setTemplateCloneDraft((current) =>
+      current
+        ? {
+            ...current,
+            envVars: current.envVars.map((envVar) =>
+              envVar.id === envVarId
+                ? {
+                    ...envVar,
+                    [field]: value,
+                  }
+                : envVar,
+            ),
+          }
+        : current,
+    );
+  }
+
+  function handleTemplateCloneAddScript(): void {
+    setTemplateCloneDraft((current) =>
+      current
+        ? {
+            ...current,
+            scripts: [
+              ...current.scripts,
+              buildBlankTemplateScriptDraft(current.scripts.length),
+            ],
+          }
+        : current,
+    );
+  }
+
+  function handleTemplateCloneRemoveScript(scriptId: string): void {
+    setTemplateCloneDraft((current) => {
+      if (!current || current.scripts.length <= 1) {
+        return current;
+      }
+
+      return {
+        ...current,
+        scripts: current.scripts.filter((script) => script.id !== scriptId),
+        generatorTargetScriptId:
+          current.generatorTargetScriptId === scriptId ? "" : current.generatorTargetScriptId,
+      };
+    });
+  }
+
+  function handleTemplateCloneScriptChange(
+    scriptId: string,
+    field: keyof TemplateScriptDraft,
+    value: string,
+  ): void {
+    if (field === "id") {
+      return;
+    }
+
+    setTemplateCloneDraft((current) =>
+      current
+        ? {
+            ...current,
+            scripts: current.scripts.map((script) =>
+              script.id === scriptId
+                ? {
+                    ...script,
+                    [field]: field === "runMode" && value === "parallel" ? "parallel" : value,
+                  }
+                : script,
+            ),
+          }
+        : current,
+    );
+  }
+
+  async function handleTemplateCloneGenerateScripts(): Promise<void> {
+    const draft = templateCloneDraft;
+
+    if (!draft) {
+      return;
+    }
+
+    await generateTemplateScriptsForDraft("clone", draft);
   }
 
   function openVmLogsDialog(vm: VmInstance): void {
@@ -1000,7 +1236,13 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
           {
             name,
             description: templateEditDraft.description.trim(),
-            initCommands: parseInitCommandsDraft(templateEditDraft.initCommands),
+            launchSource: templateEditDraft.launchSource.trim(),
+            resources: parseTemplateDraftResources(templateEditDraft),
+            defaultDesktopTransport: templateEditDraft.defaultDesktopTransport,
+            defaultNetworkMode: templateEditDraft.defaultNetworkMode,
+            initCommands: [],
+            envVars: parseTemplateEnvDrafts(templateEditDraft.envVars),
+            scripts: parseTemplateScriptDrafts(templateEditDraft.scripts),
           } satisfies UpdateTemplateInput,
         );
         closeTemplateEditDialog();
@@ -1023,7 +1265,13 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
       sourceTemplateId: templateCloneDraft.sourceTemplateId,
       name: templateCloneDraft.name.trim(),
       description: templateCloneDraft.description.trim(),
-      initCommands: parseInitCommandsDraft(templateCloneDraft.initCommands),
+      launchSource: templateCloneDraft.launchSource.trim(),
+      resources: parseTemplateDraftResources(templateCloneDraft),
+      defaultDesktopTransport: templateCloneDraft.defaultDesktopTransport,
+      defaultNetworkMode: templateCloneDraft.defaultNetworkMode,
+      initCommands: [],
+      envVars: parseTemplateEnvDrafts(templateCloneDraft.envVars),
+      scripts: parseTemplateScriptDrafts(templateCloneDraft.scripts),
     };
 
     await runMutation(
@@ -1036,6 +1284,62 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
         setCreateDraft(buildCreateDraftFromTemplate(createdTemplate));
       },
       `Saved template ${payload.name}.`,
+    );
+  }
+
+  async function generateTemplateScriptsForDraft(
+    mode: "clone" | "edit",
+    draft: TemplateCloneDraft | TemplateEditDraft,
+  ): Promise<void> {
+    const prompt = draft.generatorPrompt.trim();
+
+    if (!prompt) {
+      return;
+    }
+
+    await runMutation(
+      "Generating template scripts",
+      async () => {
+        const generated = await postJson<GenerateTemplateScriptsResult>(
+          "/api/templates/script/generate",
+          {
+            prompt,
+            templateName: draft.name.trim(),
+            templateDescription: draft.description.trim(),
+            launchSource: draft.launchSource.trim(),
+            resources: parseTemplateDraftResources(draft),
+            envVars: parseTemplateEnvDrafts(draft.envVars),
+            scripts: parseTemplateScriptDrafts(draft.scripts),
+            targetScriptId: draft.generatorTargetScriptId || null,
+          } satisfies GenerateTemplateScriptsInput,
+        );
+
+        if (mode === "clone") {
+          setTemplateCloneDraft((current) =>
+            current
+              ? applyGeneratedTemplateScriptsToDraft(
+                  current,
+                  generated.envVars,
+                  generated.scripts,
+                  generated.summary,
+                )
+              : current,
+          );
+          return;
+        }
+
+        setTemplateEditDraft((current) =>
+          current
+            ? applyGeneratedTemplateScriptsToDraft(
+                current,
+                generated.envVars,
+                generated.scripts,
+                generated.summary,
+              )
+            : current,
+        );
+      },
+      "Generated template scripts.",
     );
   }
 
@@ -2060,9 +2364,23 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     handleSnapshotLabelChange,
     handleSnapshotStatefulChange,
     handleSnapshotSubmit,
+    handleTemplateCloneAddEnvVar,
+    handleTemplateCloneAddScript,
+    handleTemplateCloneEnvVarChange,
     handleTemplateCloneField,
+    handleTemplateCloneGenerateScripts,
+    handleTemplateCloneRemoveEnvVar,
+    handleTemplateCloneRemoveScript,
+    handleTemplateCloneScriptChange,
     handleTemplateCloneSubmit,
+    handleTemplateEditAddEnvVar,
+    handleTemplateEditAddScript,
+    handleTemplateEditEnvVarChange,
     handleTemplateEditField,
+    handleTemplateEditGenerateScripts,
+    handleTemplateEditRemoveEnvVar,
+    handleTemplateEditRemoveScript,
+    handleTemplateEditScriptChange,
     handleVmAction,
     handleProjectAction,
     handleVmStripDragOver,

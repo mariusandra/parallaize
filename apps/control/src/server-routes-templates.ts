@@ -2,12 +2,16 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type {
   CreateTemplateInput,
+  GenerateTemplateScriptsInput,
   UpdateTemplateInput,
 } from "../../../packages/shared/src/types.js";
+import type { AppConfig } from "./config.js";
 import type { DesktopManager } from "./manager.js";
+import { generateTemplateScriptsWithOpenAI } from "./openai-template-scripts.js";
 import { readJsonBody, writeAccepted, writeJson } from "./server-http.js";
 
 interface HandleTemplateRouteOptions {
+  config: AppConfig;
   manager: DesktopManager;
   method: string;
   request: IncomingMessage;
@@ -16,12 +20,22 @@ interface HandleTemplateRouteOptions {
 }
 
 export async function handleTemplateRoute({
+  config,
   manager,
   method,
   request,
   response,
   url,
 }: HandleTemplateRouteOptions): Promise<boolean> {
+  if (method === "POST" && url.pathname === "/api/templates/script/generate") {
+    const payload = await readJsonBody<GenerateTemplateScriptsInput>(request);
+    writeJson(response, 200, {
+      ok: true,
+      data: await generateTemplateScriptsWithOpenAI(config, payload),
+    });
+    return true;
+  }
+
   if (method === "POST" && url.pathname === "/api/templates") {
     const payload = await readJsonBody<CreateTemplateInput>(request);
     writeJson(response, 201, {

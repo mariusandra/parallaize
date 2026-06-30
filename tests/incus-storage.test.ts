@@ -304,6 +304,8 @@ function buildConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     sessionMaxAgeSeconds: 60 * 60 * 24 * 7,
     sessionIdleTimeoutSeconds: 60 * 60 * 24,
     sessionRotationSeconds: 60 * 60 * 6,
+    openaiApiKey: null,
+    openaiModel: "gpt-5.5",
     ...overrides,
   };
 }

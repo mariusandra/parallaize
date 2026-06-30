@@ -1398,6 +1398,91 @@ test("templates can be cloned into new defaults with first-boot init commands", 
   assert.match(cloned.history?.[0]?.summary ?? "", /with 3 first-boot init commands/);
 });
 
+test("templates can launch mock VMs with env vars and boot scripts", async (context) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "parallaize-script-template-"));
+  context.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const provider = createProvider("mock", "incus");
+  const store = new JsonStateStore(join(tempDir, "state.json"), () =>
+    createSeedState(provider.state),
+  );
+  const manager = new DesktopManager(store, provider);
+
+  const template = manager.createTemplate({
+    name: "Scripted Ubuntu Lab",
+    description: "Fresh VM with generated boot scripts.",
+    launchSource: "images:ubuntu/questing/desktop",
+    resources: {
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 40,
+    },
+    defaultDesktopTransport: "selkies",
+    defaultNetworkMode: "dmz",
+    envVars: [
+      {
+        name: "OPENAI_API_KEY",
+        value: "",
+      },
+    ],
+    scripts: [
+      {
+        id: "user-init",
+        name: "user-init.sh",
+        content: "echo ready",
+        dependsOn: [],
+        runMode: "after-previous",
+      },
+      {
+        id: "app",
+        name: "app.sh",
+        content: "echo app",
+        dependsOn: ["user-init.sh"],
+        runMode: "parallel",
+      },
+    ],
+  });
+
+  assert.equal(template.launchSource, "images:ubuntu/questing/desktop");
+  assert.deepEqual(template.defaultResources, {
+    cpu: 2,
+    ramMb: 4096,
+    diskGb: 40,
+  });
+  assert.equal(template.defaultDesktopTransport, "selkies");
+  assert.equal(template.defaultNetworkMode, "dmz");
+  assert.deepEqual(template.envVars, [{ name: "OPENAI_API_KEY", value: "" }]);
+  assert.equal(template.scripts?.length, 2);
+  assert.deepEqual(template.scripts?.[1]?.dependsOn, ["user-init"]);
+
+  const vm = manager.createVm({
+    templateId: template.id,
+    name: "scripted-lab",
+    resources: template.defaultResources,
+  });
+
+  await wait(700);
+
+  const detail = manager.getVmDetail(vm.id);
+  assert.equal(detail.vm.status, "running");
+  assert.deepEqual(
+    detail.vm.templateScriptRuns?.map((run) => ({
+      name: run.name,
+      status: run.status,
+      exitCode: run.exitCode,
+    })),
+    [
+      { name: "user-init.sh", status: "succeeded", exitCode: 0 },
+      { name: "app.sh", status: "succeeded", exitCode: 0 },
+    ],
+  );
+  assert.ok(
+    detail.vm.activityLog.some((entry) => entry === "template-scripts: 2 scripts completed"),
+  );
+});
+
 test("captured templates reject create requests that undersize the source disk", (context) => {
   const tempDir = mkdtempSync(join(tmpdir(), "parallaize-create-disk-guard-"));
   context.after(() => {

@@ -9,6 +9,8 @@ import type {
   CreateSourceSelection,
   TemplateCloneDraft,
   TemplateEditDraft,
+  TemplateEnvDraft,
+  TemplateScriptDraft,
 } from "./dashboardHelpers.js";
 import { createSourceSupportsDesktopTransportChoice } from "./dashboardHelpers.js";
 import { desktopTransportChoiceLabel, desktopTransportChoices } from "./desktopTransportChoices.js";
@@ -54,6 +56,13 @@ interface TemplateCloneDialogProps {
   sourceTemplate: EnvironmentTemplate | null;
   onClose: () => void;
   onFieldChange: (field: keyof TemplateCloneDraft, value: string) => void;
+  onAddEnvVar: () => void;
+  onRemoveEnvVar: (envVarId: string) => void;
+  onEnvVarChange: (envVarId: string, field: keyof TemplateEnvDraft, value: string) => void;
+  onAddScript: () => void;
+  onRemoveScript: (scriptId: string) => void;
+  onScriptChange: (scriptId: string, field: keyof TemplateScriptDraft, value: string) => void;
+  onGenerateScripts: () => Promise<void>;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
 }
 
@@ -62,6 +71,13 @@ interface TemplateEditDialogProps {
   draft: TemplateEditDraft;
   onClose: () => void;
   onFieldChange: (field: keyof TemplateEditDraft, value: string) => void;
+  onAddEnvVar: () => void;
+  onRemoveEnvVar: (envVarId: string) => void;
+  onEnvVarChange: (envVarId: string, field: keyof TemplateEnvDraft, value: string) => void;
+  onAddScript: () => void;
+  onRemoveScript: (scriptId: string) => void;
+  onScriptChange: (scriptId: string, field: keyof TemplateScriptDraft, value: string) => void;
+  onGenerateScripts: () => Promise<void>;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
 }
 
@@ -704,12 +720,304 @@ export function CreateVmDialog({
   );
 }
 
+type TemplateCommonField =
+  | "launchSource"
+  | "cpu"
+  | "ramGb"
+  | "diskGb"
+  | "defaultDesktopTransport"
+  | "defaultNetworkMode"
+  | "generatorPrompt"
+  | "generatorTargetScriptId";
+
+interface TemplateConfigFieldsProps {
+  busy: boolean;
+  draft: TemplateCloneDraft | TemplateEditDraft;
+  onFieldChange: (field: TemplateCommonField, value: string) => void;
+  onAddEnvVar: () => void;
+  onRemoveEnvVar: (envVarId: string) => void;
+  onEnvVarChange: (envVarId: string, field: keyof TemplateEnvDraft, value: string) => void;
+  onAddScript: () => void;
+  onRemoveScript: (scriptId: string) => void;
+  onScriptChange: (scriptId: string, field: keyof TemplateScriptDraft, value: string) => void;
+  onGenerateScripts: () => Promise<void>;
+}
+
+function TemplateConfigFields({
+  busy,
+  draft,
+  onFieldChange,
+  onAddEnvVar,
+  onRemoveEnvVar,
+  onEnvVarChange,
+  onAddScript,
+  onRemoveScript,
+  onScriptChange,
+  onGenerateScripts,
+}: TemplateConfigFieldsProps): JSX.Element {
+  return (
+    <>
+      <label className="field-shell">
+        <span>Image</span>
+        <input
+          className="field-input field-input--mono"
+          value={draft.launchSource}
+          onChange={(event) => onFieldChange("launchSource", event.target.value)}
+          placeholder="images:ubuntu/noble/desktop"
+          disabled={busy}
+          spellCheck={false}
+        />
+      </label>
+
+      <div className="compact-grid compact-grid--triple">
+        <NumberField
+          disabled={busy}
+          label="CPU"
+          value={draft.cpu}
+          onChange={(value) => onFieldChange("cpu", value)}
+        />
+        <NumberField
+          disabled={busy}
+          allowDecimal
+          label="RAM GB"
+          value={draft.ramGb}
+          onChange={(value) => onFieldChange("ramGb", value)}
+        />
+        <NumberField
+          disabled={busy}
+          label="Disk GB"
+          value={draft.diskGb}
+          onChange={(value) => onFieldChange("diskGb", value)}
+        />
+      </div>
+
+      <div className="compact-grid">
+        <label className="field-shell">
+          <span>Desktop</span>
+          <select
+            className="field-input"
+            disabled={busy}
+            value={draft.defaultDesktopTransport}
+            onChange={(event) =>
+              onFieldChange("defaultDesktopTransport", event.target.value)}
+          >
+            {desktopTransportChoices.map((choice) => (
+              <option key={choice.value} value={choice.value}>
+                {desktopTransportChoiceLabel(choice.value)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field-shell">
+          <span>Network</span>
+          <select
+            className="field-input"
+            disabled={busy}
+            value={draft.defaultNetworkMode}
+            onChange={(event) => onFieldChange("defaultNetworkMode", event.target.value)}
+          >
+            <option value="default">Default bridge</option>
+            <option value="dmz">DMZ</option>
+          </select>
+        </label>
+      </div>
+
+      <div className="dialog-panel__template">
+        <div className="dialog-panel__template-head">
+          <strong>Environment</strong>
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={onAddEnvVar}
+            disabled={busy}
+          >
+            Add env
+          </button>
+        </div>
+        <div className="stack">
+          {draft.envVars.length > 0 ? (
+            draft.envVars.map((envVar) => (
+              <div key={envVar.id} className="compact-grid">
+                <label className="field-shell">
+                  <span>Name</span>
+                  <input
+                    className="field-input field-input--mono"
+                    value={envVar.name}
+                    onChange={(event) =>
+                      onEnvVarChange(envVar.id, "name", event.target.value)}
+                    placeholder="OPENAI_API_KEY"
+                    disabled={busy}
+                    spellCheck={false}
+                  />
+                </label>
+                <label className="field-shell">
+                  <span>Value</span>
+                  <input
+                    autoComplete="off"
+                    className="field-input field-input--mono"
+                    type="password"
+                    value={envVar.value}
+                    onChange={(event) =>
+                      onEnvVarChange(envVar.id, "value", event.target.value)}
+                    disabled={busy}
+                    spellCheck={false}
+                  />
+                </label>
+                <button
+                  className="button button--ghost"
+                  type="button"
+                  onClick={() => onRemoveEnvVar(envVar.id)}
+                  disabled={busy}
+                >
+                  Remove
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="empty-copy">No environment variables configured.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="dialog-panel__template">
+        <div className="dialog-panel__template-head">
+          <strong>Scripts</strong>
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={onAddScript}
+            disabled={busy}
+          >
+            Add script
+          </button>
+        </div>
+
+        <div className="stack">
+          {draft.scripts.map((script, index) => (
+            <div key={script.id} className="list-card">
+              <div className="compact-grid">
+                <label className="field-shell">
+                  <span>Name</span>
+                  <input
+                    className="field-input field-input--mono"
+                    value={script.name}
+                    onChange={(event) =>
+                      onScriptChange(script.id, "name", event.target.value)}
+                    disabled={busy}
+                    spellCheck={false}
+                  />
+                </label>
+                <label className="field-shell">
+                  <span>Depends on</span>
+                  <input
+                    className="field-input field-input--mono"
+                    value={script.dependsOn}
+                    onChange={(event) =>
+                      onScriptChange(script.id, "dependsOn", event.target.value)}
+                    placeholder={index === 0 ? "" : "user-init.sh"}
+                    disabled={busy}
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
+              <div className="compact-grid">
+                <label className="field-shell">
+                  <span>Run</span>
+                  <select
+                    className="field-input"
+                    disabled={busy}
+                    value={script.runMode}
+                    onChange={(event) =>
+                      onScriptChange(script.id, "runMode", event.target.value)}
+                  >
+                    <option value="after-previous">After previous</option>
+                    <option value="parallel">Parallel when ready</option>
+                  </select>
+                </label>
+                <button
+                  className="button button--ghost"
+                  type="button"
+                  onClick={() => onRemoveScript(script.id)}
+                  disabled={busy || draft.scripts.length <= 1}
+                >
+                  Remove script
+                </button>
+              </div>
+              <label className="field-shell">
+                <span>Code</span>
+                <textarea
+                  className="field-input field-input--tall field-input--mono"
+                  value={script.content}
+                  onChange={(event) =>
+                    onScriptChange(script.id, "content", event.target.value)}
+                  placeholder={"#!/usr/bin/env bash\nset -euo pipefail"}
+                  disabled={busy}
+                  spellCheck={false}
+                />
+              </label>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="dialog-panel__template">
+        <div className="dialog-panel__template-head">
+          <strong>Generate</strong>
+          <select
+            className="field-input"
+            disabled={busy}
+            value={draft.generatorTargetScriptId}
+            onChange={(event) =>
+              onFieldChange("generatorTargetScriptId", event.target.value)}
+          >
+            <option value="">Add or update best match</option>
+            {draft.scripts.map((script) => (
+              <option key={script.id} value={script.id}>
+                {script.name || script.id}
+              </option>
+            ))}
+          </select>
+        </div>
+        <label className="field-shell">
+          <span>Prompt</span>
+          <textarea
+            className="field-input field-input--tall"
+            value={draft.generatorPrompt}
+            onChange={(event) => onFieldChange("generatorPrompt", event.target.value)}
+            disabled={busy}
+          />
+        </label>
+        {draft.generatorSummary ? (
+          <p className="empty-copy">{draft.generatorSummary}</p>
+        ) : null}
+        <button
+          className="button button--secondary button--full"
+          type="button"
+          disabled={busy || draft.generatorPrompt.trim().length === 0}
+          onClick={() => {
+            void onGenerateScripts();
+          }}
+        >
+          Generate scripts
+        </button>
+      </div>
+    </>
+  );
+}
+
 export function TemplateCloneDialog({
   busy,
   draft,
   sourceTemplate,
   onClose,
   onFieldChange,
+  onAddEnvVar,
+  onRemoveEnvVar,
+  onEnvVarChange,
+  onAddScript,
+  onRemoveScript,
+  onScriptChange,
+  onGenerateScripts,
   onSubmit,
 }: TemplateCloneDialogProps): JSX.Element {
   const normalizedName = draft.name.trim();
@@ -722,8 +1030,7 @@ export function TemplateCloneDialog({
             <p className="workspace-shell__eyebrow">Template clone</p>
             <h2 className="dialog-panel__title">Save a reusable template</h2>
             <p className="dialog-panel__copy">
-              Clone the selected base template, then add one command per line for the
-              first boot script.
+              Clone the selected base template and configure its first-boot harness.
             </p>
           </div>
           <button
@@ -771,22 +1078,18 @@ export function TemplateCloneDialog({
             />
           </label>
 
-          <label className="field-shell">
-            <span>Init commands</span>
-            <textarea
-              className="field-input field-input--tall field-input--mono"
-              value={draft.initCommands}
-              onChange={(event) => onFieldChange("initCommands", event.target.value)}
-              placeholder={"sudo apt-get update\nsudo apt-get install -y nodejs npm"}
-              disabled={busy}
-              spellCheck={false}
-            />
-          </label>
-
-          <p className="empty-copy">
-            First-boot commands run once on fresh launches from this template. Leave the list
-            empty if you only want a renamed clone of the base template.
-          </p>
+          <TemplateConfigFields
+            busy={busy}
+            draft={draft}
+            onFieldChange={(field, value) => onFieldChange(field, value)}
+            onAddEnvVar={onAddEnvVar}
+            onRemoveEnvVar={onRemoveEnvVar}
+            onEnvVarChange={onEnvVarChange}
+            onAddScript={onAddScript}
+            onRemoveScript={onRemoveScript}
+            onScriptChange={onScriptChange}
+            onGenerateScripts={onGenerateScripts}
+          />
 
           <button
             className="button button--primary button--full"
@@ -806,6 +1109,13 @@ export function TemplateEditDialog({
   draft,
   onClose,
   onFieldChange,
+  onAddEnvVar,
+  onRemoveEnvVar,
+  onEnvVarChange,
+  onAddScript,
+  onRemoveScript,
+  onScriptChange,
+  onGenerateScripts,
   onSubmit,
 }: TemplateEditDialogProps): JSX.Element {
   const normalizedName = draft.name.trim();
@@ -818,7 +1128,7 @@ export function TemplateEditDialog({
             <p className="workspace-shell__eyebrow">Template</p>
             <h2 className="dialog-panel__title">Edit template</h2>
             <p className="dialog-panel__copy">
-              Update the saved name, description, and first-boot init commands in one place.
+              Update the saved template and first-boot harness in one place.
             </p>
           </div>
           <button
@@ -853,17 +1163,18 @@ export function TemplateEditDialog({
             />
           </label>
 
-          <label className="field-shell">
-            <span>Init commands</span>
-            <textarea
-              className="field-input field-input--tall field-input--mono"
-              value={draft.initCommands}
-              onChange={(event) => onFieldChange("initCommands", event.target.value)}
-              placeholder={"sudo apt-get update\nsudo apt-get install -y nodejs npm"}
-              disabled={busy}
-              spellCheck={false}
-            />
-          </label>
+          <TemplateConfigFields
+            busy={busy}
+            draft={draft}
+            onFieldChange={(field, value) => onFieldChange(field, value)}
+            onAddEnvVar={onAddEnvVar}
+            onRemoveEnvVar={onRemoveEnvVar}
+            onEnvVarChange={onEnvVarChange}
+            onAddScript={onAddScript}
+            onRemoveScript={onRemoveScript}
+            onScriptChange={onScriptChange}
+            onGenerateScripts={onGenerateScripts}
+          />
 
           <button
             className="button button--primary button--full"

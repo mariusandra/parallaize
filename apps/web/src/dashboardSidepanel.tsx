@@ -24,6 +24,7 @@ import type {
   VmInstance,
   VmNetworkMode,
   VmPowerAction,
+  VmTemplateScriptRun,
   VmTouchedFilesSnapshot,
 } from "../../../packages/shared/src/types.js";
 
@@ -1739,6 +1740,8 @@ export function WorkspaceSidepanel({
                       <p className="empty-copy">No completed or queued jobs for this VM.</p>
                     )}
 
+                    <VmTemplateScriptRuns runs={detail.vm.templateScriptRuns} />
+
                     {detail.vm.activityLog.length > 0 ? (
                       detail.vm.activityLog.slice().reverse().map((entry, index) => (
                         <div key={`${entry}-${index}`} className="log-line mono-font">
@@ -1787,6 +1790,50 @@ export function WorkspaceSidepanel({
   );
 }
 
+function VmTemplateScriptRuns({
+  runs,
+}: {
+  runs: VmTemplateScriptRun[] | undefined;
+}): JSX.Element | null {
+  if (!runs || runs.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="stack">
+      {runs.map((run) => {
+        const failed = run.status === "failed";
+        const skipped = run.status === "skipped";
+        const statusClass = failed
+          ? "surface-pill surface-pill--warning"
+          : skipped
+            ? "surface-pill"
+            : "surface-pill surface-pill--success";
+
+        return (
+          <div key={`${run.scriptId}-${run.startedAt ?? run.status}`} className="list-card">
+            <div className="list-card__head">
+              <strong className="mono-font">{run.name}</strong>
+              <div className="chip-row">
+                <span className={statusClass}>{run.status}</span>
+                {run.exitCode !== null ? (
+                  <span className="surface-pill">exit {run.exitCode}</span>
+                ) : null}
+              </div>
+            </div>
+            {run.finishedAt ? (
+              <p className="list-card__timestamp">{formatTimestamp(run.finishedAt)}</p>
+            ) : null}
+            {failed || run.log.trim().length > 0 ? (
+              <pre className="log-line mono-font">{run.log.trim() || "(no output)"}</pre>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function TemplateCard({
   busy,
   linkedVmCount,
@@ -1801,6 +1848,12 @@ function TemplateCard({
 }: TemplateCardProps): JSX.Element {
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const canDelete = linkedVmCount === 0;
+  const configuredScripts = template.scripts?.filter(
+    (script) => script.content.trim().length > 0,
+  ) ?? [];
+  const scriptCount =
+    configuredScripts.length > 0 ? configuredScripts.length : template.initCommands.length > 0 ? 1 : 0;
+  const envCount = template.envVars?.length ?? 0;
 
   return (
     <div className="list-card">
@@ -1820,6 +1873,16 @@ function TemplateCard({
             <span className="surface-pill">
               {template.snapshotIds.length} snapshot{template.snapshotIds.length === 1 ? "" : "s"}
             </span>
+            {scriptCount > 0 ? (
+              <span className="surface-pill">
+                {scriptCount} script{scriptCount === 1 ? "" : "s"}
+              </span>
+            ) : null}
+            {envCount > 0 ? (
+              <span className="surface-pill">
+                {envCount} env{envCount === 1 ? "" : "s"}
+              </span>
+            ) : null}
             {template.provenance ? (
               <span className="surface-pill">
                 {formatTemplateProvenanceKindLabel(template.provenance.kind)}
@@ -1856,7 +1919,7 @@ function TemplateCard({
                 }}
                 disabled={busy}
               >
-                Clone with init...
+                Clone template...
               </button>
               <button
                 className="menu-action"
@@ -1899,7 +1962,10 @@ function TemplateCard({
 
       <p>{template.description || "No description yet."}</p>
       <TemplateLifecyclePreview recentSnapshots={recentSnapshots} template={template} />
-      <TemplateInitCommandsPreview commands={template.initCommands} truncateAfter={3} />
+      <TemplateScriptPreview template={template} />
+      {configuredScripts.length === 0 ? (
+        <TemplateInitCommandsPreview commands={template.initCommands} truncateAfter={3} />
+      ) : null}
     </div>
   );
 }
@@ -1994,6 +2060,32 @@ function SnapshotCard({
       </div>
 
       <p>{snapshot.summary}</p>
+    </div>
+  );
+}
+
+function TemplateScriptPreview({
+  template,
+}: {
+  template: EnvironmentTemplate;
+}): JSX.Element | null {
+  const scripts =
+    template.scripts?.filter((script) => script.content.trim().length > 0) ?? [];
+
+  if (scripts.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="chip-row">
+      {scripts.slice(0, 4).map((script) => (
+        <span key={script.id} className="surface-pill mono-font">
+          {script.name}
+        </span>
+      ))}
+      {scripts.length > 4 ? (
+        <span className="surface-pill">+{scripts.length - 4}</span>
+      ) : null}
     </div>
   );
 }
@@ -2295,6 +2387,16 @@ export function OverviewSidepanel({
 
             <SidepanelSection title="Templates">
               <div className="stack">
+                {summary.templates[0] ? (
+                  <button
+                    className="button button--secondary button--full"
+                    type="button"
+                    onClick={() => onCloneTemplate(summary.templates[0])}
+                    disabled={busy}
+                  >
+                    New template
+                  </button>
+                ) : null}
                 {summary.templates.length > 0 ? (
                   summary.templates.map((template) => (
                     <TemplateCard

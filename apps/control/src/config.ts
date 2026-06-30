@@ -38,6 +38,8 @@ export interface AppConfig {
   sessionMaxAgeSeconds: number;
   sessionIdleTimeoutSeconds: number;
   sessionRotationSeconds: number;
+  openaiApiKey: string | null;
+  openaiModel: string;
 }
 
 export function loadConfig(): AppConfig {
@@ -150,6 +152,11 @@ export function loadConfig(): AppConfig {
     sessionMaxAgeSeconds,
     sessionIdleTimeoutSeconds,
     sessionRotationSeconds,
+    openaiApiKey: parseOptionalString(
+      process.env.PARALLAIZE_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY,
+    ),
+    openaiModel:
+      parseOptionalString(process.env.PARALLAIZE_OPENAI_MODEL) ?? "gpt-5.5",
   };
 }
 

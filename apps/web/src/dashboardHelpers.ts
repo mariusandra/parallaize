@@ -14,8 +14,12 @@ import type {
   DashboardSummary,
   EnvironmentTemplate,
   HealthStatus,
+  ResourceSpec,
   Snapshot,
+  TemplateEnvVar,
   TemplatePortForward,
+  TemplateScript,
+  TemplateScriptRunMode,
   VmDetail,
   VmDesktopTransport,
   VmDiskUsageSnapshot,
@@ -91,14 +95,48 @@ export interface TemplateCloneDraft {
   sourceTemplateId: string;
   name: string;
   description: string;
-  initCommands: string;
+  launchSource: string;
+  cpu: string;
+  ramGb: string;
+  diskGb: string;
+  defaultDesktopTransport: VmDesktopTransport;
+  defaultNetworkMode: VmNetworkMode;
+  envVars: TemplateEnvDraft[];
+  scripts: TemplateScriptDraft[];
+  generatorPrompt: string;
+  generatorTargetScriptId: string;
+  generatorSummary: string;
 }
 
 export interface TemplateEditDraft {
   templateId: string;
   name: string;
   description: string;
-  initCommands: string;
+  launchSource: string;
+  cpu: string;
+  ramGb: string;
+  diskGb: string;
+  defaultDesktopTransport: VmDesktopTransport;
+  defaultNetworkMode: VmNetworkMode;
+  envVars: TemplateEnvDraft[];
+  scripts: TemplateScriptDraft[];
+  generatorPrompt: string;
+  generatorTargetScriptId: string;
+  generatorSummary: string;
+}
+
+export interface TemplateEnvDraft {
+  id: string;
+  name: string;
+  value: string;
+}
+
+export interface TemplateScriptDraft {
+  id: string;
+  name: string;
+  content: string;
+  dependsOn: string;
+  runMode: TemplateScriptRunMode;
 }
 
 export interface DesktopBootState {
@@ -210,7 +248,17 @@ export function buildTemplateCloneDraft(template: EnvironmentTemplate): Template
     sourceTemplateId: template.id,
     name: `${template.name} Custom`,
     description: template.description,
-    initCommands: formatInitCommandsDraft(template.initCommands),
+    launchSource: template.launchSource,
+    cpu: String(template.defaultResources.cpu),
+    ramGb: formatRamDraftValue(template.defaultResources.ramMb),
+    diskGb: String(template.defaultResources.diskGb),
+    defaultDesktopTransport: normalizeTemplateDesktopTransport(template.defaultDesktopTransport),
+    defaultNetworkMode: normalizeVmNetworkMode(template.defaultNetworkMode),
+    envVars: buildTemplateEnvDrafts(template.envVars),
+    scripts: buildTemplateScriptDrafts(template),
+    generatorPrompt: "",
+    generatorTargetScriptId: "",
+    generatorSummary: "",
   };
 }
 
@@ -219,7 +267,17 @@ export function buildTemplateEditDraft(template: EnvironmentTemplate): TemplateE
     templateId: template.id,
     name: template.name,
     description: template.description,
-    initCommands: formatInitCommandsDraft(template.initCommands),
+    launchSource: template.launchSource,
+    cpu: String(template.defaultResources.cpu),
+    ramGb: formatRamDraftValue(template.defaultResources.ramMb),
+    diskGb: String(template.defaultResources.diskGb),
+    defaultDesktopTransport: normalizeTemplateDesktopTransport(template.defaultDesktopTransport),
+    defaultNetworkMode: normalizeVmNetworkMode(template.defaultNetworkMode),
+    envVars: buildTemplateEnvDrafts(template.envVars),
+    scripts: buildTemplateScriptDrafts(template),
+    generatorPrompt: "",
+    generatorTargetScriptId: "",
+    generatorSummary: "",
   };
 }
 
@@ -228,6 +286,147 @@ export function parseInitCommandsDraft(value: string): string[] {
     .split("\n")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+export function buildBlankTemplateEnvDraft(index = 0): TemplateEnvDraft {
+  return {
+    id: buildTemplateDraftId("env", index),
+    name: "",
+    value: "",
+  };
+}
+
+export function buildBlankTemplateScriptDraft(index = 0): TemplateScriptDraft {
+  return {
+    id: buildTemplateDraftId("user-init", index),
+    name: index === 0 ? "user-init.sh" : `script-${index + 1}.sh`,
+    content: "",
+    dependsOn: "",
+    runMode: "after-previous",
+  };
+}
+
+export function parseTemplateDraftResources(
+  draft: Pick<TemplateCloneDraft | TemplateEditDraft, "cpu" | "ramGb" | "diskGb">,
+): ResourceSpec {
+  return {
+    cpu: Number(draft.cpu),
+    ramMb: parseRamDraftValue(draft.ramGb),
+    diskGb: Number(draft.diskGb),
+  };
+}
+
+export function parseTemplateEnvDrafts(envVars: TemplateEnvDraft[]): TemplateEnvVar[] {
+  return envVars
+    .map((envVar) => ({
+      name: envVar.name.trim(),
+      value: envVar.value,
+    }))
+    .filter((envVar) => envVar.name.length > 0);
+}
+
+export function parseTemplateScriptDrafts(scripts: TemplateScriptDraft[]): TemplateScript[] {
+  return scripts
+    .map((script, index) => {
+      const runMode: TemplateScriptRunMode =
+        script.runMode === "parallel" ? "parallel" : "after-previous";
+
+      return {
+        id: script.id.trim() || buildTemplateDraftId("script", index),
+        name: script.name.trim() || (index === 0 ? "user-init.sh" : `script-${index + 1}.sh`),
+        content: script.content,
+        dependsOn: script.dependsOn
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+        runMode,
+      };
+    })
+    .filter((script) => script.name.length > 0 || script.content.trim().length > 0);
+}
+
+export function applyGeneratedTemplateScriptsToDraft<
+  T extends TemplateCloneDraft | TemplateEditDraft,
+>(
+  draft: T,
+  envVars: TemplateEnvVar[],
+  scripts: TemplateScript[],
+  summary: string,
+): T {
+  return {
+    ...draft,
+    envVars: buildTemplateEnvDrafts(envVars),
+    scripts: buildTemplateScriptDraftsFromScripts(scripts),
+    generatorPrompt: "",
+    generatorSummary: summary,
+  };
+}
+
+export function buildTemplateScriptDraftsFromScripts(
+  scripts: TemplateScript[] | undefined,
+): TemplateScriptDraft[] {
+  const normalizedScripts =
+    scripts && scripts.length > 0
+      ? scripts
+      : [
+          {
+            id: "user-init",
+            name: "user-init.sh",
+            content: "",
+            dependsOn: [],
+            runMode: "after-previous" as const,
+          },
+        ];
+
+  return normalizedScripts.map((script, index) => ({
+    id: script.id || buildTemplateDraftId("script", index),
+    name: script.name || (index === 0 ? "user-init.sh" : `script-${index + 1}.sh`),
+    content: script.content ?? "",
+    dependsOn: Array.isArray(script.dependsOn) ? script.dependsOn.join(", ") : "",
+    runMode: script.runMode === "parallel" ? "parallel" : "after-previous",
+  }));
+}
+
+function buildTemplateEnvDrafts(envVars: TemplateEnvVar[] | undefined): TemplateEnvDraft[] {
+  if (!envVars || envVars.length === 0) {
+    return [];
+  }
+
+  return envVars.map((envVar, index) => ({
+    id: buildTemplateDraftId("env", index, envVar.name),
+    name: envVar.name,
+    value: envVar.value,
+  }));
+}
+
+function buildTemplateScriptDrafts(template: EnvironmentTemplate): TemplateScriptDraft[] {
+  if (template.scripts && template.scripts.length > 0) {
+    return buildTemplateScriptDraftsFromScripts(template.scripts);
+  }
+
+  if (template.initCommands.length > 0) {
+    return buildTemplateScriptDraftsFromScripts([
+      {
+        id: "user-init",
+        name: "user-init.sh",
+        content: formatInitCommandsDraft(template.initCommands),
+        dependsOn: [],
+        runMode: "after-previous",
+      },
+    ]);
+  }
+
+  return [buildBlankTemplateScriptDraft(0)];
+}
+
+function buildTemplateDraftId(prefix: string, index: number, seed = ""): string {
+  const suffix = seed
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return `${prefix}-${index + 1}${suffix ? `-${suffix}` : ""}`;
 }
 export { normalizeVmNetworkMode };
 

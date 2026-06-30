@@ -286,6 +286,10 @@ export function applyProviderMutation(vm: VmInstance, mutation: ProviderMutation
       createdAt: nowIso(),
     });
   }
+
+  if (mutation.templateScriptRuns) {
+    vm.templateScriptRuns = mutation.templateScriptRuns;
+  }
 }
 
 export function appendActivity(vm: VmInstance, line: string): void {
@@ -436,17 +440,32 @@ export function buildClonedTemplateNotes(
   sourceTemplate: EnvironmentTemplate,
   previousNotes: string[],
   initCommands: string[],
+  envVars: EnvironmentTemplate["envVars"] = [],
+  scripts: EnvironmentTemplate["scripts"] = [],
 ): string[] {
+  const normalizedEnvVars = envVars ?? [];
+  const normalizedScripts = scripts ?? [];
+  const executableScriptCount = normalizedScripts.filter((script) => script.content.trim().length > 0)
+    .length;
   const refreshedNotes = [
     `Cloned from template ${sourceTemplate.name}.`,
-    initCommands.length > 0
+    executableScriptCount > 0
+      ? `Template boot harness runs ${executableScriptCount} script${executableScriptCount === 1 ? "" : "s"}.`
+      : initCommands.length > 0
       ? `First-boot init script runs ${initCommands.length} command${initCommands.length === 1 ? "" : "s"}.`
       : "No first-boot init commands configured.",
+    normalizedEnvVars.length > 0
+      ? `${normalizedEnvVars.length} environment variable${normalizedEnvVars.length === 1 ? "" : "s"} injected at boot.`
+      : "No template environment variables configured.",
     ...previousNotes.filter(
       (note) =>
         note !== `Cloned from template ${sourceTemplate.name}.` &&
         note !== "No first-boot init commands configured." &&
-        !note.startsWith("First-boot init script runs "),
+        note !== "No template environment variables configured." &&
+        !note.startsWith("First-boot init script runs ") &&
+        !note.startsWith("Template boot harness runs ") &&
+        !note.endsWith("environment variables injected at boot.") &&
+        !note.endsWith("environment variable injected at boot."),
     ),
   ];
 
@@ -501,7 +520,13 @@ export function collectTemplateUpdateFieldLabels(
   template: EnvironmentTemplate,
   nextName: string,
   nextDescription: string,
+  nextLaunchSource: string,
+  nextResources: EnvironmentTemplate["defaultResources"],
+  nextDesktopTransport: EnvironmentTemplate["defaultDesktopTransport"],
+  nextNetworkMode: EnvironmentTemplate["defaultNetworkMode"],
   nextInitCommands: string[],
+  nextEnvVars: EnvironmentTemplate["envVars"],
+  nextScripts: EnvironmentTemplate["scripts"],
 ): string[] {
   const changedFields: string[] = [];
 
@@ -513,8 +538,36 @@ export function collectTemplateUpdateFieldLabels(
     changedFields.push("description");
   }
 
+  if (template.launchSource !== nextLaunchSource) {
+    changedFields.push("image");
+  }
+
+  if (
+    template.defaultResources.cpu !== nextResources.cpu ||
+    template.defaultResources.ramMb !== nextResources.ramMb ||
+    template.defaultResources.diskGb !== nextResources.diskGb
+  ) {
+    changedFields.push("resources");
+  }
+
+  if (template.defaultDesktopTransport !== nextDesktopTransport) {
+    changedFields.push("desktop transport");
+  }
+
+  if (template.defaultNetworkMode !== nextNetworkMode) {
+    changedFields.push("network mode");
+  }
+
   if (!sameStringArray(template.initCommands, nextInitCommands)) {
     changedFields.push("init commands");
+  }
+
+  if (!sameTemplateEnvVars(template.envVars ?? [], nextEnvVars ?? [])) {
+    changedFields.push("environment variables");
+  }
+
+  if (!sameTemplateScripts(template.scripts ?? [], nextScripts ?? [])) {
+    changedFields.push("scripts");
   }
 
   return changedFields.length > 0 ? changedFields : ["template metadata"];
@@ -535,6 +588,44 @@ export function normalizeTemplateInitCommands(
 
 export function sameStringArray(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+export function sameTemplateEnvVars(
+  left: EnvironmentTemplate["envVars"],
+  right: EnvironmentTemplate["envVars"],
+): boolean {
+  const leftEntries = left ?? [];
+  const rightEntries = right ?? [];
+
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every((entry, index) => {
+      const other = rightEntries[index];
+      return other?.name === entry.name && other.value === entry.value;
+    })
+  );
+}
+
+export function sameTemplateScripts(
+  left: EnvironmentTemplate["scripts"],
+  right: EnvironmentTemplate["scripts"],
+): boolean {
+  const leftEntries = left ?? [];
+  const rightEntries = right ?? [];
+
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every((entry, index) => {
+      const other = rightEntries[index];
+      return (
+        other?.id === entry.id &&
+        other.name === entry.name &&
+        other.content === entry.content &&
+        other.runMode === entry.runMode &&
+        sameStringArray(other.dependsOn, entry.dependsOn)
+      );
+    })
+  );
 }
 
 export function requireTemplate(

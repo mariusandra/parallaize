@@ -19,6 +19,8 @@ import {
   type CreateDraft,
   type TemplateCloneDraft,
   type TemplateEditDraft,
+  type TemplateEnvDraft,
+  type TemplateScriptDraft,
 } from "./dashboardHelpers.js";
 import type {
   CloneVmDialogState,
@@ -75,11 +77,41 @@ interface DashboardDialogsHostProps {
     field: keyof TemplateCloneDraft,
     value: string,
   ) => void;
+  onTemplateCloneAddEnvVar: () => void;
+  onTemplateCloneRemoveEnvVar: (envVarId: string) => void;
+  onTemplateCloneEnvVarChange: (
+    envVarId: string,
+    field: keyof TemplateEnvDraft,
+    value: string,
+  ) => void;
+  onTemplateCloneAddScript: () => void;
+  onTemplateCloneRemoveScript: (scriptId: string) => void;
+  onTemplateCloneScriptChange: (
+    scriptId: string,
+    field: keyof TemplateScriptDraft,
+    value: string,
+  ) => void;
+  onTemplateCloneGenerateScripts: () => Promise<void>;
   onTemplateCloneSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onTemplateEditFieldChange: (
     field: keyof TemplateEditDraft,
     value: string,
   ) => void;
+  onTemplateEditAddEnvVar: () => void;
+  onTemplateEditRemoveEnvVar: (envVarId: string) => void;
+  onTemplateEditEnvVarChange: (
+    envVarId: string,
+    field: keyof TemplateEnvDraft,
+    value: string,
+  ) => void;
+  onTemplateEditAddScript: () => void;
+  onTemplateEditRemoveScript: (scriptId: string) => void;
+  onTemplateEditScriptChange: (
+    scriptId: string,
+    field: keyof TemplateScriptDraft,
+    value: string,
+  ) => void;
+  onTemplateEditGenerateScripts: () => Promise<void>;
   onTemplateEditSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
 }
 
@@ -127,8 +159,22 @@ export function DashboardDialogsHost({
   onSnapshotStatefulChange,
   onSnapshotSubmit,
   onTemplateCloneFieldChange,
+  onTemplateCloneAddEnvVar,
+  onTemplateCloneRemoveEnvVar,
+  onTemplateCloneEnvVarChange,
+  onTemplateCloneAddScript,
+  onTemplateCloneRemoveScript,
+  onTemplateCloneScriptChange,
+  onTemplateCloneGenerateScripts,
   onTemplateCloneSubmit,
   onTemplateEditFieldChange,
+  onTemplateEditAddEnvVar,
+  onTemplateEditRemoveEnvVar,
+  onTemplateEditEnvVarChange,
+  onTemplateEditAddScript,
+  onTemplateEditRemoveScript,
+  onTemplateEditScriptChange,
+  onTemplateEditGenerateScripts,
   onTemplateEditSubmit,
 }: DashboardDialogsHostProps): JSX.Element {
   const createProject =
@@ -199,6 +245,13 @@ export function DashboardDialogsHost({
           }
           onClose={onCloseTemplateCloneDialog}
           onFieldChange={onTemplateCloneFieldChange}
+          onAddEnvVar={onTemplateCloneAddEnvVar}
+          onRemoveEnvVar={onTemplateCloneRemoveEnvVar}
+          onEnvVarChange={onTemplateCloneEnvVarChange}
+          onAddScript={onTemplateCloneAddScript}
+          onRemoveScript={onTemplateCloneRemoveScript}
+          onScriptChange={onTemplateCloneScriptChange}
+          onGenerateScripts={onTemplateCloneGenerateScripts}
           onSubmit={onTemplateCloneSubmit}
         />
       ) : null}
@@ -208,6 +261,13 @@ export function DashboardDialogsHost({
           draft={templateEditDraft}
           onClose={onCloseTemplateEditDialog}
           onFieldChange={onTemplateEditFieldChange}
+          onAddEnvVar={onTemplateEditAddEnvVar}
+          onRemoveEnvVar={onTemplateEditRemoveEnvVar}
+          onEnvVarChange={onTemplateEditEnvVarChange}
+          onAddScript={onTemplateEditAddScript}
+          onRemoveScript={onTemplateEditRemoveScript}
+          onScriptChange={onTemplateEditScriptChange}
+          onGenerateScripts={onTemplateEditGenerateScripts}
           onSubmit={onTemplateEditSubmit}
         />
       ) : null}

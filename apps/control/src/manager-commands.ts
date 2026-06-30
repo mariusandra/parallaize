@@ -63,6 +63,8 @@ import {
   resolveKnownWorkspaceProjectId,
   resolveTemplateForSnapshot,
   sameStringArray,
+  sameTemplateEnvVars,
+  sameTemplateScripts,
   sleep,
   trimJobs,
   validateForwardedPorts,
@@ -82,6 +84,11 @@ import {
   rebindVmSessionTransport,
 } from "./desktop-session.js";
 import type { ProviderMutation } from "./providers.js";
+import {
+  TemplateScriptExecutionError,
+  normalizeTemplateEnvVars,
+  normalizeTemplateScripts,
+} from "./template-scripts.js";
 
 export function createVm(
   runtime: DesktopManagerRuntime,
@@ -274,6 +281,15 @@ export function createVm(
 
       return `${vmRecord.name} is running`;
     } catch (error) {
+      if (error instanceof TemplateScriptExecutionError) {
+        runtime.store.update((draft) => {
+          const vm = runtime.requireVm(draft, vmRecord.id);
+          vm.templateScriptRuns = error.runs;
+          appendActivity(vm, "template-scripts: failed during provisioning");
+        });
+        runtime.publish();
+      }
+
       runtime.markVmFailed(vmRecord.id, error);
       throw error;
     }
@@ -993,6 +1009,8 @@ export function captureTemplate(
         );
         existingTemplate.defaultDesktopTransport = captureDesktopTransport;
         existingTemplate.defaultNetworkMode = normalizeVmNetworkMode(current.networkMode);
+        existingTemplate.envVars = normalizeTemplateEnvVars(detail.template?.envVars);
+        existingTemplate.scripts = normalizeTemplateScripts(detail.template?.scripts);
         existingTemplate.snapshotIds.unshift(snapshot.id);
         existingTemplate.tags = Array.from(
           new Set(["captured", slugify(current.name), ...existingTemplate.tags]),
@@ -1015,6 +1033,8 @@ export function captureTemplate(
           defaultDesktopTransport: captureDesktopTransport,
           defaultNetworkMode: normalizeVmNetworkMode(current.networkMode),
           initCommands: [...(detail.template?.initCommands ?? [])],
+          envVars: normalizeTemplateEnvVars(detail.template?.envVars),
+          scripts: normalizeTemplateScripts(detail.template?.scripts),
           tags: ["captured", slugify(current.name)],
           notes: captureNotes,
           snapshotIds: [snapshot.id],
@@ -1057,39 +1077,117 @@ export function createTemplate(
   let createdTemplate: EnvironmentTemplate | null = null;
 
   runtime.store.update((draft) => {
-    const sourceTemplate = requireTemplate(draft, input.sourceTemplateId);
+    const sourceTemplate =
+      typeof input.sourceTemplateId === "string" && input.sourceTemplateId.trim()
+        ? requireTemplate(draft, input.sourceTemplateId.trim())
+        : null;
     const now = nowIso();
+    const nextLaunchSource =
+      input.launchSource?.trim() ||
+      sourceTemplate?.launchSource ||
+      runtime.defaultTemplateLaunchSource;
+    const nextResources = {
+      ...(input.resources ??
+        sourceTemplate?.defaultResources ?? {
+          cpu: 4,
+          ramMb: 8192,
+          diskGb: 60,
+        }),
+    };
+    const nextDesktopTransport = normalizeTemplateDesktopTransport(
+      input.defaultDesktopTransport ?? sourceTemplate?.defaultDesktopTransport,
+    );
+    const nextNetworkMode = normalizeVmNetworkMode(
+      input.defaultNetworkMode ?? sourceTemplate?.defaultNetworkMode,
+    );
+    const nextEnvVars = normalizeTemplateEnvVars(
+      input.envVars ?? sourceTemplate?.envVars ?? [],
+    );
+    const shouldInheritScripts =
+      input.scripts === undefined && input.initCommands === undefined;
+    const nextScripts = normalizeTemplateScripts(
+      input.scripts ?? (shouldInheritScripts ? sourceTemplate?.scripts : []),
+    );
+    const executableScriptCount = nextScripts.filter(
+      (script) => script.content.trim().length > 0,
+    ).length;
+
+    if (!nextLaunchSource) {
+      throw new Error("Template image is required.");
+    }
+
+    validateResources(nextResources);
 
     createdTemplate = {
       id: nextId(draft, "tpl"),
       name: nextName,
-      description: nextDescription || sourceTemplate.description,
-      launchSource: sourceTemplate.launchSource,
-      defaultResources: { ...sourceTemplate.defaultResources },
-      defaultForwardedPorts: sourceTemplate.defaultForwardedPorts.map(copyTemplatePortForward),
-      defaultDesktopTransport: normalizeTemplateDesktopTransport(
-        sourceTemplate.defaultDesktopTransport,
-      ),
-      defaultNetworkMode: normalizeVmNetworkMode(sourceTemplate.defaultNetworkMode),
+      description:
+        nextDescription ||
+        sourceTemplate?.description ||
+        `Custom VM template backed by ${nextLaunchSource}.`,
+      launchSource: nextLaunchSource,
+      defaultResources: nextResources,
+      defaultForwardedPorts:
+        sourceTemplate?.defaultForwardedPorts.map(copyTemplatePortForward) ?? [],
+      defaultDesktopTransport: nextDesktopTransport,
+      defaultNetworkMode: nextNetworkMode,
       initCommands: nextInitCommands,
-      tags: Array.from(
-        new Set([
-          ...sourceTemplate.tags,
-          "cloned",
-          ...(nextInitCommands.length > 0 ? ["init-script"] : []),
-        ]),
-      ),
-      notes: buildClonedTemplateNotes(
-        sourceTemplate,
-        sourceTemplate.notes,
-        nextInitCommands,
-      ),
+      envVars: nextEnvVars,
+      scripts: nextScripts,
+      tags: sourceTemplate
+        ? Array.from(
+            new Set([
+              ...sourceTemplate.tags,
+              "cloned",
+              ...(nextInitCommands.length > 0 ? ["init-script"] : []),
+              ...(executableScriptCount > 0 ? ["template-scripts"] : []),
+              ...(nextEnvVars.length > 0 ? ["env-vars"] : []),
+            ]),
+          )
+        : Array.from(
+            new Set([
+              "custom",
+              ...(nextInitCommands.length > 0 ? ["init-script"] : []),
+              ...(executableScriptCount > 0 ? ["template-scripts"] : []),
+              ...(nextEnvVars.length > 0 ? ["env-vars"] : []),
+            ]),
+          ),
+      notes: sourceTemplate
+        ? buildClonedTemplateNotes(
+            sourceTemplate,
+            sourceTemplate.notes,
+            nextInitCommands,
+            nextEnvVars,
+            nextScripts,
+          )
+        : [
+            `Custom template backed by ${nextLaunchSource}.`,
+            executableScriptCount > 0
+              ? `Template boot harness runs ${executableScriptCount} script${executableScriptCount === 1 ? "" : "s"}.`
+              : "No first-boot init commands configured.",
+            nextEnvVars.length > 0
+              ? `${nextEnvVars.length} environment variable${nextEnvVars.length === 1 ? "" : "s"} injected at boot.`
+              : "No template environment variables configured.",
+          ],
       snapshotIds: [],
-      provenance: buildClonedTemplateProvenance(sourceTemplate),
+      provenance: sourceTemplate
+        ? buildClonedTemplateProvenance(sourceTemplate)
+        : {
+            kind: "seed",
+            summary: `Authored from image ${nextLaunchSource}.`,
+            sourceTemplateId: null,
+            sourceTemplateName: null,
+            sourceVmId: null,
+            sourceVmName: null,
+            sourceSnapshotId: null,
+            sourceSnapshotLabel: null,
+          },
       history: [
         buildTemplateHistoryEntry(
-          "cloned",
-          `Cloned from template ${sourceTemplate.name}${nextInitCommands.length > 0 ? ` with ${nextInitCommands.length} first-boot init command${nextInitCommands.length === 1 ? "" : "s"}` : ""}.`,
+          sourceTemplate ? "cloned" : "created",
+          sourceTemplate
+            ? `Cloned from template ${sourceTemplate.name}${executableScriptCount > 0 ? ` with ${executableScriptCount} template script${executableScriptCount === 1 ? "" : "s"}` : nextInitCommands.length > 0 ? ` with ${nextInitCommands.length} first-boot init command${nextInitCommands.length === 1 ? "" : "s"}` : ""}.`
+            : `Created from image ${nextLaunchSource}.`,
           now,
         ),
       ],
@@ -1127,21 +1225,68 @@ export function updateTemplate(
     const template = requireTemplate(draft, templateId);
     const nextDescription =
       input.description !== undefined ? input.description.trim() : template.description;
+    const nextLaunchSource =
+      input.launchSource !== undefined ? input.launchSource.trim() : template.launchSource;
+    const nextResources = {
+      ...(input.resources ?? template.defaultResources),
+    };
+    const nextDesktopTransport = normalizeTemplateDesktopTransport(
+      input.defaultDesktopTransport ?? template.defaultDesktopTransport,
+    );
+    const nextNetworkMode = normalizeVmNetworkMode(
+      input.defaultNetworkMode ?? template.defaultNetworkMode,
+    );
     const nextInitCommands =
       input.initCommands !== undefined
         ? normalizeTemplateInitCommands(input.initCommands)
         : template.initCommands;
+    const nextEnvVars =
+      input.envVars !== undefined
+        ? normalizeTemplateEnvVars(input.envVars)
+        : normalizeTemplateEnvVars(template.envVars);
+    const nextScripts =
+      input.scripts !== undefined
+        ? normalizeTemplateScripts(input.scripts)
+        : normalizeTemplateScripts(template.scripts);
+
+    if (!nextLaunchSource) {
+      throw new Error("Template image is required.");
+    }
+
+    validateResources(nextResources);
+    validateTemplateCreateResources(
+      {
+        ...template,
+        launchSource: nextLaunchSource,
+      },
+      nextResources,
+    );
+
     const changedFields = collectTemplateUpdateFieldLabels(
       template,
       nextName,
       nextDescription,
+      nextLaunchSource,
+      nextResources,
+      nextDesktopTransport,
+      nextNetworkMode,
       nextInitCommands,
+      nextEnvVars,
+      nextScripts,
     );
 
     if (
       template.name === nextName &&
       template.description === nextDescription &&
-      sameStringArray(template.initCommands, nextInitCommands)
+      template.launchSource === nextLaunchSource &&
+      template.defaultResources.cpu === nextResources.cpu &&
+      template.defaultResources.ramMb === nextResources.ramMb &&
+      template.defaultResources.diskGb === nextResources.diskGb &&
+      template.defaultDesktopTransport === nextDesktopTransport &&
+      template.defaultNetworkMode === nextNetworkMode &&
+      sameStringArray(template.initCommands, nextInitCommands) &&
+      sameTemplateEnvVars(template.envVars ?? [], nextEnvVars) &&
+      sameTemplateScripts(template.scripts ?? [], nextScripts)
     ) {
       updatedTemplate = template;
       return false;
@@ -1149,7 +1294,13 @@ export function updateTemplate(
 
     template.name = nextName;
     template.description = nextDescription;
+    template.launchSource = nextLaunchSource;
+    template.defaultResources = nextResources;
+    template.defaultDesktopTransport = nextDesktopTransport;
+    template.defaultNetworkMode = nextNetworkMode;
     template.initCommands = nextInitCommands;
+    template.envVars = nextEnvVars;
+    template.scripts = nextScripts;
     template.history = appendTemplateHistory(
       template.history,
       buildTemplateHistoryEntry("updated", `Updated ${changedFields.join(", ")}.`),

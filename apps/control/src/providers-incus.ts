@@ -22,6 +22,7 @@ import type {
   VmNetworkMode,
   VmDesktopTransport,
   VmSession,
+  VmTemplateScriptRun,
 } from "../../../packages/shared/src/types.js";
 import {
   formatDesktopTransportLabel,
@@ -189,6 +190,14 @@ import {
 } from "./providers-incus-command.js";
 import { SpawnIncusCommandRunner } from "./providers-incus-runtime.js";
 import { renderSyntheticFrame } from "./providers-synthetic.js";
+import {
+  TemplateScriptExecutionError,
+  buildGuestTemplateScriptHarness,
+  formatTemplateScriptRunsActivity,
+  parseGuestTemplateScriptHarnessResults,
+  resolveStructuredTemplateScripts,
+  summarizeTemplateScriptFailure,
+} from "./template-scripts.js";
 
 const REACHABLE_SELKIES_BOOTSTRAP_RETRY_MS = 5 * 60_000;
 
@@ -703,7 +712,16 @@ export class IncusProvider implements DesktopProvider {
     const guestHostname = await this.syncVmHostname(vm);
     await this.syncGuestDnsProfileAsync(vm.providerRef, networkMode);
 
-    if (template.initCommands.length > 0) {
+    const templateScripts = resolveStructuredTemplateScripts(template);
+    let templateScriptRuns: VmTemplateScriptRun[] = [];
+
+    if (templateScripts.length > 0) {
+      emitCreateProgress("Running template scripts", 98);
+      templateScriptRuns = await this.runGuestTemplateScriptsAsync(
+        vm.providerRef,
+        template,
+      );
+    } else if (template.initCommands.length > 0) {
       emitCreateProgress("Running init commands", 98);
       await this.runGuestInitCommandsAsync(vm.providerRef, template.initCommands);
     }
@@ -713,7 +731,8 @@ export class IncusProvider implements DesktopProvider {
       activity: [
         `incus: launched ${vm.providerRef} from ${template.launchSource}`,
         `resources: ${vm.resources.cpu} CPU / ${formatMemoryLimit(vm.resources.ramMb)} / ${formatDiskSize(vm.resources.diskGb)}`,
-        ...(template.initCommands.length > 0
+        ...formatTemplateScriptRunsActivity(templateScriptRuns),
+        ...(templateScripts.length === 0 && template.initCommands.length > 0
           ? [
               `init: ${template.initCommands.length} first-boot command${template.initCommands.length === 1 ? "" : "s"} completed`,
               `init-log: ${DEFAULT_GUEST_INIT_LOG_PATH}`,
@@ -733,6 +752,8 @@ export class IncusProvider implements DesktopProvider {
       session,
       desktopReadyAt: readyMs === null ? null : new Date().toISOString(),
       desktopReadyMs: readyMs,
+      templateScriptRuns:
+        templateScriptRuns.length > 0 ? templateScriptRuns : undefined,
     };
   }
 
@@ -2526,6 +2547,43 @@ export class IncusProvider implements DesktopProvider {
       "-lc",
       buildGuestInitCommandsScript(initCommands),
     ]);
+  }
+
+  private async runGuestTemplateScriptsAsync(
+    instanceName: string,
+    template: Pick<EnvironmentTemplate, "envVars" | "scripts" | "initCommands">,
+  ): Promise<VmTemplateScriptRun[]> {
+    const scripts = resolveStructuredTemplateScripts(template);
+
+    if (scripts.length === 0) {
+      return [];
+    }
+
+    const args = [
+      "exec",
+      instanceName,
+      "--cwd",
+      DEFAULT_GUEST_WORKSPACE,
+      "--",
+      "bash",
+      "-lc",
+      buildGuestTemplateScriptHarness(template.envVars ?? [], scripts),
+    ];
+    const result = await this.executeGuestExecWithRetryAsync(args);
+    const runs = parseGuestTemplateScriptHarnessResults(result.stdout);
+
+    if (result.status === 0) {
+      return runs;
+    }
+
+    if (isGuestAgentUnavailableExecFailure(args, result)) {
+      throw new Error(formatCommandFailure(args, result));
+    }
+
+    throw new TemplateScriptExecutionError(
+      summarizeTemplateScriptFailure(runs) || formatCommandFailure(args, result),
+      runs,
+    );
   }
 
   private async captureVmPreviewImageWithRetry(vm: VmInstance): Promise<VmPreviewImage> {

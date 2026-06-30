@@ -1663,9 +1663,23 @@ export function DashboardApp(): JSX.Element {
     handleSnapshotLabelChange,
     handleSnapshotStatefulChange,
     handleSnapshotSubmit,
+    handleTemplateCloneAddEnvVar,
+    handleTemplateCloneAddScript,
+    handleTemplateCloneEnvVarChange,
     handleTemplateCloneField,
+    handleTemplateCloneGenerateScripts,
+    handleTemplateCloneRemoveEnvVar,
+    handleTemplateCloneRemoveScript,
+    handleTemplateCloneScriptChange,
     handleTemplateCloneSubmit,
+    handleTemplateEditAddEnvVar,
+    handleTemplateEditAddScript,
+    handleTemplateEditEnvVarChange,
     handleTemplateEditField,
+    handleTemplateEditGenerateScripts,
+    handleTemplateEditRemoveEnvVar,
+    handleTemplateEditRemoveScript,
+    handleTemplateEditScriptChange,
     handleProjectAction,
     handleProjectDragOver,
     handleProjectDrop,
@@ -5255,8 +5269,22 @@ export function DashboardApp(): JSX.Element {
         onSnapshotStatefulChange={handleSnapshotStatefulChange}
         onSnapshotSubmit={handleSnapshotSubmit}
         onTemplateCloneFieldChange={handleTemplateCloneField}
+        onTemplateCloneAddEnvVar={handleTemplateCloneAddEnvVar}
+        onTemplateCloneRemoveEnvVar={handleTemplateCloneRemoveEnvVar}
+        onTemplateCloneEnvVarChange={handleTemplateCloneEnvVarChange}
+        onTemplateCloneAddScript={handleTemplateCloneAddScript}
+        onTemplateCloneRemoveScript={handleTemplateCloneRemoveScript}
+        onTemplateCloneScriptChange={handleTemplateCloneScriptChange}
+        onTemplateCloneGenerateScripts={handleTemplateCloneGenerateScripts}
         onTemplateCloneSubmit={handleTemplateCloneSubmit}
         onTemplateEditFieldChange={handleTemplateEditField}
+        onTemplateEditAddEnvVar={handleTemplateEditAddEnvVar}
+        onTemplateEditRemoveEnvVar={handleTemplateEditRemoveEnvVar}
+        onTemplateEditEnvVarChange={handleTemplateEditEnvVarChange}
+        onTemplateEditAddScript={handleTemplateEditAddScript}
+        onTemplateEditRemoveScript={handleTemplateEditRemoveScript}
+        onTemplateEditScriptChange={handleTemplateEditScriptChange}
+        onTemplateEditGenerateScripts={handleTemplateEditGenerateScripts}
         onTemplateEditSubmit={handleEditTemplateSubmit}
       />
     </>

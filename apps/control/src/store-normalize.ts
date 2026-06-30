@@ -26,6 +26,7 @@ import type {
   VmInstance,
   VmNetworkMode,
   VmSession,
+  VmTemplateScriptRun,
   VmPortForward,
   WorkspaceProject,
 } from "../../../packages/shared/src/types.js";
@@ -35,6 +36,10 @@ import {
   buildVncSocketPath,
   buildGuacamoleSocketPath,
 } from "./desktop-session.js";
+import {
+  normalizeTemplateEnvVars,
+  normalizeTemplateScripts,
+} from "./template-scripts.js";
 import {
   type DefaultTemplateLaunchSourceOptions,
   FALLBACK_DEFAULT_TEMPLATE_LAUNCH_SOURCE,
@@ -213,6 +218,8 @@ function normalizeTemplate(
     ),
     defaultNetworkMode: normalizeVmNetworkMode(template.defaultNetworkMode),
     initCommands: normalizeTemplateInitCommands(template.initCommands),
+    envVars: normalizeTemplateEnvVars(template.envVars),
+    scripts: normalizeTemplateScripts(template.scripts),
     tags,
     notes,
     snapshotIds: Array.isArray(template.snapshotIds) ? template.snapshotIds : [],
@@ -310,6 +317,7 @@ function normalizeVm(vm: LegacyVm, projects: WorkspaceProject[]): VmInstance {
       vm.forwardedPorts,
     ),
     activityLog: Array.isArray(vm.activityLog) ? vm.activityLog : [],
+    templateScriptRuns: normalizeTemplateScriptRuns(vm.templateScriptRuns),
     commandHistory: normalizeCommandHistory(vm.commandHistory),
   };
 }
@@ -611,6 +619,43 @@ function normalizeCommandHistory(
       workspacePath: entry.workspacePath,
       createdAt: entry.createdAt,
     }));
+}
+
+function normalizeTemplateScriptRuns(
+  runs: VmInstance["templateScriptRuns"] | undefined,
+): VmTemplateScriptRun[] {
+  if (!Array.isArray(runs)) {
+    return [];
+  }
+
+  return runs
+    .filter((run): run is VmTemplateScriptRun =>
+      Boolean(run) &&
+      typeof run.scriptId === "string" &&
+      typeof run.name === "string",
+    )
+    .map((run) => ({
+      scriptId: run.scriptId.trim() || "script",
+      name: run.name.trim() || "template script",
+      status:
+        run.status === "succeeded" || run.status === "failed" || run.status === "skipped"
+          ? run.status
+          : "failed",
+      exitCode:
+        typeof run.exitCode === "number" && Number.isFinite(run.exitCode)
+          ? Math.trunc(run.exitCode)
+          : null,
+      startedAt:
+        typeof run.startedAt === "string" && run.startedAt.trim()
+          ? run.startedAt
+          : null,
+      finishedAt:
+        typeof run.finishedAt === "string" && run.finishedAt.trim()
+          ? run.finishedAt
+          : null,
+      log: typeof run.log === "string" ? run.log.slice(-256 * 1024) : "",
+    }))
+    .slice(0, 64);
 }
 
 function normalizeSession(
