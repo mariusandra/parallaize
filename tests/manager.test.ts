@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3326,6 +3327,188 @@ test("incus provider builds real lifecycle commands and VNC metadata", async () 
     publishCopyCall?.[2] ?? "",
     "--force",
   ]);
+});
+
+test("incus provider launches Ubuntu 26.04 with VNC and Selkies transports", async () => {
+  const selkiesServer = createHttpServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.end("selkies ready");
+  });
+
+  await new Promise<void>((resolve) => {
+    selkiesServer.listen(0, "127.0.0.1", () => resolve());
+  });
+
+  const selkiesAddress = selkiesServer.address();
+  assert.ok(selkiesAddress && typeof selkiesAddress === "object");
+  const selkiesPort: number = selkiesAddress.port;
+
+  try {
+    for (const transport of ["vnc", "selkies"] as const) {
+      const calls: string[][] = [];
+      const commandInputs = new Map<string[], string>();
+      const instanceName = `parallaize-vm-2604-${transport}`;
+      const guestPort = transport === "selkies" ? selkiesPort : 5900;
+      const executeResult = (args: string[]) => {
+        if (args[0] === "list" && args[1] === "--format" && args[2] === "json") {
+          return ok("[]", args);
+        }
+
+        if (args[0] === "query" && args[1] === `/1.0/instances/${instanceName}`) {
+          return expandedRootDevice(args, "osdisk");
+        }
+
+        if (args[0] === "list" && args[1] === instanceName) {
+          return ok(
+            JSON.stringify([
+              {
+                name: instanceName,
+                status: "Running",
+                state: {
+                  status: "Running",
+                  network: {
+                    enp5s0: {
+                      addresses: [
+                        {
+                          family: "inet",
+                          scope: "global",
+                          address: "127.0.0.1",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ]),
+            args,
+          );
+        }
+
+        return ok("", args);
+      };
+      const provider = createProvider("incus", "incus", {
+        commandRunner: {
+          execute(args: string[], options?: { input?: Buffer | string }) {
+            calls.push(args);
+            commandInputs.set(args, readCommandInput(options));
+            return executeResult(args);
+          },
+          async executeStreaming(
+            args: string[],
+            _listeners?: { onStdout?(chunk: string): void; onStderr?(chunk: string): void },
+            options?: { input?: Buffer | string },
+          ) {
+            calls.push(args);
+            commandInputs.set(args, readCommandInput(options));
+            return executeResult(args);
+          },
+        },
+        guestPortProbe: {
+          async probe() {
+            return true;
+          },
+        },
+        guestSelkiesPort: selkiesPort,
+      });
+
+      const template: EnvironmentTemplate = {
+        id: `tpl-2604-${transport}`,
+        name: `Ubuntu 26.04 ${transport}`,
+        description: "Verifies Ubuntu 26.04 launch transport wiring",
+        launchSource: UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE,
+        defaultResources: {
+          cpu: 2,
+          ramMb: 4096,
+          diskGb: 30,
+        },
+        defaultForwardedPorts: [],
+        initCommands: [],
+        tags: [],
+        notes: [],
+        snapshotIds: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const vm: VmInstance = {
+        id: `vm-2604-${transport}`,
+        name: `ubuntu-2604-${transport}`,
+        wallpaperName: `ubuntu-2604-${transport}`,
+        templateId: template.id,
+        provider: "incus",
+        providerRef: instanceName,
+        status: "creating",
+        resources: template.defaultResources,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        liveSince: null,
+        lastAction: "Queued",
+        snapshotIds: [],
+        frameRevision: 1,
+        screenSeed: 26,
+        activeWindow: "editor",
+        workspacePath: "/root",
+        desktopTransport: transport,
+        session: null,
+        forwardedPorts: [],
+        activityLog: [],
+      };
+
+      const mutation = await provider.createVm(vm, template);
+      const initCall = calls.find((args) => args[0] === "init");
+      const startCall = calls.find(
+        (args) => args[0] === "start" && args[1] === instanceName,
+      );
+      const cloudInitCall = calls.find(
+        (args) =>
+          args[0] === "config" &&
+          args[1] === "set" &&
+          args[2] === instanceName &&
+          args[3] === "cloud-init.user-data",
+      );
+      const cloudInit = commandInputs.get(cloudInitCall ?? []) ?? "";
+
+      assert.deepEqual(initCall?.slice(0, 4), [
+        "init",
+        UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE,
+        instanceName,
+        "--vm",
+      ]);
+      assert.ok(startCall);
+      assert.equal(mutation.session?.kind, transport);
+      assert.equal(mutation.session?.host, "127.0.0.1");
+      assert.equal(mutation.session?.port, guestPort);
+      assert.ok(
+        mutation.activity.includes(
+          `incus: launched ${instanceName} from ${UBUNTU_26_04_TEMPLATE_LAUNCH_SOURCE}`,
+        ),
+      );
+
+      if (transport === "selkies") {
+        assert.match(cloudInit, /path: \/usr\/local\/bin\/parallaize-selkies\n/);
+        assert.match(cloudInit, /parallaize-selkies\.service/);
+        assert.match(cloudInit, /ensure_selkies_bundle/);
+        assert.doesNotMatch(cloudInit, /\/usr\/local\/bin\/parallaize-x11vnc/);
+        assert.doesNotMatch(cloudInit, /parallaize-x11vnc\.service/);
+      } else {
+        assert.match(cloudInit, /path: \/usr\/local\/bin\/parallaize-x11vnc\n/);
+        assert.match(cloudInit, /parallaize-x11vnc\.service/);
+        assert.match(cloudInit, /MISSING_PACKAGES="\$MISSING_PACKAGES x11vnc"/);
+        assert.doesNotMatch(cloudInit, /path: \/usr\/local\/bin\/parallaize-selkies\n/);
+        assert.doesNotMatch(cloudInit, /parallaize-selkies\.service/);
+      }
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      selkiesServer.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+  }
 });
 
 test("incus provider treats a timed-out readiness probe as daemon-unreachable", () => {
