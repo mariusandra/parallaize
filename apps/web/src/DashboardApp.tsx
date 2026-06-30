@@ -253,12 +253,12 @@ import {
   readDesktopResolutionByVm,
   readDocumentVisible,
   readHomepageWallpaperName,
-  readSidepanelCollapsedByVm,
+  readSidepanelExpandedByVm,
   readStoredBoolean,
   readStoredNumber,
   readThemeMode,
   readViewportWidth,
-  sidepanelCollapsedByVmStorageKey,
+  sidepanelExpandedByVmStorageKey,
   sidepanelWidthStorageKey,
   themeModeStorageKey,
   writeStoredString,
@@ -561,9 +561,12 @@ export function DashboardApp(): JSX.Element {
   const [vmDiskUsage, setVmDiskUsage] = useState<VmDiskUsageSnapshot | null>(null);
   const [vmDiskUsageLoading, setVmDiskUsageLoading] = useState(false);
   const [vmDiskUsageError, setVmDiskUsageError] = useState<string | null>(null);
-  const [sidepanelCollapsedByVm, setSidepanelCollapsedByVm] = useState<
+  const [sidepanelExpandedByVm, setSidepanelExpandedByVm] = useState<
     Record<string, true>
-  >(() => readSidepanelCollapsedByVm());
+  >(() => readSidepanelExpandedByVm());
+  const [sidepanelAutoExpandedByVm, setSidepanelAutoExpandedByVm] = useState<
+    Record<string, true>
+  >({});
   const [overviewSidepanelCollapsed, setOverviewSidepanelCollapsed] = useState(() =>
     readStoredBoolean(overviewSidepanelCollapsedStorageKey, false),
   );
@@ -732,7 +735,8 @@ export function DashboardApp(): JSX.Element {
   const compactSidepanelLayout = viewportWidth <= sidepanelCompactBreakpoint;
   const sidePanelCollapsed =
     selectedVmId !== null
-      ? sidepanelCollapsedByVm[selectedVmId] === true
+      ? sidepanelExpandedByVm[selectedVmId] !== true &&
+        sidepanelAutoExpandedByVm[selectedVmId] !== true
       : overviewSidepanelCollapsed;
   const effectiveSidePanelCollapsed =
     selectedVmId !== null ? sidePanelCollapsed : wideShellLayout && sidePanelCollapsed;
@@ -1695,6 +1699,7 @@ export function DashboardApp(): JSX.Element {
     setCurrentSidepanelCollapsed,
     setProjectCollapsed,
     setVmDesktopResolutionPreference,
+    setVmSidepanelAutoExpanded,
     setVmSidepanelCollapsed,
     toggleProjectCollapsed,
     toggleProjectMenu,
@@ -1775,7 +1780,8 @@ export function DashboardApp(): JSX.Element {
     setOpenTemplateMenuId,
     setSelectedVmId,
     setCollapsedProjects,
-    setSidepanelCollapsedByVm,
+    setSidepanelExpandedByVm,
+    setSidepanelAutoExpandedByVm,
     setOverviewSidepanelCollapsed,
     setDesktopResolutionByVm,
     setResolutionDraft,
@@ -1865,6 +1871,16 @@ export function DashboardApp(): JSX.Element {
 
   useEffect(() => {
     selectedVmIdRef.current = selectedVmId;
+  }, [selectedVmId]);
+
+  useEffect(() => {
+    setSidepanelAutoExpandedByVm((current) => {
+      if (selectedVmId && current[selectedVmId]) {
+        return Object.keys(current).length === 1 ? current : { [selectedVmId]: true };
+      }
+
+      return Object.keys(current).length === 0 ? current : {};
+    });
   }, [selectedVmId]);
 
   useEffect(() => {
@@ -3575,10 +3591,10 @@ export function DashboardApp(): JSX.Element {
 
   useEffect(() => {
     writeStoredString(
-      sidepanelCollapsedByVmStorageKey,
-      JSON.stringify(sidepanelCollapsedByVm),
+      sidepanelExpandedByVmStorageKey,
+      JSON.stringify(sidepanelExpandedByVm),
     );
-  }, [sidepanelCollapsedByVm]);
+  }, [sidepanelExpandedByVm]);
 
   useEffect(() => {
     writeStoredString(
@@ -4694,7 +4710,7 @@ export function DashboardApp(): JSX.Element {
           `/api/vms/${vm.id}/snapshots/${snapshot.id}/launch`,
           payload,
         );
-        setVmSidepanelCollapsed(createdVm.id, false);
+        setVmSidepanelAutoExpanded(createdVm.id);
         setSelectedVmId(createdVm.id);
         await refreshSummary();
         await refreshDetail(createdVm.id);

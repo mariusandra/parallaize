@@ -753,6 +753,32 @@ test("authenticated clients can fetch latest release metadata through the contro
   });
 });
 
+test("clients can fetch current release metadata without auth", async (context) => {
+  const packageVersion = readPackageVersion();
+  const { port } = await startServer(context, {
+    adminPassword: "change-me",
+    tempDirPrefix: "parallaize-server-current-version-",
+  });
+
+  const releaseResponse = await sendRequest(port, {
+    path: "/api/version/current",
+    method: "GET",
+    headers: {
+      accept: "application/json",
+    },
+  });
+
+  assert.equal(releaseResponse.statusCode, 200);
+  assert.deepEqual(JSON.parse(releaseResponse.body), {
+    ok: true,
+    data: {
+      version: packageVersion,
+      packageRelease: "1",
+      packageLabel: `${packageVersion}-1`,
+    },
+  });
+});
+
 test("logout clears the session so refresh returns to the login flow", async (context) => {
   const { port } = await startServer(context, {
     adminPassword: "change-me",
@@ -1119,6 +1145,10 @@ function extractCookieHeader(response: IncomingMessage): string {
   }
 
   return header.split(";", 1)[0];
+}
+
+function readPackageVersion(): string {
+  return (JSON.parse(readFileSync("package.json", "utf8")) as { version: string }).version;
 }
 
 async function reservePort(): Promise<number> {

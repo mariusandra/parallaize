@@ -10,6 +10,7 @@ export const resolutionControlClientIdStorageKey =
   "parallaize.resolution-control-client-id";
 export const sidepanelWidthStorageKey = "parallaize.sidepanel-width";
 export const sidepanelCollapsedByVmStorageKey = "parallaize.sidepanel-collapsed-vms";
+export const sidepanelExpandedByVmStorageKey = "parallaize.sidepanel-expanded-vms";
 export const collapsedProjectsStorageKey = "parallaize.collapsed-projects";
 export const homepageWallpaperStorageKey = "parallaize.homepage-wallpaper";
 
@@ -111,7 +112,15 @@ export function readViewportWidth(): number {
 }
 
 export function readSidepanelCollapsedByVm(): Record<string, true> {
-  const stored = readStoredString(sidepanelCollapsedByVmStorageKey);
+  return readVmFlagMap(sidepanelCollapsedByVmStorageKey);
+}
+
+export function readSidepanelExpandedByVm(): Record<string, true> {
+  return readVmFlagMap(sidepanelExpandedByVmStorageKey);
+}
+
+function readVmFlagMap(storageKey: string): Record<string, true> {
+  const stored = readStoredString(storageKey);
 
   if (!stored) {
     return {};

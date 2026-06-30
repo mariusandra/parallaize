@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { parseLatestReleaseMetadata } from "../apps/control/src/server-release.js";
+import { resolveCurrentReleaseMetadata } from "../apps/control/src/server-version.js";
 
 test("parseLatestReleaseMetadata accepts a valid release payload", () => {
   assert.deepEqual(
@@ -49,3 +51,17 @@ test("parseLatestReleaseMetadata rejects malformed version and package release v
     null,
   );
 });
+
+test("resolveCurrentReleaseMetadata falls back to package metadata", () => {
+  const packageVersion = readPackageVersion();
+
+  assert.deepEqual(resolveCurrentReleaseMetadata(process.cwd()), {
+    version: packageVersion,
+    packageRelease: "1",
+    packageLabel: `${packageVersion}-1`,
+  });
+});
+
+function readPackageVersion(): string {
+  return (JSON.parse(readFileSync("package.json", "utf8")) as { version: string }).version;
+}

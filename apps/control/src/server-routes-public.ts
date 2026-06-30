@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { AuthStatus } from "../../../packages/shared/src/types.js";
+import type { AuthStatus, CurrentReleaseMetadata } from "../../../packages/shared/src/types.js";
 import { createServerAuth } from "./server-auth.js";
 import { resolveAsset, serveFile, writeJson } from "./server-http.js";
 
 interface HandlePublicRouteOptions {
   auth: ReturnType<typeof createServerAuth>;
+  currentReleaseMetadata: CurrentReleaseMetadata;
   faviconPath: string;
   htmlPath: string;
   method: string;
@@ -17,6 +18,7 @@ interface HandlePublicRouteOptions {
 
 export async function handlePublicRoute({
   auth,
+  currentReleaseMetadata,
   faviconPath,
   htmlPath,
   method,
@@ -36,6 +38,14 @@ export async function handlePublicRoute({
     writeJson<AuthStatus>(response, 200, {
       ok: true,
       data: authContext.status,
+    });
+    return true;
+  }
+
+  if (method === "GET" && url.pathname === "/api/version/current") {
+    writeJson<CurrentReleaseMetadata>(response, 200, {
+      ok: true,
+      data: currentReleaseMetadata,
     });
     return true;
   }

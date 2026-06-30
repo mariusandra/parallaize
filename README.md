@@ -21,6 +21,7 @@ It is built around a simple loop: launch a VM, configure it the way you want, th
 
 - `apps/control`: Node.js control plane, Incus integration, and persistence CLI
 - `apps/web`: React dashboard and browser desktop clients
+- `apps/desktop`: native macOS desktop wrapper that connects to remote servers through SSH
 - `packages/shared`: shared API and domain types
 - `scripts/`: build, smoke, package, and release entrypoints
 - `packaging/`: package-only launchers, systemd units, maintainer scripts, and config defaults
@@ -219,6 +220,20 @@ flox activate -d . -- pnpm package:release
 ```
 
 See [docs/packaging.md](docs/packaging.md) for package contents and host-install layout, and [docs/apt-repository.md](docs/apt-repository.md) for the signed Ubuntu 24.04 APT source and key flow.
+
+## macOS Desktop App
+
+The lightweight desktop app lives in `apps/desktop`. It uses the system `ssh`
+binary to probe, set up, tunnel to, and load a remote Parallaize server in a
+native WKWebView.
+
+```bash
+flox activate -d . -- bash scripts/build-macos-app.sh
+```
+
+The app bundle is written to `artifacts/macos/Parallaize.app`. See
+[docs/desktop-macos.md](docs/desktop-macos.md) for setup behavior and remote
+host requirements.
 
 The packaged `/etc/parallaize/Caddyfile` is generated from [infra/Caddyfile](infra/Caddyfile) during the package build so the source-checkout and packaged route maps stay aligned.
 

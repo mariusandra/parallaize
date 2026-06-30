@@ -509,6 +509,12 @@ export interface LatestReleaseMetadata {
   packageLabel: string;
 }
 
+export interface CurrentReleaseMetadata {
+  version: string;
+  packageRelease: string;
+  packageLabel: string;
+}
+
 export interface ApiEnvelope<T> {
   ok: true;
   data: T;

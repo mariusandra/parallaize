@@ -172,7 +172,8 @@ interface DashboardAppMutationsContext {
   setOpenTemplateMenuId: SetState<string | null>;
   setSelectedVmId: SetState<string | null>;
   setCollapsedProjects: SetState<Record<string, true>>;
-  setSidepanelCollapsedByVm: SetState<Record<string, true>>;
+  setSidepanelExpandedByVm: SetState<Record<string, true>>;
+  setSidepanelAutoExpandedByVm: SetState<Record<string, true>>;
   setOverviewSidepanelCollapsed: SetState<boolean>;
   setDesktopResolutionByVm: SetState<Record<string, DesktopResolutionPreference>>;
   setResolutionDraft: SetState<ResolutionDraft>;
@@ -263,7 +264,8 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setOpenTemplateMenuId,
     setSelectedVmId,
     setCollapsedProjects,
-    setSidepanelCollapsedByVm,
+    setSidepanelExpandedByVm,
+    setSidepanelAutoExpandedByVm,
     setOverviewSidepanelCollapsed,
     setDesktopResolutionByVm,
     setResolutionDraft,
@@ -553,7 +555,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
         } else {
           setCreateDraft(buildCreateDraftFromTemplate(selectedSource.template));
         }
-        setVmSidepanelCollapsed(createdVm.id, false);
+        setVmSidepanelAutoExpanded(createdVm.id);
         setSelectedVmId(createdVm.id);
         setShowCreateDialog(false);
         await refreshSummary();
@@ -1182,9 +1184,34 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     );
   }
 
+  function setVmSidepanelAutoExpanded(vmId: string): void {
+    setSidepanelAutoExpandedByVm((current) => {
+      if (current[vmId]) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [vmId]: true,
+      };
+    });
+  }
+
   function setVmSidepanelCollapsed(vmId: string, collapsed: boolean): void {
-    setSidepanelCollapsedByVm((current) => {
-      if (collapsed) {
+    if (collapsed) {
+      setSidepanelAutoExpandedByVm((current) => {
+        if (!current[vmId]) {
+          return current;
+        }
+
+        const next = { ...current };
+        delete next[vmId];
+        return next;
+      });
+    }
+
+    setSidepanelExpandedByVm((current) => {
+      if (!collapsed) {
         if (current[vmId]) {
           return current;
         }
@@ -1921,7 +1948,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
         if (clone.projectId) {
           setProjectCollapsed(clone.projectId, false);
         }
-        setVmSidepanelCollapsed(clone.id, false);
+        setVmSidepanelAutoExpanded(clone.id);
         setSelectedVmId(clone.id);
         await refreshSummary();
         await refreshDetail(clone.id);
@@ -2069,6 +2096,7 @@ export function createDashboardAppMutations(context: DashboardAppMutationsContex
     setCurrentSidepanelCollapsed,
     setProjectCollapsed,
     setVmDesktopResolutionPreference,
+    setVmSidepanelAutoExpanded,
     setVmSidepanelCollapsed,
     toggleProjectCollapsed,
     toggleProjectMenu,

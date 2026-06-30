@@ -16,11 +16,13 @@ import { handleSystemRoute } from "./server-routes-system.js";
 import { createVmStreamHealthServer } from "./server-stream-health.js";
 import { handleTemplateRoute } from "./server-routes-templates.js";
 import { handleVmRoute } from "./server-routes-vms.js";
+import { resolveCurrentReleaseMetadata } from "./server-version.js";
 import { createSeedState } from "./seed.js";
 import { createStateStore } from "./store.js";
 import { loadOrCreateStreamHealthSecret } from "./stream-health.js";
 
 const config = loadConfig();
+const currentReleaseMetadata = resolveCurrentReleaseMetadata(config.appHome);
 const streamHealthSecret = loadOrCreateStreamHealthSecret(
   join(dirname(config.dataFile), "stream-health.secret"),
 );
@@ -88,6 +90,7 @@ const server = createServer(async (request, response) => {
     if (
       await handlePublicRoute({
         auth,
+        currentReleaseMetadata,
         faviconPath,
         htmlPath,
         method,

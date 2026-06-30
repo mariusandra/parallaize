@@ -1,6 +1,6 @@
 # Parallaize TODO
 
-Last updated: 2026-04-27
+Last updated: 2026-06-24
 
 This file tracks unresolved work only. Shipped behavior belongs in docs and git history.
 
@@ -15,6 +15,7 @@ Completed implementation details now live in:
 - `docs/template-prep.md`
 - `docs/postgres-operations.md`
 - `docs/packaging.md`
+- `docs/desktop-macos.md`
 - `docs/apt-repository.md`
 - `docs/refactor-map.md`
 
@@ -24,3 +25,4 @@ Completed implementation details now live in:
 - [ ] Run one full host reboot validation on the live machine and compare cold restart-to-picture timing against the in-process host-process restart benchmark.
 - [ ] Audit all Docker-published ports on the live host and keep `DOCKER-USER` policy aligned with the intended UFW exposure model.
 - [ ] Add to the installation instructions how to get incus running on a macos; brew install colima; colima start --runtime incus
+- [ ] Add Keychain-backed credential storage if the desktop app needs to support password-based SSH or interactive sudo prompts.
